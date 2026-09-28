@@ -1,0 +1,345 @@
+<title>Worldline G1 Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column (~72ch) with wide tables/diagrams allowed to scroll inside their own frames. */
+:root {
+  --bg: #f5f6f8;          /* cool paper */
+  --surface: #ffffff;
+  --ink: #17202b;
+  --muted: #5b6776;
+  --rule: #d9dee5;
+  --accent: #c2410c;      /* signal orange: headings rules, links */
+  --p1: #0f766e;          /* Isaac (sim) */
+  --p2: #4338ca;          /* SONIC (controller) */
+  --p3: #b45309;          /* body (drive API) */
+  --viz: #0369a1;
+  --future: #7c3aed;
+  --ok: #15803d; --ok-bg: #dcfce7;
+  --warn: #a16207; --warn-bg: #fef3c7;
+  --bad: #b91c1c; --bad-bg: #fee2e2;
+  --todo: #475569; --todo-bg: #e2e8f0;
+  --code-bg: #eef1f5;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141a; --surface: #161d25; --ink: #e6ebf1; --muted: #9aa7b5; --rule: #2a3440;
+    --accent: #fb923c; --p1: #2dd4bf; --p2: #a5b4fc; --p3: #fbbf24; --viz: #7dd3fc; --future: #c4b5fd;
+    --ok: #4ade80; --ok-bg: #12301f; --warn: #facc15; --warn-bg: #33290d; --bad: #f87171; --bad-bg: #3a1517;
+    --todo: #cbd5e1; --todo-bg: #25303c; --code-bg: #1d2630; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f141a; --surface: #161d25; --ink: #e6ebf1; --muted: #9aa7b5; --rule: #2a3440;
+  --accent: #fb923c; --p1: #2dd4bf; --p2: #a5b4fc; --p3: #fbbf24; --viz: #7dd3fc; --future: #c4b5fd;
+  --ok: #4ade80; --ok-bg: #12301f; --warn: #facc15; --warn-bg: #33290d; --bad: #f87171; --bad-bg: #3a1517;
+  --todo: #cbd5e1; --todo-bg: #25303c; --code-bg: #1d2630; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); }
+.page { max-width: 980px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 72px; display: grid; gap: 44px; }
+.prose { max-width: 72ch; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; line-height: 1.15; margin: 0; }
+h1 { font-size: clamp(30px, 5vw, 44px); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 24px; font-weight: 600; padding-top: 12px; border-top: 2px solid var(--accent); display: inline-block; }
+h3 { font-size: 17px; font-weight: 600; }
+p { margin: 0; }
+section { display: grid; gap: 16px; min-width: 0; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 17px; color: var(--ink); max-width: 72ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: 13px; }
+.meta b { color: var(--ink); font-weight: 600; }
+code, .mono { font-family: var(--mono); font-size: 0.88em; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+a { color: var(--accent); }
+.frame { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px; overflow-x: auto; min-width: 0; }
+.frame pre.mermaid { margin: 0; min-width: 640px; }
+.caption { font-size: 13px; color: var(--muted); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+th { font: 600 12px/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+td.num, th.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.scroll { overflow-x: auto; min-width: 0; }
+.scroll table { min-width: 640px; }
+.procs { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 14px; }
+.proc { background: var(--surface); border: 1px solid var(--rule); border-top: 4px solid var(--c, var(--rule)); border-radius: 8px; padding: 14px 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.proc h3 { color: var(--c); }
+.proc .where { font: 12px/1.4 var(--mono); color: var(--muted); }
+.proc ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font: 600 11px/1 var(--mono); letter-spacing: 0.04em; text-transform: uppercase; padding: 5px 8px; border-radius: 999px; white-space: nowrap; justify-self: start; }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ok { color: var(--ok); background: var(--ok-bg); }
+.warn { color: var(--warn); background: var(--warn-bg); }
+.bad { color: var(--bad); background: var(--bad-bg); }
+.todo { color: var(--todo); background: var(--todo-bg); }
+ol.steps { margin: 0; padding-left: 22px; display: grid; gap: 8px; max-width: 78ch; }
+ol.steps li::marker { font-family: var(--mono); color: var(--accent); }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+.two > * { min-width: 0; }
+.note { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; color: var(--ink); }
+.log { display: grid; gap: 10px; }
+.log .entry { display: grid; grid-template-columns: 110px 1fr; gap: 12px; }
+.log time { font: 500 13px/1.6 var(--mono); color: var(--muted); }
+@media (max-width: 560px) { .log .entry { grid-template-columns: 1fr; gap: 2px; } }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; font-size: 13px; color: var(--muted); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+</style>
+
+<main class="page">
+
+<header style="display:grid; gap:14px">
+  <span class="eyebrow">Worldline on Unitree G1 · living architecture</span>
+  <h1>Worldline G1 Architecture</h1>
+  <p class="lede">How GEAR-SONIC, Isaac Sim, the ProcTHOR house and our drive API fit together to make a simulated Unitree G1 walk through a home, and where Worldline and GR00T plug in next.</p>
+  <div class="meta">
+    <span>Revision <b>r1</b></span>
+    <span>Updated <b>2026-09-28</b></span>
+    <span>Milestone <b>M1 · SONIC G1 walking in a house</b></span>
+    <span>Box <b>Brev ludo-g1-brev2 · 1× L40S</b></span>
+  </div>
+</header>
+
+<section>
+  <h2>At a glance</h2>
+  <p class="prose">Everything runs on one GPU box as three processes that talk only over sockets, the way they would on a real robot. <b>Isaac Sim</b> simulates the G1 and a ProcTHOR house, and pretends to be the robot's hardware. <b>SONIC</b>, NVIDIA's whole-body controller, is the unmodified C++ binary a real G1 runs; it turns "walk this way" into 29 joint commands 50 times a second. <b>wl-body</b> is ours: it plans paths through the house and exposes the drive API (<code>stand</code>, <code>walk</code>, <code>go_to</code>, <code>turn_to</code>, <code>stop</code>). The simulator's ground truth (poses, rooms, objects, occupancy) is available to the robot layer, the same way ProcTHOR's metadata was on AI2-THOR.</p>
+  <div class="legend">
+    <span><i class="swatch" style="background:var(--p3)"></i>P3 wl-body · ours</span>
+    <span><i class="swatch" style="background:var(--p2)"></i>P2 SONIC deploy · NVIDIA, unmodified</span>
+    <span><i class="swatch" style="background:var(--p1)"></i>P1 wl-isaac · ours, wraps Isaac Sim</span>
+    <span><i class="swatch" style="background:var(--viz)"></i>viz · recorder + browser stream</span>
+    <span><i class="swatch" style="background:var(--future)"></i>next · Worldline, GR00T</span>
+  </div>
+</section>
+
+<section>
+  <h2>System diagram</h2>
+  <div class="frame">
+<pre class="mermaid">
+flowchart TB
+  subgraph LAPTOP["Laptop"]
+    USER["You · test harness · later Worldline"]
+    BROWSER["Browser console :8765"]
+  end
+  subgraph BOX["Brev box · 1x L40S · 16 vCPU"]
+    subgraph P3["P3 wl-body · Python · ours"]
+      API["Drive API · ROUTER :5610 / events PUB :5611<br/>stand · walk · go_to · turn_to · stop"]
+      PF["PathFollower<br/>A* on occupancy + pure pursuit"]
+      MUX["SonicMux<br/>only sender to SONIC · resends at 50 Hz"]
+      API --> PF --> MUX
+    end
+    subgraph P2["P2 gear_sonic_deploy · C++ TensorRT 10.13 · unmodified"]
+      KP["Kinematic planner · 10 Hz<br/>walk command to reference motion"]
+      POL["SONIC policy · 50 Hz<br/>29 joint targets + gains"]
+      KP --> POL
+    end
+    subgraph P1["P1 wl-isaac · Isaac Sim 5.1 headless · ours"]
+      BR["G1 DDS bridge · 200 Hz<br/>tau + kp(q*-q) + kd(dq*-dq)"]
+      PHYS["Isaac physics<br/>G1 29 DoF + Dex3 · SONIC training URDF"]
+      HOUSE["ProcTHOR house<br/>MolmoSpaces USD · rooms · objects"]
+      GT["Ground truth<br/>PUB :5601 gt.pose · REP :5600 scene/occupancy/band"]
+      CAM["Cameras<br/>head :5565 · chase :5602"]
+      BR --> PHYS
+      HOUSE --- PHYS
+      PHYS --> GT
+      PHYS --> CAM
+    end
+    VIZ["viz · recorder + web server"]
+  end
+  USER -- "ssh tunnel" --> API
+  MUX -- "ZMQ :5556 command / planner" --> KP
+  POL -- "DDS rt/lowcmd" --> BR
+  PHYS -- "DDS rt/lowstate + IMU · 200 Hz" --> POL
+  POL -- "ZMQ :5557 g1_debug" --> MUX
+  GT -- "pose · occupancy" --> PF
+  CAM --> VIZ
+  GT --> VIZ
+  VIZ -- "ssh tunnel" --> BROWSER
+  classDef p1 stroke:#0f766e,stroke-width:2px;
+  classDef p2 stroke:#4338ca,stroke-width:2px;
+  classDef p3 stroke:#b45309,stroke-width:2px;
+  classDef viz stroke:#0369a1,stroke-width:2px;
+  class BR,PHYS,HOUSE,GT,CAM p1;
+  class KP,POL p2;
+  class API,PF,MUX p3;
+  class VIZ viz;
+</pre>
+  </div>
+  <p class="caption">Arrows are real sockets. DDS topics use the same Unitree <code>unitree_hg</code> message types as a physical G1, so swapping Isaac for real hardware changes only the network interface.</p>
+</section>
+
+<section>
+  <h2>Components</h2>
+  <div class="procs">
+    <article class="proc" style="--c:var(--p1)">
+      <h3>P1 · wl-isaac</h3>
+      <span class="where">sim_isaac/ · /work/envs/isaaclab (py3.11)</span>
+      <ul>
+        <li>Isaac Sim 5.1 standalone app, headless, 200 Hz physics (CPU PhysX)</li>
+        <li>G1 from SONIC's training URDF with Dex3 hands made revolute, actuator parity with training</li>
+        <li>DDS bridge: publishes <code>rt/lowstate</code>, <code>rt/secondary_imu</code>, Dex3 state; applies <code>rt/lowcmd</code></li>
+        <li>Real-time pacer, lowstate heartbeat, elastic band for hand-over</li>
+        <li>Ground-truth server and head/chase cameras</li>
+      </ul>
+      <span class="pill ok">Working alone · RTF 0.97–1.0</span>
+    </article>
+    <article class="proc" style="--c:var(--p2)">
+      <h3>P2 · gear_sonic_deploy</h3>
+      <span class="where">sonic/ · WBC @ b042411 · TensorRT 10.13.3.9</span>
+      <ul>
+        <li>NVIDIA's controller binary, unmodified; <code>zmq_manager</code> input, sim mode on <code>lo</code></li>
+        <li>Kinematic planner (10 Hz) plus SONIC encoder/decoder policy (50 Hz)</li>
+        <li>Runs on wall-clock time; exits if lowstate is absent for 500 ms</li>
+      </ul>
+      <span class="pill warn">Stands · walking falls in MuJoCo ref</span>
+    </article>
+    <article class="proc" style="--c:var(--p3)">
+      <h3>P3 · wl-body</h3>
+      <span class="where">body/ · /work/worldline-g1/.venv (py3.11)</span>
+      <ul>
+        <li>Drive API and <code>BodyClient</code>; one motion at a time, newer commands pre-empt</li>
+        <li>A* on the 5 cm occupancy grid, pure pursuit, stuck and arrival detection</li>
+        <li>SonicMux: byte-exact port of upstream message framing; converts world directions to SONIC's planner frame</li>
+      </ul>
+      <span class="pill ok">Written · tested on fakes</span>
+    </article>
+    <article class="proc" style="--c:var(--p1)">
+      <h3>Scene · ProcTHOR houses</h3>
+      <span class="where">scenes/ · AllenAI MolmoSpaces USD</span>
+      <ul>
+        <li>The same procthor-10k-train houses Worldline used on AI2-THOR (tested: 15, 38, 59, iTHOR FloorPlan10)</li>
+        <li>Semantic labels, rooms, objects with category and room id</li>
+        <li>Occupancy grid 0.05 m, obstacles 0.1–1.6 m, spawn pose; loads in ~16 s</li>
+      </ul>
+      <span class="pill ok">Loading and rendering</span>
+    </article>
+    <article class="proc" style="--c:var(--viz)">
+      <h3>viz · recorder + stream</h3>
+      <span class="where">viz/ · web server 127.0.0.1:8765</span>
+      <ul>
+        <li>Head, chase and top-down views as JPEG over ZMQ</li>
+        <li>Recorder: per-view mp4, 2×2 composite with overlays, contact sheet, telemetry</li>
+        <li>Browser console with live views, telemetry and drive buttons, through the SSH tunnel</li>
+      </ul>
+      <span class="pill todo">Building</span>
+    </article>
+    <article class="proc" style="--c:var(--future)">
+      <h3>Next · Worldline + GR00T</h3>
+      <span class="where">M2 onward · see PLAN.md</span>
+      <ul>
+        <li>Worldline runtime on top of <code>BodyClient</code>; tools per the Ludi-style API</li>
+        <li>GR00T N1.7 sends SONIC motion tokens through the same SonicMux</li>
+        <li>System 1 reads the head camera stream</li>
+      </ul>
+      <span class="pill todo">After M1</span>
+    </article>
+  </div>
+</section>
+
+<section>
+  <h2>How a <code>go_to(x, y)</code> happens</h2>
+  <div class="frame">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant C as BodyClient
+  participant B as P3 wl-body
+  participant S as P2 SONIC
+  participant I as P1 Isaac
+  C->>B: go_to(x, y) on :5610
+  B->>I: get_occupancy on :5600
+  I-->>B: 5 cm grid of the house
+  B->>B: A* path, then pure pursuit
+  loop every 20 ms until arrival
+    I-->>B: gt.pose on :5601
+    B->>S: planner {mode, movement, facing, speed} on :5556
+    S->>S: planner 10 Hz, policy 50 Hz
+    S->>I: rt/lowcmd: 29 joint targets + gains
+    I->>I: 4 physics steps at 200 Hz
+    I-->>S: rt/lowstate + IMU
+  end
+  B-->>C: succeeded {pos_err, yaw_err} or failed {no_path, stuck, fallen}
+</pre>
+  </div>
+</section>
+
+<section class="two">
+  <div style="display:grid; gap:14px">
+    <h2>Start-up and stopping</h2>
+    <ol class="steps">
+      <li>P1 starts with the robot held by the elastic band and prints <code>WL_ISAAC_READY</code> once lowstate is flowing.</li>
+      <li>P2 starts, connects to lowstate and waits (<code>Init Done</code>).</li>
+      <li><code>stand</code> sends <code>command{start}</code>, holds planner IDLE, releases the band over 1 s and checks the pelvis stays at 0.55–1.0 m.</li>
+      <li><code>walk</code>, <code>turn_to</code> and <code>go_to</code> send planner commands at 50 Hz.</li>
+      <li><code>stop</code> is planner IDLE: SONIC keeps balancing.</li>
+      <li>Shutdown re-engages the band, then sends <code>command{stop}</code>, which makes the deploy damp and exit.</li>
+    </ol>
+  </div>
+  <div style="display:grid; gap:14px">
+    <h2>Hard constraints</h2>
+    <p class="note"><b>Real time.</b> SONIC runs on the wall clock, so Isaac must simulate at least as fast as real time (RTF ≥ 1). A heartbeat re-sends the last lowstate if a render stalls, because 500 ms without it ends the deploy.</p>
+    <p class="note"><b>Never <code>command{stop}</code> for a user stop.</b> It collapses the robot and the deploy process exits; only a restart recovers.</p>
+    <p class="note"><b>One sender to SONIC.</b> Port 5556 has a single binder (SonicMux). Navigation and, later, GR00T manipulation take turns through it.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Rates and timing</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Loop</th><th class="num">Rate</th><th>Where</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Physics + <code>rt/lowstate</code></td><td class="num">200 Hz</td><td>P1</td><td>dt 0.005 s, as in SONIC training</td></tr>
+        <tr><td>SONIC policy · <code>g1_debug</code></td><td class="num">50 Hz</td><td>P2</td><td>measured 50.3 Hz in the MuJoCo reference</td></tr>
+        <tr><td><code>rt/lowcmd</code> writes</td><td class="num">≈500 Hz</td><td>P2</td><td>leg targets change at ~52 Hz</td></tr>
+        <tr><td>Kinematic planner</td><td class="num">10 Hz</td><td>P2</td><td>1 s without a planner message returns to IDLE</td></tr>
+        <tr><td>Planner resend</td><td class="num">50 Hz</td><td>P3</td><td>unchanged commands reuse identical values to avoid re-plans</td></tr>
+        <tr><td><code>gt.pose</code></td><td class="num">≥50 Hz</td><td>P1</td><td>stale after 0.5 s: active op fails <code>pose_stale</code></td></tr>
+        <tr><td>Head camera</td><td class="num">30 Hz</td><td>P1</td><td>640×480, gear_sonic sensor_server format</td></tr>
+        <tr><td>Real-time factor</td><td class="num">0.97–1.0</td><td>P1</td><td>measured: empty scene, camera on; house + stack not yet measured</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Ports</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Port / topic</th><th>Binder</th><th>Carries</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">DDS domain 0 · lo</td><td>P1 ⇄ P2</td><td><code>rt/lowstate</code>, <code>rt/secondary_imu</code>, <code>rt/odostate</code>, <code>rt/dex3/*/state</code> ← P1 · <code>rt/lowcmd</code>, <code>rt/dex3/*/cmd</code> ← P2</td></tr>
+        <tr><td class="mono">:5600 REP</td><td>P1</td><td>ping, get_pose, get_scene_info, get_occupancy, band, reset_robot, get_stats, render_topdown</td></tr>
+        <tr><td class="mono">:5601 PUB</td><td>P1</td><td><code>gt.pose</code>: position, orientation, velocities, pelvis height, fallen, foot contacts, RTF</td></tr>
+        <tr><td class="mono">:5565 PUB</td><td>P1</td><td>head camera <code>ego_view</code> (5555 is taken by DCGM on the box)</td></tr>
+        <tr><td class="mono">:5602 PUB</td><td>P1</td><td>chase / top-down frames for viz</td></tr>
+        <tr><td class="mono">:5556 PUB</td><td>P3</td><td>SONIC input: <code>command</code>, <code>planner</code>, later <code>pose</code> tokens</td></tr>
+        <tr><td class="mono">:5557 PUB</td><td>P2</td><td><code>g1_debug</code>: planner frame, joints, deploy liveness</td></tr>
+        <tr><td class="mono">:5610 / :5611</td><td>P3</td><td>drive API requests / events and 5 Hz body state</td></tr>
+        <tr><td class="mono">:8765 HTTP</td><td>viz</td><td>browser console, reached with <code>00_infra/tunnel.sh 8765</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Status log</h2>
+  <div class="log">
+    <div class="entry"><time>2026-09-28</time><p><b>r1.</b> Released SONIC checkpoint evaluated in Isaac Lab on the L40S: 8 G1s, success 1.0, 3.9 GB VRAM. Deploy built with TensorRT 10.13; in its MuJoCo reference it starts control at 50 Hz and stands 15 s, but walking tests fall (moving at 1.7 m/s, heading-frame mismatch). Isaac bridge publishes lowstate at 200 Hz with RTF 0.97–1.0 in an empty scene. ProcTHOR houses 15/38/59 and iTHOR FloorPlan10 load with occupancy and room labels. Drive API written and tested on fakes. Integration not started.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Sources</h2>
+  <ul class="prose" style="margin:0; padding-left:18px; display:grid; gap:4px; color:var(--muted); font-size:14px">
+    <li><code>worldline-g1/docs/contracts/m1.md</code>: interfaces between P1, P2 and P3, with upstream file references</li>
+    <li><code>worldline-g1/docs/contracts/sonic_deploy.md</code>: deploy timing, start sequence and DDS expectations</li>
+    <li><code>worldline-g1/PLAN.md</code>: full Worldline-on-G1 plan, §0 owner decisions</li>
+    <li>NVlabs GR00T-WholeBodyControl @ b042411 · Isaac Lab v2.3.2 · Isaac Sim 5.1.0 · AllenAI MolmoSpaces</li>
+  </ul>
+</section>
+
+</main>
