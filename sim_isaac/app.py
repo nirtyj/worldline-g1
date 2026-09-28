@@ -36,6 +36,8 @@ def parse_args():
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--house", default="empty", help="house id for scenes/loader.py, or 'empty'")
+    ap.add_argument("--house-dynamic", choices=["keep", "kinematic"], default=None,
+                    help="scenes.loader dynamic_objects option (kinematic = loose props frozen)")
     ap.add_argument("--physics-hz", type=float, default=200.0)
     ap.add_argument("--physx-device", choices=["cpu", "cuda"], default="cpu",
                     help="PhysX pipeline: cpu (default, lowest latency for 1 robot) or cuda (GPU pipeline)")
@@ -98,6 +100,14 @@ class App:
 
         self.torch = torch
         self.dt = 1.0 / a.physics_hz
+        # bind the ZMQ server sockets first: fail fast if another instance holds the ports
+        import zmq
+
+        from sim_isaac.gt_server import GtServer
+        off = a.port_offset
+        self.ports = {k: v + off for k, v in BASE_PORTS.items()}
+        self.zctx = zmq.Context.instance()
+        self.gt = GtServer(self.zctx, self.ports["rep"], self.ports["gt_pub"], log=self.log)
         sim_cfg = sim_utils.SimulationCfg(
             dt=self.dt, render_interval=1, device=a.device, enable_scene_query_support=True,
             # ground contact material used in training: modular_tracking_env_cfg.py:319-330, :971
@@ -112,7 +122,9 @@ class App:
         self.stage = omni.usd.get_context().get_stage()
 
         t0 = time.perf_counter()
-        self.scene = build_scene(self.stage, a.house, log=self.log, default_lights=not a.no_default_lights)
+        lk = {"dynamic_objects": a.house_dynamic} if a.house_dynamic else {}
+        self.scene = build_scene(self.stage, a.house, log=self.log, default_lights=not a.no_default_lights,
+                                 loader_kwargs=lk)
         self.scene_load_s = time.perf_counter() - t0
         self.floor_z = self.scene.floor_z
         if a.spawn:
@@ -204,16 +216,24 @@ class App:
                      f"ego frame {None if img is None else img.shape}")
         else:
             self.warmup_s = 0.0
+        # pre-render the top-down image once while the band holds the robot (render_topdown then only copies it)
+        self.topdown_cache = None
+        if self.a.enable_cameras:
+            try:
+                from sim_isaac.camera import render_topdown
+                Path(a.out_dir).mkdir(parents=True, exist_ok=True)
+                self.topdown_cache = render_topdown(self.sim, self.stage, self.scene.bounds,
+                                                    str(Path(a.out_dir) / f"_topdown_{self.scene.house_id}.png"))
+                self.log(f"top-down cached: {self.topdown_cache}")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"top-down pre-render failed: {e}")
 
         # zmq
         import zmq
 
         from sim_isaac.camera import FramePublisher
         from sim_isaac.gt_server import GtServer
-        off = a.port_offset
-        self.ports = {k: v + off for k, v in BASE_PORTS.items()}
-        self.zctx = zmq.Context.instance()
-        self.gt = GtServer(self.zctx, self.ports["rep"], self.ports["gt_pub"], log=self.log)
+
         self.cam_pub = FramePublisher(self.zctx, self.ports["camera"], "ego_view") if self.capture else None
         self.frames_pub = FramePublisher(self.zctx, self.ports["frames_pub"], "tp", mode="multipart",
                                          topic=b"frame.tp") if self.chase else None
@@ -226,16 +246,18 @@ class App:
         self.step_stats = DurationStats()
         self.render_stats = DurationStats(600)
         self.render_rate = RollingRate(2.0)
+        self.lowstate_rate = RollingRate(2.0)
+        self.pose_rate = RollingRate(2.0)
         self.root_writes = 0
         self.gt_seq = 0
         self.cam_seq = 0
         self.last_pose: dict = {}
         self.fallen = False
         self.recording = None
-        self.topdown_cache = None
         self.occ_cache: dict = {}
         self._cpu0 = os.times()
         self._wall0 = time.perf_counter()
+        self.rtf_samples, self.rtf_below, self.rtf_min = 0, 0, 9.9
         self.prof = {"cmd": 0.0, "band_write": 0.0, "physx_step": 0.0, "update_read": 0.0, "dds_publish": 0.0,
                      "n": 0}
 
@@ -396,6 +418,7 @@ class App:
             if not a.no_dds:
                 self.bridge.publish(t_sim, st["q"], st["dq"], st["ddq"], tau_est, st["base_pos"], st["base_quat"],
                                     st["lin_w"], st["ang_b"], st["acc_w"], st["torso_quat"], st["torso_ang_b"])
+                self.lowstate_rate.tick(t4)
             t5 = pc()
             prof["cmd"] += t1 - t0
             prof["band_write"] += t2 - t1
@@ -410,7 +433,9 @@ class App:
             do_tp = tp_dt is not None and self.chase is not None and t_sim + 1e-9 >= next_tp
             if do_cam or do_tp:
                 r0 = time.perf_counter()
-                if self.chase is not None:
+                # note: every render updates all render products; toggling hydra_texture updates per frame was
+                # tried and broke the chase stream, so the chase camera simply costs a second product per render
+                if do_tp:
                     self.chase.update_pose(st["base_pos"], st["yaw"])
                 self.sim.render()
                 self.render_stats.add((time.perf_counter() - r0) * 1e3)
@@ -436,7 +461,13 @@ class App:
                 self.contact.update(self.dt * steps_per_pose)
                 self.gt_seq += 1
                 self.last_pose = self._pose_msg(st, t_sim)
+                r1 = self.last_pose["rtf"]
+                if r1 is not None and t_sim - self.pacer._start_sim > 5.0:
+                    self.rtf_samples += 1
+                    self.rtf_below += r1 < 0.95
+                    self.rtf_min = min(self.rtf_min, r1)
                 self.gt.publish("gt.pose", self.last_pose)
+                self.pose_rate.tick()
                 if self.last_pose["fallen"] != self.fallen:
                     self.fallen = self.last_pose["fallen"]
                     self._event("fallen" if self.fallen else "recovered", pelvis_z=self.last_pose["pelvis_z"])
@@ -467,10 +498,13 @@ class App:
             "t_sim": round(self.pacer.t_sim, 3), "uptime_s": round(time.time() - self.t_start_wall, 1),
             "rtf_1s": _r(self.pacer.rtf(1.0)), "rtf_10s": _r(self.pacer.rtf(10.0)),
             "rtf_total": _r(self.pacer.rtf_total()),
+            "rtf_1s_min": _r(self.rtf_min) if self.rtf_samples else None,
+            "rtf_1s_below_0p95_frac": round(self.rtf_below / self.rtf_samples, 4) if self.rtf_samples else None,
             "physics_hz_1s": _r(self.pacer.physics_hz(1.0), 1), "physics_hz_10s": _r(self.pacer.physics_hz(10.0), 1),
             "physics_hz_target": self.a.physics_hz,
             "step_ms": self.step_stats.summary(), "render_ms": self.render_stats.summary(),
             "render_hz": round(self.render_rate.rate(), 1),
+            "lowstate_pub_hz": round(self.lowstate_rate.rate(), 1), "gt_pose_hz": round(self.pose_rate.rate(), 1),
             "camera_pub_hz": round(self.cam_pub.rate(), 1) if self.cam_pub else 0.0,
             "camera_dropped": self.cam_pub.dropped if self.cam_pub else 0,
             "overruns": self.pacer.overruns, "lost_s": round(self.pacer.lost_s, 3),
@@ -511,6 +545,15 @@ class App:
         key = (rr, res, zmin, zmax)
         if key in self.occ_cache and not req.get("refresh"):
             return dict(self.occ_cache[key])
+        if self.scene.source == "scenes.loader" and not req.get("physx"):
+            # the house agent's cached, verified grid (scenes/occupancy.py occupancy_reply)
+            try:
+                from scenes.occupancy import occupancy_reply
+                info = occupancy_reply(self.scene.house_id, rr)
+                self.occ_cache[key] = info
+                return dict(info)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[occupancy] scenes.occupancy_reply failed ({e}); falling back")
         out_dir = Path(self.a.out_dir) / "occupancy"
         path = str(out_dir / f"{self.scene.house_id}_r{int(rr * 100)}_res{int(res * 100)}.npz")
         if self.scene.occupancy_npz and Path(self.scene.occupancy_npz).exists() and not req.get("physx"):

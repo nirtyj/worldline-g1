@@ -241,11 +241,20 @@ def main():
                          "stand check")
     ap.add_argument("--camera", action="store_true")
     ap.add_argument("--reset", action="store_true", help="reset_robot to the spawn pose (band on) first")
+    ap.add_argument("--load-only", type=float, default=0.0,
+                    help="only generate deploy-like DDS traffic (lowcmd 500 Hz + Dex3 cmds) for N seconds")
     ap.add_argument("--ops", action="store_true", help="exercise the REP ops (occupancy, topdown, record)")
     ap.add_argument("--out", default="/work/worldline-g1/outputs/m1/isaac/stand_test.json")
     a = ap.parse_args()
     out_dir = Path(a.out).parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    if a.load_only > 0:
+        peer = Peer(a.domain, a.iface)
+        peer.start()
+        time.sleep(a.load_only)
+        print(f"LOAD_DONE sent={peer.sent} lowstate_rx={len(peer.ls_times)}", flush=True)
+        peer.stop()
+        return 0
     rep = Rep(5600 + a.port_offset)
     report: dict = {"args": vars(a), "checks": {}}
     print("ping", rep("ping"), flush=True)
@@ -348,7 +357,9 @@ def main():
         ls = peer.ls
         lsq = np.array([ls.motor_state[i].q for i in range(jm.NUM_MOTORS)])
     rec = rep("record", on=False)
-    hold = [s for s in poses.samples[n0:] if s["_rx"] >= t_rel + a.band_ramp_s + 0.5]
+    after = poses.samples[n0:]
+    i_off = next((i for i, s in enumerate(after) if not s["band"]), len(after))
+    hold = [s for s in after[i_off:] if s["_rx"] >= after[i_off]["_rx"] + 0.5] if i_off < len(after) else []
     pz = np.array([s["pelvis_z"] for s in hold]) if hold else np.array([np.nan])
     xy = np.array([s["base_pos"][:2] for s in hold]) if hold else np.zeros((1, 2))
     report["stand"] = {

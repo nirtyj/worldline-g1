@@ -76,7 +76,8 @@ def add_default_lights() -> None:
     sun.func("/World/wl_sun", sun, orientation=(0.8536, 0.1464, 0.3536, 0.3536))
 
 
-def build_scene(stage, house_id: str, log=print, default_lights: bool = True) -> SceneInfo:
+def build_scene(stage, house_id: str, log=print, default_lights: bool = True, loader_kwargs: dict | None = None
+                ) -> SceneInfo:
     if house_id in ("", "empty", "none", "flat"):
         _add_ground()
         if default_lights:
@@ -91,7 +92,14 @@ def build_scene(stage, house_id: str, log=print, default_lights: bool = True) ->
         sys.path.insert(0, str(REPO_ROOT))
     loader = importlib.import_module("scenes.loader")
     log(f"[scene] loading house {house_id!r} via {loader_path}")
-    info = loader.load_house(stage, house_id)
+    kw = dict(loader_kwargs or {})
+    try:
+        info = loader.load_house(stage, house_id, **kw)
+    except TypeError:
+        if not kw:
+            raise
+        log(f"[scene] load_house does not accept {sorted(kw)}; loading with defaults")
+        info = loader.load_house(stage, house_id)
     floor_z = float(getattr(info, "floor_z", 0.0) or 0.0)
     b = getattr(info, "bounds", None)
     bounds = tuple(float(x) for x in b) if b is not None else (-15.0, -15.0, 15.0, 15.0)

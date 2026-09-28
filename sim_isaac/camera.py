@@ -56,12 +56,16 @@ class RgbCapture:
         self.annot.attach(self.rp_path)
         self.enabled = True
 
-    def set_enabled(self, on: bool) -> None:
+    def set_enabled(self, on: bool) -> bool:
+        """Enable/disable rendering of this render product (skips its GPU work while disabled)."""
+        if bool(on) == self.enabled:
+            return True
         try:
             self._rp.hydra_texture.set_updates_enabled(bool(on))
             self.enabled = bool(on)
+            return True
         except Exception:  # noqa: BLE001  (older API / str render product)
-            pass
+            return False
 
     def read(self) -> np.ndarray | None:
         d = self.annot.get_data()
