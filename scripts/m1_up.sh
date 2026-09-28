@@ -17,6 +17,10 @@
 # body-m1fake) so the script itself can be tested without a GPU.
 # NOTE: the deploy's DDS domain is hard-coded to 0 (g1_deploy_onnx_ref.cpp:2218), so the real stack always uses
 # DDS domain 0 on lo whatever --port-offset is; only the ZMQ ports move.
+# CPU pinning (optional env): DEPLOY_TASKSET (e.g. 0-3: the deploy pins its busy-spinning main thread to CPU 0 itself,
+# sonic_deploy.md §5), ISAAC_TASKSET (e.g. 4-15), BODY_TASKSET. CPUs 2k/2k+1 are hyperthread siblings on the box.
+# The wall-clock deploy is sensitive to CPU contention: the deploy agent's MuJoCo reference passed on a quiet box and
+# fell repeatedly while other Isaac jobs loaded all cores (outputs/m1/deploy/mujoco-ref-*). Run M1 on a quiet box.
 set -euo pipefail
 source /etc/profile.d/ludo.sh 2>/dev/null || true
 
@@ -72,7 +76,7 @@ tmux new-session -d -s "$SESSION" -n isaac -x 220 -y 50 "bash --noprofile --norc
 if [[ "$FAKE" == 1 ]]; then
   tmux send-keys -t "=$SESSION:isaac" "cd $WL && exec $PY_BODY -u -m tools.fake_p1 --port-offset $OFFSET --out $RUN/fake_p1 2>&1 | tee -a $LOG_ISAAC" C-m
 else
-  tmux send-keys -t "=$SESSION:isaac" "cd $WL && exec $PY_ISAAC -u -m sim_isaac.app --house $HOUSE --physics-hz 200 --dds-domain 0 --dds-iface lo --camera 640x480 --camera-hz 30 --rt-pace --physx-device cpu --port-offset $OFFSET $ISAAC_ARGS 2>&1 | tee -a $LOG_ISAAC" C-m
+  tmux send-keys -t "=$SESSION:isaac" "cd $WL && exec ${ISAAC_TASKSET:+taskset -c $ISAAC_TASKSET }$PY_ISAAC -u -m sim_isaac.app --house $HOUSE --physics-hz 200 --dds-domain 0 --dds-iface lo --camera 640x480 --camera-hz 30 --rt-pace --physx-device cpu --port-offset $OFFSET $ISAAC_ARGS 2>&1 | tee -a $LOG_ISAAC" C-m
 fi
 say "P1 starting (log $LOG_ISAAC); first Isaac launch compiles shaders (up to ~15 min)"
 wr p1 --timeout "$P1_TIMEOUT" || die "P1 did not answer ping"
@@ -88,7 +92,7 @@ say "P1 up, band on"
 
 # ---- 2. P3 body (binds the SONIC input PUB before the deploy connects)
 tmux new-window -t "=$SESSION" -n body "bash --noprofile --norc"
-tmux send-keys -t "=$SESSION:body" "cd $WL && exec $PY_BODY -u -m body.service --port-offset $OFFSET --log-dir $RUN/body 2>&1 | tee -a $LOG_BODY" C-m
+tmux send-keys -t "=$SESSION:body" "cd $WL && exec ${BODY_TASKSET:+taskset -c $BODY_TASKSET }$PY_BODY -u -m body.service --port-offset $OFFSET --log-dir $RUN/body 2>&1 | tee -a $LOG_BODY" C-m
 wr body --timeout 30 || die "body service not up"
 say "body up (planner IDLE keepalive running)"
 
@@ -102,7 +106,7 @@ else
   # start while another g1_deploy_onnx_ref runs anywhere on the host, because DDS domain 0 on lo would be shared.
   bash "$WL/sonic/run_deploy.sh" start --session "$SESSION" --window deploy --log "$LOG_DEPLOY" \
       --zmq-port $((5556 + OFFSET)) --zmq-out-port $((5557 + OFFSET)) --wait-init "${DEPLOY_WAIT_S:-900}" \
-      ${DEPLOY_FORCE:+--force} || die "deploy did not reach Init Done"
+      ${DEPLOY_FORCE:+--force} ${DEPLOY_TASKSET:+--taskset $DEPLOY_TASKSET} || die "deploy did not reach Init Done"
 fi
 wr deploy_log --file "$LOG_DEPLOY" --timeout 30 || die "no 'Init Done' in $LOG_DEPLOY"
 wr deploy --timeout 30 || die "deploy not publishing on $((5557 + OFFSET))"

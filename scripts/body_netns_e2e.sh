@@ -26,7 +26,8 @@ if sudo -n ip netns list | grep -qw "$NS"; then say "netns $NS already exists (a
 sudo -n ip netns add "$NS" || { say "cannot create netns"; exit 1; }
 sudo -n ip -n "$NS" link set lo up
 ns() { sudo -n ip netns exec "$NS" sudo -n -u "$ME" env HOME="$HOME" PATH="$PATH" TMUX_TMPDIR="$TMUXD" \
-       DEPLOY_FORCE=1 "$@"; }
+       DEPLOY_FORCE=1 DEPLOY_TASKSET="${DEPLOY_TASKSET:-0-3}" ISAAC_TASKSET="${ISAAC_TASKSET:-4-15}" \
+       BODY_TASKSET="${BODY_TASKSET:-4-15}" "$@"; }
 
 cleanup() {
   say "cleanup"
@@ -42,6 +43,8 @@ cleanup() {
 trap cleanup EXIT
 
 say "house=$HOUSE stand_s=$STAND_S tests=$TESTS ns=$NS out=$OUT"
+{ uptime; ps -eo pcpu,etime,cmd --sort=-pcpu | head -12; nvidia-smi --query-compute-apps=pid,used_memory,name \
+    --format=csv,noheader; } > "$OUT/box_load_before.txt" 2>&1
 ns bash "$WL/scripts/m1_up.sh" --house "$HOUSE" --session "$SESSION" --isaac-args "${ISAAC_ARGS:-}" > "$OUT/m1_up.log" 2>&1
 rc=$?
 say "m1_up exit $rc: $(tail -2 "$OUT/m1_up.log" | tr '\n' ' ' | cut -c1-300)"
