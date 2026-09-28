@@ -108,7 +108,7 @@ def scene_info() -> dict:
 class FakeP1:
     def __init__(self, port_offset: int = 200, out_dir: str = "/tmp/fake_p1", pose_hz: float = 50.0,
                  cam_hz: float = 10.0, physics_hz: float = 200.0, ctx: zmq.Context | None = None,
-                 robot_radius: float = 0.15, log=print):
+                 robot_radius: float = 0.15, log=print, house_dir: str | None = None):
         self.P = _ports(port_offset)
         self.out_dir = out_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -116,16 +116,34 @@ class FakeP1:
         self.pose_hz, self.cam_hz, self.physics_hz = pose_hz, cam_hz, physics_hz
         self.robot_radius = robot_radius
         self.log = log
-        self.occ = build_occupancy()
+        self.res, self.origin = RES, ORIGIN
+        self.info = scene_info()
+        if house_dir:
+            # a real MolmoSpaces house prepared by scenes/ (occupancy.npz + house_info.json): real geometry,
+            # still a kinematic robot
+            import json as _json
+            with np.load(os.path.join(house_dir, "occupancy.npz")) as z:
+                self.occ = (z["occ"] > 0).astype(np.uint8)
+                self.res = float(z["resolution"])
+                self.origin = (float(z["origin"][0]), float(z["origin"][1]))
+            hi = _json.load(open(os.path.join(house_dir, "house_info.json")))
+            rooms = [{"id": r.get("room_id", r.get("id")), "name": r.get("name"), "type": r.get("type"),
+                      "polygon": r.get("polygon")} for r in hi.get("rooms", [])]
+            self.info = {"house_id": hi.get("house_id"), "rooms": rooms, "objects": hi.get("objects", []),
+                         "spawn": hi.get("spawn"), "frame": "world, z-up, meters", "source": house_dir}
+        else:
+            self.occ = build_occupancy()
+        sp = self.info["spawn"]
+        self.spawn = (float(sp["x"]), float(sp["y"]), float(sp.get("yaw", 0.0)))
         self.phys_occ = self.occ.copy()
         self.occ_path = os.path.join(out_dir, "occupancy.npz")
         # npz layout of docs/contracts/m1.md §1.6 get_occupancy: occ (raw), occ_inflated, resolution, origin
         from scipy import ndimage
-        infl = ndimage.distance_transform_edt(self.occ == 0) * RES < 0.25
-        np.savez(self.occ_path, occ=self.occ, occ_inflated=infl.astype(np.uint8), resolution=np.float32(RES),
-                 origin=np.array(ORIGIN), robot_radius=np.float32(0.25))
+        infl = ndimage.distance_transform_edt(self.occ == 0) * self.res < 0.25
+        np.savez(self.occ_path, occ=self.occ, occ_inflated=infl.astype(np.uint8), resolution=np.float32(self.res),
+                 origin=np.array(self.origin), robot_radius=np.float32(0.25))
         self._lock = threading.Lock()
-        self.x, self.y, self.yaw = SPAWN
+        self.x, self.y, self.yaw = self.spawn
         self.vx = self.vy = self.wz = 0.0
         self.band_on = True
         self.collapsed = False
@@ -144,10 +162,12 @@ class FakeP1:
         self.pose_sent = 0
         self.cam_sent = 0
         self.pose_paused = False  # test hook: simulate a P1 stall (gt.pose stops)
+        self.shutdown_requested = False
 
     # -- collision ------------------------------------------------------------------------------
     def _blocked(self, x: float, y: float) -> bool:
         r = self.robot_radius
+        RES, ORIGIN = self.res, self.origin
         ix0 = int(math.floor((x - r - ORIGIN[0]) / RES))
         ix1 = int(math.floor((x + r - ORIGIN[0]) / RES))
         iy0 = int(math.floor((y - r - ORIGIN[1]) / RES))
@@ -314,20 +334,23 @@ class FakeP1:
             if op == "get_pose":
                 return {"ok": True, **self._pose_msg(self.t_sim)}
             if op == "get_scene_info":
-                return {"ok": True, **scene_info()}
+                return {"ok": True, **self.info}
             if op == "get_occupancy":
-                return {"ok": True, "path": self.occ_path, "resolution": RES, "origin": list(ORIGIN),
+                return {"ok": True, "path": self.occ_path, "resolution": self.res, "origin": list(self.origin),
                         "shape": list(self.occ.shape), "robot_radius": 0.25, "source": "fake"}
             if op == "band":
                 on = bool(a.get("on"))
                 self.band_on = on
                 self.log(f"[fake_p1] band {'ON' if on else 'OFF'} ramp_s={a.get('ramp_s', 0)}")
                 return {"ok": True, "band": on}
+            if op == "shutdown":
+                self.shutdown_requested = True
+                return {"ok": True}
             if op == "record":
                 return {"ok": True, "path": a.get("path"), "samples": 0, "fake": True}
             if op == "reset_robot":
-                self.x, self.y = float(a.get("x", SPAWN[0])), float(a.get("y", SPAWN[1]))
-                self.yaw = float(a.get("yaw", SPAWN[2]))
+                self.x, self.y = float(a.get("x", self.spawn[0])), float(a.get("y", self.spawn[1]))
+                self.yaw = float(a.get("yaw", self.spawn[2]))
                 self.collapsed = False
                 self.pelvis_z = 0.78
                 self.root_writes += 1
@@ -341,14 +364,16 @@ class FakeP1:
             if op == "render_topdown":
                 path = a.get("path") or os.path.join(self.out_dir, "topdown.png")
                 self._render(path)
-                return {"ok": True, "path": path, "extent": [ORIGIN[0], ORIGIN[1], ORIGIN[0] + SIZE[0],
-                                                             ORIGIN[1] + SIZE[1]]}  # [xmin,ymin,xmax,ymax]
+                H, W = self.occ.shape
+                return {"ok": True, "path": path, "extent": [self.origin[0], self.origin[1],
+                                                             self.origin[0] + W * self.res,
+                                                             self.origin[1] + H * self.res]}  # [xmin,ymin,xmax,ymax]
             if op == "spawn_obstacle":
                 x, y, r = float(a["x"]), float(a["y"]), float(a.get("r", 0.2))
                 H, W = self.phys_occ.shape
                 yy, xx = np.mgrid[0:H, 0:W]
-                cx = ORIGIN[0] + (xx + 0.5) * RES
-                cy = ORIGIN[1] + (yy + 0.5) * RES
+                cx = self.origin[0] + (xx + 0.5) * self.res
+                cy = self.origin[1] + (yy + 0.5) * self.res
                 self.phys_occ[(cx - x) ** 2 + (cy - y) ** 2 <= r * r] = 1
                 return {"ok": True}
             return {"ok": False, "error": f"unknown op {op}"}
@@ -365,13 +390,16 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port-offset", type=int, default=200)
     ap.add_argument("--out", default="/tmp/fake_p1")
+    ap.add_argument("--house-dir", default=None, help="real house: dir with occupancy.npz + house_info.json")
     args = ap.parse_args(argv)
-    p1 = FakeP1(args.port_offset, args.out).start()
+    p1 = FakeP1(args.port_offset, args.out, house_dir=args.house_dir).start()
     print(f"[fake_p1] up on offset {args.port_offset}: {p1.P}", flush=True)
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    while not stop.wait(5.0):
+    while not stop.wait(1.0) and not p1.shutdown_requested:
+        if int(time.monotonic()) % 5:
+            continue
         print(f"[fake_p1] pose={p1.x:.2f},{p1.y:.2f},{math.degrees(p1.yaw):.0f}deg band={p1.band_on} "
               f"fallen={p1.collapsed} twist_msgs={p1.link_count} collisions={p1.collisions}", flush=True)
     p1.stop()

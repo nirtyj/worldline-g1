@@ -60,7 +60,7 @@ wr() { (cd "$WL" && "$PY_BODY" -m tools.wait_ready "$@" --port-offset "$OFFSET")
 cli() { (cd "$WL" && "$PY_BODY" -m tools.body_cli --port-offset "$OFFSET" "$@"); }
 
 # ---- preflight: never touch anything we did not start
-tmux has-session -t "$SESSION" 2>/dev/null && die "tmux session $SESSION already exists (scripts/m1_down.sh --session $SESSION)"
+tmux has-session -t "=$SESSION" 2>/dev/null && die "tmux session $SESSION already exists (scripts/m1_down.sh --session $SESSION)"
 for base in 5556 5557 5565 5600 5601 5610 5611; do
   p=$((base + OFFSET))
   if ss -ltn "sport = :$p" | grep -q LISTEN; then die "port $p already bound by another process"; fi
@@ -70,9 +70,9 @@ done
 # ---- 1. P1
 tmux new-session -d -s "$SESSION" -n isaac -x 220 -y 50 "bash --noprofile --norc"
 if [[ "$FAKE" == 1 ]]; then
-  tmux send-keys -t "$SESSION:isaac" "cd $WL && exec $PY_BODY -u -m tools.fake_p1 --port-offset $OFFSET --out $RUN/fake_p1 2>&1 | tee -a $LOG_ISAAC" C-m
+  tmux send-keys -t "=$SESSION:isaac" "cd $WL && exec $PY_BODY -u -m tools.fake_p1 --port-offset $OFFSET --out $RUN/fake_p1 2>&1 | tee -a $LOG_ISAAC" C-m
 else
-  tmux send-keys -t "$SESSION:isaac" "cd $WL && exec $PY_ISAAC -u -m sim_isaac.app --house $HOUSE --physics-hz 200 --dds-domain 0 --dds-iface lo --camera 640x480 --camera-hz 30 --rt-pace --physx-device cpu --port-offset $OFFSET $ISAAC_ARGS 2>&1 | tee -a $LOG_ISAAC" C-m
+  tmux send-keys -t "=$SESSION:isaac" "cd $WL && exec $PY_ISAAC -u -m sim_isaac.app --house $HOUSE --physics-hz 200 --dds-domain 0 --dds-iface lo --camera 640x480 --camera-hz 30 --rt-pace --physx-device cpu --port-offset $OFFSET $ISAAC_ARGS 2>&1 | tee -a $LOG_ISAAC" C-m
 fi
 say "P1 starting (log $LOG_ISAAC); first Isaac launch compiles shaders (up to ~15 min)"
 wr p1 --timeout "$P1_TIMEOUT" || die "P1 did not answer ping"
@@ -87,15 +87,15 @@ cli p1 band on=true >/dev/null || die "band on failed"
 say "P1 up, band on"
 
 # ---- 2. P3 body (binds the SONIC input PUB before the deploy connects)
-tmux new-window -t "$SESSION" -n body "bash --noprofile --norc"
-tmux send-keys -t "$SESSION:body" "cd $WL && exec $PY_BODY -u -m body.service --port-offset $OFFSET --log-dir $RUN/body 2>&1 | tee -a $LOG_BODY" C-m
+tmux new-window -t "=$SESSION" -n body "bash --noprofile --norc"
+tmux send-keys -t "=$SESSION:body" "cd $WL && exec $PY_BODY -u -m body.service --port-offset $OFFSET --log-dir $RUN/body 2>&1 | tee -a $LOG_BODY" C-m
 wr body --timeout 30 || die "body service not up"
 say "body up (planner IDLE keepalive running)"
 
 # ---- 3. P2 deploy
 if [[ "$FAKE" == 1 ]]; then
-  tmux new-window -t "$SESSION" -n deploy "bash --noprofile --norc"
-  tmux send-keys -t "$SESSION:deploy" "cd $WL && exec $PY_BODY -u -m tools.fake_deploy --port-offset $OFFSET 2>&1 | tee -a $LOG_DEPLOY" C-m
+  tmux new-window -t "=$SESSION" -n deploy "bash --noprofile --norc"
+  tmux send-keys -t "=$SESSION:deploy" "cd $WL && exec $PY_BODY -u -m tools.fake_deploy --port-offset $OFFSET 2>&1 | tee -a $LOG_DEPLOY" C-m
   for i in $(seq 1 30); do grep -q "Init Done" "$LOG_DEPLOY" 2>/dev/null && break; sleep 1; done
 else
   bash "$WL/sonic/run_deploy.sh" start --session "$SESSION" --window deploy --log "$LOG_DEPLOY" \
@@ -117,6 +117,6 @@ if [[ "$STAND" == 1 ]]; then
 fi
 
 # ---- 5. monitor
-tmux new-window -t "$SESSION" -n monitor "bash --noprofile --norc"
-tmux send-keys -t "$SESSION:monitor" "cd $WL && exec $PY_BODY -m tools.m1_monitor --port-offset $OFFSET" C-m
+tmux new-window -t "=$SESSION" -n monitor "bash --noprofile --norc"
+tmux send-keys -t "=$SESSION:monitor" "cd $WL && exec $PY_BODY -m tools.m1_monitor --port-offset $OFFSET" C-m
 say "stack up: tmux attach -t $SESSION ; run dir $RUN ; drive test: (cd $WL && $PY_BODY -m tools.m1_drive_test --port-offset $OFFSET)"

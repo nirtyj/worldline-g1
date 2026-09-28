@@ -31,9 +31,11 @@ def main(argv=None) -> int:
     ap.add_argument("--stand-s", type=float, default=10.0)
     ap.add_argument("--out", default=f"/tmp/m1-fake-{time.strftime('%Y%m%d-%H%M%S')}")
     ap.add_argument("--no-video", action="store_true")
+    ap.add_argument("--house-dir", default=None, help="real house dir (occupancy.npz + house_info.json)")
+    ap.add_argument("--tests", default=None)
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
-    p1 = FakeP1(a.port_offset, os.path.join(a.out, "fake_p1")).start()
+    p1 = FakeP1(a.port_offset, os.path.join(a.out, "fake_p1"), house_dir=a.house_dir).start()
     dep = FakeDeploy(a.port_offset).start()
     svc = BodyService(BodyConfig(port_offset=a.port_offset), log_dir=os.path.join(a.out, "body"))
     th = threading.Thread(target=svc.run, daemon=True)
@@ -42,6 +44,8 @@ def main(argv=None) -> int:
     args = ["--port-offset", str(a.port_offset), "--stand-s", str(a.stand_s), "--out", a.out]
     if a.no_video:
         args.append("--no-video")
+    if a.tests:
+        args += ["--tests", a.tests]
     try:
         rc = m1_drive_test.main(args)
     finally:

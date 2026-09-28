@@ -182,6 +182,9 @@ class StandMotion(Motion):
         return {"already_in_control": self.phase == "settle"}
 
     def _send_start(self, pose: Pose) -> None:
+        # a (re)start re-initialises the planner frame at the current heading: forget any old frame first so a
+        # stale theta0 (e.g. from a previous deploy run) cannot turn the robot; g1_debug then supplies the new one
+        self.ctx.frame.reset()
         self.ctx.frame.set_fallback(pose.yaw)
         self.hold(pose.yaw)
         self.ctx.mux.start_control()

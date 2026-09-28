@@ -6,7 +6,7 @@
 #                          sonic/run_deploy.sh stop as a backstop ('o' on stdin, then SIGINT)
 #   4. body                SIGINT in its window (the service exits; it never sends command{stop} on its own)
 #   5. P1                  REP shutdown, then SIGINT in its window
-#   6. tmux kill-session   only the session m1_up.sh created
+#   6. tmux kill-session   only the session m1_up.sh created (exact-name targets '=NAME', never a prefix match)
 #
 #   scripts/m1_down.sh [--session NAME] [--port-offset N] [--fake]
 set -uo pipefail
@@ -31,10 +31,10 @@ fi
 export WL_PORT_OFFSET=$OFFSET
 say() { echo "[m1_down $(date +%H:%M:%S)] $*"; }
 cli() { (cd "$WL" && timeout "${2:-20}" "$PY_BODY" -m tools.body_cli --port-offset "$OFFSET" $1); }
-alive() { tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$1"; }
+alive() { tmux list-windows -t "=$SESSION" -F '#W' 2>/dev/null | grep -qx "$1"; }
 win_pid_gone() {  # wait until the window's shell has no child process
   local w=$1 t=${2:-20} i pane
-  pane=$(tmux list-panes -t "$SESSION:$w" -F '#{pane_pid}' 2>/dev/null | head -1)
+  pane=$(tmux list-panes -t "=$SESSION:$w" -F '#{pane_pid}' 2>/dev/null | head -1)
   [[ -z "$pane" ]] && return 0
   for ((i = 0; i < t * 4; i++)); do
     kill -0 "$pane" 2>/dev/null || return 0
@@ -44,7 +44,7 @@ win_pid_gone() {  # wait until the window's shell has no child process
   return 1
 }
 
-if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
   say "no tmux session $SESSION: nothing to stop"
   exit 0
 fi
@@ -63,20 +63,20 @@ if alive body && alive deploy; then
 fi
 if alive deploy; then
   if [[ "$FAKE" == 1 ]]; then
-    tmux send-keys -t "$SESSION:deploy" C-c; win_pid_gone deploy 10 || true
+    tmux send-keys -t "=$SESSION:deploy" C-c; win_pid_gone deploy 10 || true
   else
     bash "$WL/sonic/run_deploy.sh" stop --session "$SESSION" --window deploy || say "run_deploy.sh stop reported an error"
   fi
-  tmux kill-window -t "$SESSION:deploy" 2>/dev/null || true
+  tmux kill-window -t "=$SESSION:deploy" 2>/dev/null || true
   say "deploy stopped"
 fi
 
 # 4: body
 for w in monitor body; do
   if alive "$w"; then
-    tmux send-keys -t "$SESSION:$w" C-c
+    tmux send-keys -t "=$SESSION:$w" C-c
     win_pid_gone "$w" 10 || say "$w did not exit on SIGINT"
-    tmux kill-window -t "$SESSION:$w" 2>/dev/null || true
+    tmux kill-window -t "=$SESSION:$w" 2>/dev/null || true
   fi
 done
 say "body stopped"
@@ -84,12 +84,12 @@ say "body stopped"
 # 5: P1
 if alive isaac; then
   cli "p1 shutdown" 20 >/dev/null 2>&1 || true
-  win_pid_gone isaac 30 || { tmux send-keys -t "$SESSION:isaac" C-c; win_pid_gone isaac 30 || say "P1 still running after SIGINT"; }
-  tmux kill-window -t "$SESSION:isaac" 2>/dev/null || true
+  win_pid_gone isaac 30 || { tmux send-keys -t "=$SESSION:isaac" C-c; win_pid_gone isaac 30 || say "P1 still running after SIGINT"; }
+  tmux kill-window -t "=$SESSION:isaac" 2>/dev/null || true
   say "P1 stopped"
 fi
 
-tmux kill-session -t "$SESSION" 2>/dev/null || true
+tmux kill-session -t "=$SESSION" 2>/dev/null || true
 for base in 5556 5557 5565 5600 5601 5610 5611; do
   p=$((base + OFFSET))
   ss -ltn "sport = :$p" | grep -q LISTEN && say "WARNING: port $p still bound"

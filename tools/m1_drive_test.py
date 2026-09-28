@@ -167,6 +167,51 @@ class CameraRecorder(threading.Thread):
         return (self.frames - 1) / (self.t_last - self.t_first)
 
 
+class TPRecorder(threading.Thread):
+    """Optional P1 third-person chase camera (app.py --tp-camera): multipart [b"frame.tp", msgpack{seq, t_sim,
+    t_wall, jpeg}] on port 5602 (sim_isaac/camera.py FramePublisher mode="multipart"). Writes third_person.mp4."""
+
+    def __init__(self, endpoint, ctx, path, fps, label: Label):
+        super().__init__(daemon=True)
+        self.endpoint, self.ctx, self.path, self.fps, self.label = endpoint, ctx, path, fps, label
+        self.running = True
+        self.frames = 0
+        self.error = None
+
+    def run(self):
+        import cv2
+        import imageio.v2 as imageio
+        import msgpack
+
+        s = self.ctx.socket(zmq.SUB)
+        s.setsockopt(zmq.LINGER, 0)
+        s.setsockopt(zmq.RCVHWM, 30)
+        s.setsockopt(zmq.SUBSCRIBE, b"frame.tp")
+        s.connect(self.endpoint)
+        w = None
+        try:
+            while self.running:
+                if not s.poll(200):
+                    continue
+                parts = s.recv_multipart()
+                d = msgpack.unpackb(parts[-1], raw=False)
+                img = cv2.imdecode(np.frombuffer(d["jpeg"], np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                if w is None:
+                    w = imageio.get_writer(self.path, fps=self.fps, codec="libx264", quality=7, macro_block_size=8)
+                cv2.putText(img, self.label.text, (10, img.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (255, 255, 0), 2)
+                w.append_data(img)
+                self.frames += 1
+        except Exception as e:
+            self.error = repr(e)
+        finally:
+            if w is not None:
+                w.close()
+            s.close(0)
+
+
 class DebugRecorder(threading.Thread):
     def __init__(self, endpoint, ctx):
         super().__init__(daemon=True)
@@ -336,6 +381,10 @@ class DriveTest:
         self.cam = CameraRecorder(ep(self.P["camera"]), self.ctx, os.path.join(self.out, "head_camera.mp4"),
                                   fps, self.label, enabled=not self.args.no_video)
         self.cam.start()
+        self.tp = TPRecorder(ep(self.P["p1_frames"]), self.ctx, os.path.join(self.out, "third_person.mp4"),
+                             self.args.tp_fps, self.label)
+        if not self.args.no_video:
+            self.tp.start()
         self.dbg = DebugRecorder(ep(self.P["sonic_debug"]), self.ctx)
         self.dbg.start()
         self.bc = BodyClient(port_offset=self.off, ctx=self.ctx).connect(20)
@@ -465,13 +514,13 @@ class DriveTest:
                 "displacement_m": round(disp, 3), "body": h.summary()}
 
     def t_walk_forward(self):
-        room = self._ensure_room(2.6)
+        room = self._ensure_room(self.args.walk_dist + 0.9)
         p = self.pose()
         pre = None
         if abs(wrap(room["heading"] - p["yaw"])) > 5 * DEG:
             pre = self.bc.turn_to(room["heading"], timeout=60).summary()
         p = self.pose()
-        dur = self.args.walk_dist / self.args.walk_speed / 0.9 + 0.6
+        dur = self.args.walk_dist / (0.85 * self.args.walk_speed) + 0.8  # margin for spring start/stop + RTF<1
         h = self.bc.walk(vx=self.args.walk_speed, duration_s=dur)
         q = self.pose()
         dx, dy = q["x"] - p["x"], q["y"] - p["y"]
@@ -662,6 +711,7 @@ class DriveTest:
             "p1_is_fake": bool(self.stats0.get("fake")), "house": self.scene.get("house_id"),
             "rates": {"gt_pose_hz": None if dur <= 0 else round((len(a) - 1) / dur, 2),
                       "camera_hz": round(self.cam.rate(), 2), "camera_frames": self.cam.frames,
+                      "third_person_frames": self.tp.frames,
                       "camera_latency_ms_p50": None if not self.cam.lat_ms else round(float(np.median(self.cam.lat_ms)), 1),
                       "g1_debug_hz": e4["g1_debug_rate_hz"], "planner_keepalive_hz": e4["planner_keepalive_hz"],
                       "physics_hz_p1": e4["p1_stats_end"].get("physics_hz_1s"),
@@ -835,9 +885,11 @@ class DriveTest:
 
     def close(self):
         self.label.set("done")
-        for r in (self.poses, self.cam, self.dbg):
+        for r in (self.poses, self.cam, self.dbg, self.tp):
             r.running = False
         self.cam.join(5)
+        if self.tp.is_alive():
+            self.tp.join(5)
         self.bc.close()
 
 
@@ -856,6 +908,7 @@ def main(argv=None):
     ap.add_argument("--pelvis-z-max", type=float, default=1.0)
     ap.add_argument("--stop-v-eps", type=float, default=0.05)
     ap.add_argument("--cam-fps", type=float, default=None, help="mp4 fps (default: P1 get_stats render_hz or 30)")
+    ap.add_argument("--tp-fps", type=float, default=10.0, help="P1 --tp-hz (third-person camera)")
     ap.add_argument("--no-video", action="store_true")
     args = ap.parse_args(argv)
     dt = DriveTest(args)

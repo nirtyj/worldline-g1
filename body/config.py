@@ -15,6 +15,7 @@ BASE_PORTS = {
     "p1_rep": 5600,       # P1 REP  (JSON/msgpack ops)
     "p1_pose": 5601,      # P1 PUB  topic "gt.pose"
     "camera": 5565,       # P1 PUB  gear_sonic sensor_server msgpack (ego_view)
+    "p1_frames": 5602,    # P1 PUB  optional third-person camera, multipart [b"frame.tp", msgpack{jpeg,...}]
     "sonic_in": 5556,     # SonicMux PUB bind; deploy zmq_manager SUB connects (command/planner/pose)
     "sonic_debug": 5557,  # deploy PUB g1_debug (zmq_output_handler.hpp)
     "body_ctl": 5610,     # body ROUTER
