@@ -24,6 +24,7 @@ from scenes.occupancy import (
     get_occupancy,
     load_npz,
     make_grid_frame,
+    occupancy_reply,
     room_points,
 )
 
@@ -123,6 +124,20 @@ def test_cached_houses_if_present():
         assert occ.is_free(sp["x"], sp["y"]), (h, sp)
         assert info["connectivity"]["all_rooms_reachable"], (h, info["connectivity"])
         assert (occ.raw == OBSTACLE).any() and (occ.raw == OUTSIDE).any()
+        # P1 contract (docs/contracts/m1.md §1.6): npz keys + re-inflation for another radius
+        z = np.load(ref.assets_dir / "occupancy.npz")
+        assert {"occ", "occ_inflated", "resolution", "origin", "robot_radius"} <= set(z.files)
+        assert (z["occ_inflated"] >= z["occ"]).all()
+        rep = occupancy_reply(h, robot_radius=0.25)
+        z2 = np.load(rep["path"])
+        assert abs(float(z2["robot_radius"]) - 0.25) < 1e-9 and z2["occ_inflated"].sum() < z["occ_inflated"].sum()
+        # the house-info JSON round-trips into HouseInfo and the scene-info shape
+        from scenes.loader import load_house_info
+
+        hi = load_house_info(h)
+        si = hi.to_scene_info()
+        assert len(si["bounds"]) == 4 and {"x", "y", "yaw"} == set(si["spawn"])
+        assert all({"id", "category", "room_id", "pos", "aabb"} <= set(o) for o in si["objects"])
     print(f"checked {n} cached houses")
 
 

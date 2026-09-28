@@ -37,6 +37,9 @@ def parse():
     ap.add_argument("--out", default="/work/worldline-g1/outputs/m1/house")
     ap.add_argument("--tag", default="")
     ap.add_argument("--dynamic-objects", default="keep", choices=["keep", "kinematic"])
+    ap.add_argument("--free-joints", action="store_true", help="do not lock furniture/door joints")
+    ap.add_argument("--physx-threads", type=int, default=0, help="/persistent/physics/numThreads (0 = run PhysX on the caller thread: fastest for one scene, measured; -1 = leave the Kit default 8)")
+    ap.add_argument("--no-sleep", action="store_true", help="do not put the house to sleep before measuring RTF")
     ap.add_argument("--physics-hz", type=float, default=200.0)
     ap.add_argument("--rtf-seconds", type=float, default=10.0)
     ap.add_argument("--settle-seconds", type=float, default=5.0)
@@ -93,12 +96,19 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     M: dict = {"house_id": ref.house_id, "args": vars(args), "times_s": {"app_start": round(t_app, 2)}}
 
+    import carb
+
+    cs = carb.settings.get_settings()
+    M["physx_threads_default"] = cs.get("/persistent/physics/numThreads")
+    if args.physx_threads >= 0:
+        cs.set_int("/persistent/physics/numThreads", args.physx_threads)
+    M["physx_threads"] = cs.get("/persistent/physics/numThreads")
     sim = SimulationContext(physics_dt=1.0 / args.physics_hz, rendering_dt=1.0 / 30.0, stage_units_in_meters=1.0)
     stage = omni.usd.get_context().get_stage()
 
     # ---- load ----------------------------------------------------------------------------------
     t = time.time()
-    info = load_house(sim, ref.house_id, dynamic_objects=args.dynamic_objects)
+    info = load_house(sim, ref.house_id, dynamic_objects=args.dynamic_objects, lock_joints=not args.free_joints)
     M["times_s"]["load_house"] = round(time.time() - t, 3)
     t = time.time()
     n = 0
@@ -159,6 +169,14 @@ def main() -> int:
     t = time.time()
     M["settle_check"] = checks.settle_check(info, sim, args.settle_seconds)
     M["times_s"]["settle"] = round(time.time() - t, 2)
+    M["awake_bodies"] = checks.awake_bodies(info, sim, 0.5)
+    from scenes.loader import awake_report, sleep_house
+
+    M["physx_awake_after_settle"] = [p.replace(info.root + "/Geometry/", "") for p in awake_report(stage, info.root)]
+    if not args.no_sleep:
+        M["sleep_house"] = sleep_house(stage, info.root)
+        sim.step(render=False)
+        M["physx_awake_after_sleep"] = [p.replace(info.root + "/Geometry/", "") for p in awake_report(stage, info.root)]
 
     # ---- RTF: physics only ------------------------------------------------------------------------
     # The box is shared: record CPU contention next to every RTF number.
@@ -185,14 +203,17 @@ def main() -> int:
     n_steps = int(round(args.rtf_seconds / dt))
     step_t = []
     tw = time.time()
+    cpu0 = time.process_time()
     for _ in range(n_steps):
         a = time.perf_counter()
         sim.step(render=False)
         step_t.append(time.perf_counter() - a)
     wall = time.time() - tw
+    cpu_s = time.process_time() - cpu0
     M["rtf_physics_only"] = {
         "sim_s": round(n_steps * dt, 3),
         "wall_s": round(wall, 3),
+        "process_cpu_ms_per_step": round(cpu_s / n_steps * 1000, 3),  # all threads; robust to contention
         "rtf": round(n_steps * dt / wall, 3),
         "achieved_physics_hz": round(n_steps / wall, 1),
         "step_ms_p50": pct(step_t, 50),
@@ -214,6 +235,7 @@ def main() -> int:
     next_frame = 0.0
     sim_t = 0.0
     tw = time.time()
+    cpu0 = time.process_time()
     for _ in range(n_steps):
         a = time.perf_counter()
         sim.step(render=False)
@@ -227,9 +249,11 @@ def main() -> int:
             frames += 1 if img is not None else 0
             next_frame += 1.0 / 30.0
     wall = time.time() - tw
+    cpu_s = time.process_time() - cpu0
     M["rtf_physics_cam30"] = {
         "sim_s": round(n_steps * dt, 3),
         "wall_s": round(wall, 3),
+        "process_cpu_s_per_sim_s": round(cpu_s / (n_steps * dt), 3),
         "rtf": round(n_steps * dt / wall, 3),
         "achieved_physics_hz": round(n_steps / wall, 1),
         "render_hz_sim": round(len(rend_t) / (n_steps * dt), 2),

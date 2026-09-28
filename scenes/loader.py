@@ -40,8 +40,12 @@ What it does (each step cites the upstream code it relies on):
   6. Object AABBs from visual geometry via isaacsim.core.utils.bounds (create_bbox_cache /
      compute_aabb; bounds.py:99 = default purpose only); all MolmoSpaces colliders are
      purpose=guide (measured: 1893/1893 in train_40), so AABBs are visual extents.
-  7. Optional: `dynamic_objects="kinematic"` freezes the ~40 loose props (mugs, fruit...) as
-     kinematic bodies: they still collide but cost no solver time (see RTF numbers in docs).
+  7. Physics cost: `lock_joints` (default) holds doors/drawers at their rest pose, loose props get
+     angular damping + a higher sleep threshold, and `sleep_house()` (call after the sim has
+     started and settled) puts the house to sleep until touched. Measured house-only step with
+     PhysX numThreads=0: 0.33-0.36 ms on all four ProcTHOR houses (docs/scenes.md §7).
+     `dynamic_objects="kinematic"` exists but measured slower (0.58 -> 2.70 ms/step on train-59;
+     cause not investigated).
 """
 
 from __future__ import annotations
@@ -161,7 +165,36 @@ class HouseInfo:
     stats: dict = field(default_factory=dict)
     assets_dir: Path | None = None
 
-    # -- convenience --
+    # -- convenience / P1 contract (docs/contracts/m1.md §1.8) --
+    @property
+    def bounds(self) -> list:
+        (x0, y0), (x1, y1) = self.bounds_xy
+        return [x0, y0, x1, y1]
+
+    @property
+    def occupancy_npz(self) -> str | None:
+        p = self.assets_dir / "occupancy.npz" if self.assets_dir else None
+        return str(p) if p is not None and p.exists() else None
+
+    def to_scene_info(self) -> dict:
+        """The full REP `get_scene_info` reply body (contract §1.6), plus extra keys."""
+        return {
+            "house_id": self.house_id,
+            "floor_z": self.floor_z,
+            "bounds": self.bounds,
+            "rooms": [{"id": r.room_id, "name": r.name, "type": r.type, "polygon": r.polygon, "area_m2": r.area_m2, "center": r.center} for r in self.rooms],
+            "objects": [
+                {"id": o.id, "name": o.name, "category": o.category, "label": o.label, "room_id": o.room_id, "room": o.room,
+                 "pos": o.pos, "aabb": o.aabb, "is_static": o.is_static, "articulated": o.articulated, "prim_path": o.prim_path, "body_path": o.body_path}
+                for o in self.objects
+            ],
+            "spawn": {k: self.spawn[k] for k in ("x", "y", "yaw")} if self.spawn else None,
+            "spawn_detail": self.spawn,
+            "room_points": self.room_points,
+            "occupancy_npz": self.occupancy_npz,
+            "source": {"usd": self.usd_path, "kind": self.kind, "molmospaces_source": self.source},
+        }
+
     def room_at(self, x: float, y: float) -> str | None:
         for r in self.rooms:
             if r.contains(x, y):
@@ -178,21 +211,6 @@ class HouseInfo:
         d = asdict(self)
         d["assets_dir"] = str(self.assets_dir) if self.assets_dir else None
         return d
-
-    def scene_info(self) -> dict:
-        """Shape of P1's REP `get_scene_info` reply."""
-        return {
-            "house_id": self.house_id,
-            "rooms": [{"room_id": r.room_id, "name": r.name, "type": r.type, "polygon": r.polygon, "area_m2": r.area_m2} for r in self.rooms],
-            "objects": [
-                {"id": o.id, "name": o.name, "category": o.category, "room_id": o.room_id, "room": o.room, "pos": o.pos, "aabb": o.aabb, "is_static": o.is_static}
-                for o in self.objects
-            ],
-            "spawn": self.spawn,
-            "room_points": self.room_points,
-            "floor_z": self.floor_z,
-            "bounds_xy": self.bounds_xy,
-        }
 
     def save_json(self, path: Path | None = None) -> Path:
         path = path or (self.assets_dir / "house_info.json")
@@ -359,7 +377,9 @@ def load_house(
     *,
     apply_labels: bool = True,
     physics_fixes: bool = True,
-    dynamic_objects: str = "keep",  # "keep" | "kinematic"
+    dynamic_objects: str = "keep",  # "keep" | "kinematic" (measured slower: see docs/scenes.md)
+    lock_joints: bool = True,
+    prop_angular_damping: float | None = 1.0,
     floor_friction: float = 1.0,
 ) -> HouseInfo:
     """Reference the house at `root`, fix physics for walking, label semantics, and return
@@ -437,6 +457,10 @@ def load_house(
         warnings.append("no Geometry/floor collider plane found")
     if physics_fixes:
         stats["physics"] = _physics_fixes(stage, root, children, objects, dynamic_objects, floor_friction, warnings)
+        if lock_joints:
+            stats["physics"]["locked_joints"] = lock_furniture_joints(stage, root)
+        if prop_angular_damping is not None and dynamic_objects == "keep":
+            stats["physics"]["damped_props"] = damp_props(stage, objects, prop_angular_damping)
 
     # 6. bounds ----------------------------------------------------------------------------------
     if rooms:
@@ -701,6 +725,99 @@ def _physics_fixes(stage, root, children, objects, dynamic_objects, floor_fricti
     return out
 
 
+def lock_furniture_joints(stage, root: str = "/World/House") -> int:
+    """Lock every revolute/prismatic joint of the house at its authored rest pose (q = 0, which the
+    converter maps to the MJCF initial qpos, e.g. an open door: house_converter.py
+    set_articulated_object_init_qpos). Doors cannot swing into doorways when bumped and drawers
+    cannot drift open (measured on train-59: 6 dresser drawers kept sliding, keeping the island
+    awake). Re-open for manipulation work by reloading with lock_joints=False."""
+    from pxr import Usd, UsdPhysics
+
+    n = 0
+    for p in Usd.PrimRange(stage.GetPrimAtPath(root)):
+        if p.IsA(UsdPhysics.RevoluteJoint):
+            j = UsdPhysics.RevoluteJoint(p)
+        elif p.IsA(UsdPhysics.PrismaticJoint):
+            j = UsdPhysics.PrismaticJoint(p)
+        else:
+            continue
+        lo = j.GetLowerLimitAttr().Get()
+        hi = j.GetUpperLimitAttr().Get()
+        q = 0.0
+        if lo is not None and hi is not None and lo <= hi:
+            q = min(max(0.0, float(lo)), float(hi))
+        j.CreateLowerLimitAttr().Set(q)
+        j.CreateUpperLimitAttr().Set(q)
+        n += 1
+    return n
+
+
+def damp_props(stage, objects, angular_damping: float = 1.0) -> int:
+    """Angular damping on loose props (PhysX default 0.05). Pens/pencils otherwise keep rolling
+    in place and never sleep (measured on train-15: 3 bodies awake -> 2.3 ms/step vs 0.5)."""
+    from pxr import PhysxSchema
+
+    n = 0
+    for o in objects:
+        if o.is_static or o.body_path is None or o.articulated:
+            continue
+        api = PhysxSchema.PhysxRigidBodyAPI.Apply(stage.GetPrimAtPath(o.body_path))
+        api.CreateAngularDampingAttr().Set(float(angular_damping))
+        # mass-normalised kinetic energy below which a body may sleep (PhysX default 5e-5):
+        # slowly rolling pens/eggs otherwise keep narrow-phase against large static meshes alive
+        api.CreateSleepThresholdAttr().Set(5e-3)
+        n += 1
+    return n
+
+
+def sleep_house(stage_or_sim=None, root: str = "/World/House") -> dict:
+    """Put every house rigid body and articulation to sleep (omni.physx simulation interface
+    put_to_sleep). Call after physics has started (and ideally after ~1 s of settling). Bodies
+    wake up again when the robot touches them. Some assets never fall asleep on their own and
+    cost PhysX time every step (measured: train-15's toilet articulation + toilet paper + a pen
+    kept 1.86 ms/step; train-38 with nothing awake: 0.32 ms/step)."""
+    import omni.physx
+    import omni.usd
+    from pxr import PhysicsSchemaTools, Usd, UsdPhysics
+
+    stage = _resolve_stage(stage_or_sim)
+    si = omni.physx.get_physx_simulation_interface()
+    sid = omni.usd.get_context().get_stage_id()
+    n = awake_before = 0
+    for p in Usd.PrimRange(stage.GetPrimAtPath(root)):
+        if not (p.HasAPI(UsdPhysics.ArticulationRootAPI) or p.HasAPI(UsdPhysics.RigidBodyAPI)):
+            continue
+        pid = PhysicsSchemaTools.sdfPathToInt(p.GetPath())
+        try:
+            if si.is_sleeping(sid, pid) is False:
+                awake_before += 1
+            si.put_to_sleep(sid, pid)
+            n += 1
+        except Exception:
+            pass
+    return {"bodies_and_articulations": n, "awake_before": awake_before}
+
+
+def awake_report(stage_or_sim=None, root: str = "/World/House") -> list[str]:
+    """Paths of house bodies/articulations PhysX reports awake."""
+    import omni.physx
+    import omni.usd
+    from pxr import PhysicsSchemaTools, Usd, UsdPhysics
+
+    stage = _resolve_stage(stage_or_sim)
+    si = omni.physx.get_physx_simulation_interface()
+    sid = omni.usd.get_context().get_stage_id()
+    out = []
+    for p in Usd.PrimRange(stage.GetPrimAtPath(root)):
+        if p.HasAPI(UsdPhysics.ArticulationRootAPI) or p.HasAPI(UsdPhysics.RigidBodyAPI):
+            try:
+                if si.is_sleeping(sid, PhysicsSchemaTools.sdfPathToInt(p.GetPath())) is False:
+                    out.append(str(p.GetPath()))
+            except Exception:
+                pass
+    return out
+
+
 def unload_house(stage_or_sim, root: str = "/World/House") -> None:
     stage = _resolve_stage(stage_or_sim)
     for p in (root, f"{root}_PhysicsMaterials"):
@@ -734,6 +851,7 @@ def verify_procthor_mapping(info: HouseInfo) -> dict:
         "matched_ids": len(matched),
         "matched_frac_of_usd": round(len(matched) / max(len(usd_ids), 1), 3),
         "usd_only": sorted(usd_ids - set(j))[:20],
+        "json_only": sorted(set(j) - usd_ids)[:20],
         "xy_err_median_m": round(errs[len(errs) // 2], 4) if errs else None,
         "xy_err_p90_m": round(errs[int(len(errs) * 0.9)], 4) if errs else None,
         "n_pos_compared": len(errs),

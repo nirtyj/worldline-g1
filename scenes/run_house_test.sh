@@ -12,6 +12,7 @@ EXTRA=(); TAG=""
 while [[ $# -gt 0 && "$1" == --* ]]; do
   case "$1" in
     --tag) TAG=$2; EXTRA+=(--tag "$2"); shift 2;;
+    --skip-views|--free-joints|--no-sleep) EXTRA+=("$1"); shift;;
     *) EXTRA+=("$1" "$2"); shift 2;;
   esac
 done

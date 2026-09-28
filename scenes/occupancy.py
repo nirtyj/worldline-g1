@@ -76,6 +76,13 @@ class Occupancy:
             self.origin[1] + ny * self.resolution,
         )
 
+    def blocked_strict(self) -> np.ndarray:
+        """bool: obstacle, outside, or low collider (what the robot must not step on)."""
+        b = self.raw != FREE
+        if self.low is not None:
+            b = b | (self.low > 0)
+        return b
+
     def world_to_cell(self, x: float, y: float) -> tuple[int, int]:
         ix = int(math.floor((x - self.origin[0]) / self.resolution))
         iy = int(math.floor((y - self.origin[1]) / self.resolution))
@@ -124,6 +131,10 @@ class Occupancy:
             dist=self.dist.astype(np.float32),
             low=self.low if self.low is not None else np.zeros_like(self.raw),
             inflated_low=self.inflated_low if self.inflated_low is not None else self.inflated,
+            # docs/contracts/m1.md §1.6 get_occupancy keys (P1 contract): occ = blocked (not
+            # inflated) incl. outside and low colliders; occ_inflated = inflated by robot_radius
+            occ=self.blocked_strict().astype(np.uint8),
+            occ_inflated=(self.inflated_low if self.inflated_low is not None else self.inflated).astype(np.uint8),
             resolution=np.float64(self.resolution),
             origin=np.asarray(self.origin, np.float64),
             z_band=np.asarray([self.z_min, self.z_max], np.float64),
@@ -191,6 +202,37 @@ def get_occupancy(house_id: str, root: Path | None = None) -> Occupancy:
     if not p.exists():
         raise FileNotFoundError(f"{p} missing: run `python -m scenes.test_house --house {ref.house_id}` on the box first")
     return load_npz(p, ref.house_id)
+
+
+def occupancy_reply(house_id: str, robot_radius: float | None = None, root: Path | None = None) -> dict:
+    """Reply for P1's REP `get_occupancy` (docs/contracts/m1.md §1.6). Re-inflates the cached
+    grid for another robot_radius without Isaac and writes occupancy_r<r>.npz next to it."""
+    occ = get_occupancy(house_id, root)
+    d = (root or HOUSE_ASSETS_ROOT) / parse_house_id(house_id).house_id
+    path = d / "occupancy.npz"
+    if robot_radius is not None and abs(robot_radius - occ.robot_radius) > 1e-6:
+        occ = finish(occ.house_id, occ.raw, occ.origin, occ.resolution, occ.z_min, occ.z_max, float(robot_radius), occ.method, occ.low)
+        path = d / f"occupancy_r{robot_radius:.2f}.npz"
+        if not path.exists():
+            tmp = d / f".tmp_r{robot_radius:.2f}"
+            occ.save(tmp)
+            (tmp / "occupancy.npz").replace(path)
+            for f in tmp.iterdir():
+                f.unlink()
+            tmp.rmdir()
+    ny, nx = occ.shape
+    return {
+        "path": str(path),
+        "resolution": occ.resolution,
+        "origin": [occ.origin[0], occ.origin[1]],
+        "shape": [ny, nx],
+        "robot_radius": occ.robot_radius,
+        "z_band": [occ.z_min, occ.z_max],
+        "source": f"scene:{occ.method}",
+        "keys": {"occ": "blocked, not inflated (obstacle z 0.02-1.6 m or outside)", "occ_inflated": "occ inflated by robot_radius",
+                 "raw": "0 free / 1 obstacle z_band / 2 outside", "inflated": "raw inflated (z_band only)", "dist": "m to nearest raw!=0"},
+        "png": str(d / "occupancy.png"),
+    }
 
 
 def occupancy_summary(house_id: str, root: Path | None = None) -> dict:
@@ -500,7 +542,11 @@ def raster_omap(origin, shape, resolution, z_min, z_max, seed_xy) -> tuple[np.nd
     ny, nx = shape
     gen = _omap.Generator(omni.physx.get_physx_interface(), omni.usd.get_context().get_stage_id())
     gen.update_settings(resolution, 1.0, 0.0, 0.5)
-    ox, oy = seed_xy
+    # The omap lattice is anchored at the seed (origin) point: snap the seed onto our lattice,
+    # otherwise its cells are offset by a fraction of a cell (measured: IoU 0.83 on FloorPlan10
+    # with an unsnapped seed vs 0.99+ snapped).
+    ox = origin[0] + round((seed_xy[0] - origin[0]) / resolution) * resolution
+    oy = origin[1] + round((seed_xy[1] - origin[1]) / resolution) * resolution
     xmin, ymin = origin
     xmax, ymax = origin[0] + nx * resolution, origin[1] + ny * resolution
     gen.set_transform((ox, oy, 0.0), (xmin - ox, ymin - oy, z_min), (xmax - ox, ymax - oy, z_max))

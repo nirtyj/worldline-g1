@@ -161,3 +161,40 @@ def settle_check(house, sim, seconds: float = 5.0) -> dict:
         if dz < -0.2:
             fell.append(name)
     return {"seconds": seconds, "tracked_bodies": len(before), "moved_gt_5cm": moved, "fell_gt_20cm": fell}
+
+
+def awake_bodies(house, sim, seconds: float = 0.5, tol_m: float = 2e-4, tol_rad: float = 2e-3) -> dict:
+    """Rigid bodies (props and articulation links) still moving after settling: they keep PhysX
+    busy every step. Identifies what makes a house expensive to simulate."""
+    import omni.physx
+    import omni.usd
+    from pxr import Usd, UsdPhysics
+
+    stage = omni.usd.get_context().get_stage()
+    px = omni.physx.get_physx_interface()
+    paths = [str(p.GetPath()) for p in Usd.PrimRange(stage.GetPrimAtPath(house.root)) if p.HasAPI(UsdPhysics.RigidBodyAPI)]
+
+    def snap():
+        out = {}
+        for p in paths:
+            t = px.get_rigidbody_transformation(p)
+            if t and t.get("ret_val"):
+                out[p] = (np.asarray(t["position"], float), np.asarray(t["rotation"], float))
+        return out
+
+    a = snap()
+    for _ in range(int(round(seconds / sim.get_physics_dt()))):
+        sim.step(render=False)
+    b = snap()
+    movers = []
+    for p, (pa, qa) in a.items():
+        if p not in b:
+            continue
+        pb, qb = b[p]
+        dp = float(np.linalg.norm(pb - pa))
+        dq = float(2 * math.acos(min(1.0, abs(float(np.dot(qa, qb))))))
+        if dp > tol_m or dq > tol_rad:
+            owner = next((o.name for o in house.objects if p.startswith(o.prim_path + "/") or p == o.prim_path), p.rsplit("/", 1)[-1])
+            movers.append({"body": p.replace(house.root + "/Geometry/", ""), "object": owner, "dp_m": round(dp, 5), "drot_rad": round(dq, 4)})
+    movers.sort(key=lambda m: -(m["dp_m"] + m["drot_rad"]))
+    return {"bodies": len(paths), "readable": len(a), "moving": len(movers), "window_s": seconds, "top": movers[:15]}
