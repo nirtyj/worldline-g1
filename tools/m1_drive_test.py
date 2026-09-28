@@ -36,7 +36,7 @@ from body.client import BodyClient  # noqa: E402
 from body.config import ep, ports as _ports, port_offset_from_env  # noqa: E402
 from body.nav_grid import NavGrid  # noqa: E402
 from body.p1_client import P1Rpc  # noqa: E402
-from body.wire import decode_camera_message, loads_any, split_topic, wrap, yaw_from_quat_wxyz  # noqa: E402
+from body.wire import _num, decode_camera_message, loads_any, split_topic, wrap, yaw_from_quat_wxyz  # noqa: E402
 
 DEG = math.pi / 180.0
 
@@ -83,10 +83,11 @@ class PoseRecorder(threading.Thread):
             v = d.get("base_lin_vel_w") or [float("nan")] * 3
             w = d.get("base_ang_vel_w") or [float("nan")] * 3
             fc = d.get("foot_contact") or {}
-            row = (time.time(), float(d.get("t_sim", float("nan"))), float(pos[0]), float(pos[1]), float(pos[2]),
-                   yaw, float(v[0]), float(v[1]), float(w[2]), float(d.get("pelvis_z", pos[2])),
+            nan = float("nan")
+            row = (time.time(), _num(d.get("t_sim"), nan), float(pos[0]), float(pos[1]), float(pos[2]),
+                   yaw, _num(v[0], nan), _num(v[1], nan), _num(w[2], nan), _num(d.get("pelvis_z"), float(pos[2])),
                    int(bool(d.get("fallen", False))), int(bool(fc.get("left", False))),
-                   int(bool(fc.get("right", False))), float(d.get("rtf", float("nan"))))
+                   int(bool(fc.get("right", False))), _num(d.get("rtf"), nan))
             with self.lock:
                 self.rows.append(row)
         s.close(0)
@@ -683,8 +684,9 @@ class DriveTest:
             "foot_contacts_walking": contacts,
             "p1_stats_start": self.stats0, "p1_stats_end": stats1,
             "root_writes_reported_by_p1": {"start": self.stats0.get("root_writes"), "end": stats1.get("root_writes")},
-            "lowcmd_rx_hz_p1": stats1.get("lowcmd_rx_hz"),
-            "lowcmd_leg_change_hz_p1": stats1.get("lowcmd_leg_change_hz"),
+            "lowcmd_fresh_hz_p1": stats1.get("lowcmd_fresh_hz", stats1.get("lowcmd_rx_hz")),
+            "lowcmd_leg_change_hz_p1": stats1.get("lowcmd_leg_change_hz"),   # ~50 Hz under SONIC (m1.md §1.6)
+            "lowcmd_count_p1": stats1.get("lowcmd_count"),
             "p1_record": self.record_stop,
             "deploy": st.get("deploy"),
         }
@@ -719,12 +721,15 @@ class DriveTest:
                       "render_hz_p1": e4["p1_stats_end"].get("render_hz"),
                       "camera_pub_hz_p1": e4["p1_stats_end"].get("camera_pub_hz"),
                       "lowstate_pub_hz_p1": e4["p1_stats_end"].get("lowstate_pub_hz"),
-                      "lowcmd_rx_hz_p1": e4["p1_stats_end"].get("lowcmd_rx_hz")},
+                      "gt_pose_hz_p1": e4["p1_stats_end"].get("gt_pose_hz"),
+                      "lowcmd_fresh_hz_p1": e4["p1_stats_end"].get("lowcmd_fresh_hz")},
             "rtf": {"gt_pose_mean": None if not len(rtf) else round(float(rtf.mean()), 4),
                     "gt_pose_min": None if not len(rtf) else round(float(rtf.min()), 4),
                     "gt_pose_p05": None if not len(rtf) else round(float(np.percentile(rtf, 5)), 4),
                     "p1_rtf_total": e4["p1_stats_end"].get("rtf_total"),
-                    "p1_rtf_10s_end": e4["p1_stats_end"].get("rtf_10s")},
+                    "p1_rtf_10s_end": e4["p1_stats_end"].get("rtf_10s"),
+                    "p1_rtf_1s_min": e4["p1_stats_end"].get("rtf_1s_min"),
+                    "p1_rtf_1s_below_0p95_frac": e4["p1_stats_end"].get("rtf_1s_below_0p95_frac")},
             "falls": self.falls, "fell_any": bool(len(a) and a[:, 10].any()),
             "tests": tests,
             "summary": {r["name"]: bool(r.get("pass")) for r in self.results},

@@ -261,9 +261,9 @@ class Pose:
     def __init__(self, d: dict, recv_mono: float):
         self.raw = d
         self.recv_mono = recv_mono
-        self.t_sim = float(d.get("t_sim", 0.0))
-        self.t_wall = float(d.get("t_wall", 0.0))
-        self.rtf = float(d.get("rtf", float("nan")))
+        self.t_sim = _num(d.get("t_sim"), 0.0)
+        self.t_wall = _num(d.get("t_wall"), 0.0)
+        self.rtf = _num(d.get("rtf"), float("nan"))       # m1.md §1.5: rtf may be null during warm-up
         pos = d.get("base_pos") or [0.0, 0.0, 0.0]
         self.x, self.y, self.z = float(pos[0]), float(pos[1]), float(pos[2])
         self.quat = list(d.get("base_quat_wxyz") or [1.0, 0.0, 0.0, 0.0])
@@ -273,7 +273,7 @@ class Pose:
         self.vx, self.vy = float(v[0]), float(v[1])
         w = d.get("base_ang_vel_w") or [0.0, 0.0, 0.0]
         self.wz = float(w[2])
-        self.pelvis_z = float(d.get("pelvis_z", self.z))
+        self.pelvis_z = _num(d.get("pelvis_z"), self.z)
         self.fallen = bool(d.get("fallen", False))
         fc = d.get("foot_contact") or {}
         self.contact_l = bool(fc.get("left", False))
@@ -290,6 +290,13 @@ class Pose:
         return {"x": round(self.x, 4), "y": round(self.y, 4), "yaw": round(self.yaw, 4),
                 "pelvis_z": round(self.pelvis_z, 4), "v": round(self.speed, 3), "wz": round(self.wz, 3),
                 "fallen": self.fallen, "t_sim": round(self.t_sim, 3)}
+
+
+def _num(v, default: float) -> float:
+    try:
+        return default if v is None else float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def parse_pose(payload: bytes, recv_mono: float) -> Pose:

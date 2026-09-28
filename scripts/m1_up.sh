@@ -98,9 +98,11 @@ if [[ "$FAKE" == 1 ]]; then
   tmux send-keys -t "=$SESSION:deploy" "cd $WL && exec $PY_BODY -u -m tools.fake_deploy --port-offset $OFFSET 2>&1 | tee -a $LOG_DEPLOY" C-m
   for i in $(seq 1 30); do grep -q "Init Done" "$LOG_DEPLOY" 2>/dev/null && break; sleep 1; done
 else
+  # DEPLOY_FORCE=1 only inside an isolated network namespace (scripts/body_netns_e2e.sh): run_deploy.sh refuses to
+  # start while another g1_deploy_onnx_ref runs anywhere on the host, because DDS domain 0 on lo would be shared.
   bash "$WL/sonic/run_deploy.sh" start --session "$SESSION" --window deploy --log "$LOG_DEPLOY" \
       --zmq-port $((5556 + OFFSET)) --zmq-out-port $((5557 + OFFSET)) --wait-init "${DEPLOY_WAIT_S:-900}" \
-      || die "deploy did not reach Init Done"
+      ${DEPLOY_FORCE:+--force} || die "deploy did not reach Init Done"
 fi
 wr deploy_log --file "$LOG_DEPLOY" --timeout 30 || die "no 'Init Done' in $LOG_DEPLOY"
 wr deploy --timeout 30 || die "deploy not publishing on $((5557 + OFFSET))"

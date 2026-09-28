@@ -359,7 +359,7 @@ class FakeP1:
             if op == "get_stats":
                 return {"ok": True, "rtf_1s": 1.0, "rtf_10s": 1.0, "physics_hz_1s": self.physics_hz,
                         "render_hz": self.cam_hz, "camera_pub_hz": self.cam_hz, "lowstate_pub_hz": self.physics_hz,
-                        "step_ms": {"mean": self.step_ms}, "lowcmd_rx_hz": None, "twist_msgs": self.link_count,
+                        "step_ms": {"mean": self.step_ms}, "lowcmd_fresh_hz": None, "twist_msgs": self.link_count,
                         "collisions": self.collisions, "root_writes": self.root_writes, "fake": True}
             if op == "render_topdown":
                 path = a.get("path") or os.path.join(self.out_dir, "topdown.png")
