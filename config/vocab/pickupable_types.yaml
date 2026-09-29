@@ -1,0 +1,72 @@
+# The FIXED pickupable vocabulary (PLAN §1.3 #10, §6.4 "@vocab:pickupable").
+#
+# AI2-THOR pickupable object types in THOR snake_case (the same names Worldline's belief, memory and eval use).
+# The fallback skills' object_types expand this list; it is NEVER derived from the scene catalog, so the tool enum
+# does not reveal which types exist in a house (the `missing_object` eval asks for a banana that is not there).
+#
+# world/ also uses it to decide which scene items are "objects" (pickupable, named <type>_<n>) as opposed to
+# landmarks or furniture (THOR's `pickupable` flag; MolmoSpaces has no such flag, only is_static).
+version: 1
+types:
+  - alarm_clock
+  - aluminum_foil
+  - apple
+  - banana            # not an AI2-THOR type; kept so "bring me the banana" is a valid call that ends in "not found"
+  - baseball_bat
+  - basket_ball
+  - book
+  - boots
+  - bottle
+  - bowl
+  - box
+  - bread
+  - butter_knife
+  - candle
+  - cd
+  - cell_phone
+  - cloth
+  - credit_card
+  - cup
+  - dish_sponge
+  - dumbbell
+  - egg
+  - fork
+  - hand_towel
+  - kettle
+  - key_chain
+  - knife
+  - ladle
+  - laptop
+  - lettuce
+  - mug
+  - newspaper
+  - pan
+  - paper_towel_roll
+  - pen
+  - pencil
+  - pepper_shaker
+  - pillow
+  - plate
+  - plunger
+  - pot
+  - potato
+  - remote_control
+  - salt_shaker
+  - scrub_brush
+  - soap_bar
+  - soap_bottle
+  - spatula
+  - spoon
+  - spray_bottle
+  - statue
+  - table_top_decor
+  - teddy_bear
+  - tennis_racket
+  - tissue_box
+  - toilet_paper
+  - tomato
+  - towel
+  - vase
+  - watch
+  - watering_can
+  - wine_bottle

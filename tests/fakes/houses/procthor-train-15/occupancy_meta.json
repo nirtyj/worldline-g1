@@ -1,0 +1,82 @@
+{
+  "house_id": "procthor-train-15",
+  "npz": "/work/worldline-g1/assets/houses/procthor-train-15/occupancy.npz",
+  "resolution": 0.05,
+  "origin": [
+    -0.3,
+    -0.3
+  ],
+  "shape": [
+    261,
+    261
+  ],
+  "extent_xy": [
+    -0.3,
+    12.75,
+    -0.3,
+    12.75
+  ],
+  "z_band": [
+    0.1,
+    1.6
+  ],
+  "robot_radius": 0.3,
+  "inflation": "cells closer than robot_radius=0.3 m to an obstacle/outside cell are blocked",
+  "method": "omap",
+  "cell_convention": "arr[iy, ix]; world_x = origin_x + (ix+0.5)*res; world_y = origin_y + (iy+0.5)*res",
+  "values": {
+    "raw": "0 free, 1 obstacle, 2 outside",
+    "inflated": "1 blocked for robot centre",
+    "inflated_low": "inflated, also inflating low colliders (recommended for walking)",
+    "low": "1 low collider (trip hazard) in [low_z_min, z_min)"
+  },
+  "counts": {
+    "free": 45808,
+    "obstacle": 11714,
+    "outside": 10599,
+    "free_after_inflation": 32842,
+    "free_after_inflation_incl_low": 32842,
+    "low": 38
+  },
+  "free_area_m2": 82.10500000000002,
+  "bounds_xy": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      12.402,
+      12.402
+    ]
+  ],
+  "overlap_s": 0.32,
+  "omap": {
+    "generate2d_s": 0.076,
+    "dims": [
+      260,
+      260,
+      1
+    ],
+    "min_bound": [
+      -0.30000001192092896,
+      -0.30000001192092896,
+      0.0
+    ],
+    "max_bound": [
+      12.699999809265137,
+      12.699999809265137,
+      0.05000000074505806
+    ],
+    "buffer_len": 67600,
+    "n_occupied_pts": 11714,
+    "n_free_pts": 55886
+  },
+  "omap_vs_overlap": {
+    "iou_obstacles_inside": 0.9992,
+    "omap_only_cells": 9,
+    "overlap_only_cells": 0,
+    "omap_unknown_inside": 0
+  },
+  "method_choice": "omap kept (IoU 0.999 >= 0.9 vs exact PhysX overlap raster)",
+  "low_s": 0.26
+}

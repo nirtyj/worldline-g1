@@ -1,0 +1,2596 @@
+{
+ "house_id": "procthor-train-38",
+ "kind": "procthor",
+ "source": "procthor-10k-train",
+ "usd_path": "/work/assets/molmospaces/usd/scenes/procthor-10k-train/train_38/scene.usda",
+ "root": "/World/House",
+ "floor_z": 0.0,
+ "bounds_xy": [
+  [
+   0.0,
+   0.0
+  ],
+  [
+   9.55,
+   11.46
+  ]
+ ],
+ "rooms": [
+  {
+   "room_id": 2,
+   "name": "bedroom",
+   "type": "Bedroom",
+   "polygon": [
+    [
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     3.82
+    ],
+    [
+     5.73,
+     3.82
+    ],
+    [
+     9.55,
+     3.82
+    ],
+    [
+     9.55,
+     0.0
+    ]
+   ],
+   "area_m2": 36.481,
+   "center": [
+    4.966,
+    2.292
+   ]
+  },
+  {
+   "room_id": 6,
+   "name": "kitchen",
+   "type": "Kitchen",
+   "polygon": [
+    [
+     0.0,
+     11.46
+    ],
+    [
+     5.73,
+     11.46
+    ],
+    [
+     5.73,
+     3.82
+    ],
+    [
+     0.0,
+     3.82
+    ]
+   ],
+   "area_m2": 43.777,
+   "center": [
+    2.865,
+    7.64
+   ]
+  },
+  {
+   "room_id": 7,
+   "name": "living_room",
+   "type": "LivingRoom",
+   "polygon": [
+    [
+     5.73,
+     3.82
+    ],
+    [
+     5.73,
+     11.46
+    ],
+    [
+     9.55,
+     11.46
+    ],
+    [
+     9.55,
+     3.82
+    ]
+   ],
+   "area_m2": 29.185,
+   "center": [
+    7.64,
+    7.64
+   ]
+  }
+ ],
+ "objects": [
+  {
+   "id": "door|6|7",
+   "name": "doorway_3",
+   "category": "Doorway",
+   "label": "doorway",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/doorway_f09c8311308eb10c777a36ef4eb09aaf_1_0_6",
+   "body_path": null,
+   "pos": [
+    5.73,
+    9.756,
+    1.05
+   ],
+   "aabb": [
+    [
+     5.6091,
+     9.2352,
+     -0.0016
+    ],
+    [
+     6.646,
+     10.2768,
+     2.1022
+    ]
+   ],
+   "is_static": true,
+   "articulated": true,
+   "asset_id": "Doorway_10",
+   "extra_prims": []
+  },
+  {
+   "id": "door|2|6",
+   "name": "doorway_2",
+   "category": "Doorway",
+   "label": "doorway",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/doorway_5f21793c473db851bf7da2aefb0af351_1_0_2",
+   "body_path": null,
+   "pos": [
+    4.1701,
+    3.82,
+    1.0364
+   ],
+   "aabb": [
+    [
+     3.2143,
+     3.7392,
+     -0.0006
+    ],
+    [
+     5.1263,
+     4.7222,
+     2.0719
+    ]
+   ],
+   "is_static": true,
+   "articulated": true,
+   "asset_id": "Doorway_Double_2",
+   "extra_prims": []
+  },
+  {
+   "id": "door|1|7",
+   "name": "doorway_1",
+   "category": "Doorway",
+   "label": "doorway",
+   "room_id": 1,
+   "room": null,
+   "prim_path": "/World/House/Geometry/doorway_74e9049d84b6e901f0f40cec3627da0f_1_0_1",
+   "body_path": null,
+   "pos": [
+    9.55,
+    7.2247,
+    1.0372
+   ],
+   "aabb": [
+    [
+     9.44,
+     6.7256,
+     -0.0006
+    ],
+    [
+     9.66,
+     7.724,
+     2.0733
+    ]
+   ],
+   "is_static": true,
+   "articulated": true,
+   "asset_id": "Doorway_9",
+   "extra_prims": []
+  },
+  {
+   "id": "window|6|0",
+   "name": "window_1",
+   "category": "Window",
+   "label": "window",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/window_21016d524161c15327d92f2f499fc4d7_1_0_6",
+   "body_path": null,
+   "pos": [
+    0.0,
+    5.0907,
+    1.498
+   ],
+   "aabb": [
+    [
+     -0.0406,
+     4.4811,
+     0.8895
+    ],
+    [
+     0.0406,
+     5.7003,
+     2.1087
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Window_Slider_48x48",
+   "extra_prims": []
+  },
+  {
+   "id": "window|6|1",
+   "name": "window_2",
+   "category": "Window",
+   "label": "window",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/window_76ae12c4dabc4895be686fe9df54801e_1_0_6",
+   "body_path": null,
+   "pos": [
+    3.2786,
+    11.46,
+    1.4993
+   ],
+   "aabb": [
+    [
+     2.6946,
+     11.3392,
+     0.7085
+    ],
+    [
+     3.8626,
+     11.5808,
+     2.2875
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Window_Hung_44x60",
+   "extra_prims": []
+  },
+  {
+   "id": "window|7|0",
+   "name": "window_3",
+   "category": "Window",
+   "label": "window",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/window_aba84c35029e34c5a7e807b17919bc88_1_0_7",
+   "body_path": null,
+   "pos": [
+    6.7753,
+    11.46,
+    1.4978
+   ],
+   "aabb": [
+    [
+     6.0133,
+     11.4194,
+     0.5841
+    ],
+    [
+     7.5373,
+     11.5006,
+     2.4129
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Window_Fixed_60x72",
+   "extra_prims": []
+  },
+  {
+   "id": "CounterTop|6|0",
+   "name": "counter_top_1",
+   "category": "CounterTop",
+   "label": "counter_top",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/countertop_d78a12e6334da555c6476e95fa418167_1_0_6",
+   "body_path": null,
+   "pos": [
+    1.2444,
+    10.8152,
+    0.4692
+   ],
+   "aabb": [
+    [
+     0.025,
+     10.1958,
+     0.0013
+    ],
+    [
+     2.4634,
+     11.435,
+     0.9373
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Countertop_C_8x4",
+   "extra_prims": []
+  },
+  {
+   "id": "Pan|surface|6|1",
+   "name": "pan_1",
+   "category": "Pan",
+   "label": "pan",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/cookingpan_36c8da2ee0e2c5654836906295152067_1_0_6",
+   "body_path": "/World/House/Geometry/cookingpan_36c8da2ee0e2c5654836906295152067_1_0_6/Geometry/Pan_9",
+   "pos": [
+    0.9398,
+    11.1308,
+    0.9608
+   ],
+   "aabb": [
+    [
+     0.772,
+     10.9889,
+     0.9396
+    ],
+    [
+     1.1076,
+     11.2728,
+     0.9832
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Pan_9",
+   "extra_prims": []
+  },
+  {
+   "id": "Toaster|surface|6|2",
+   "name": "toaster_1",
+   "category": "Toaster",
+   "label": "toaster",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/toaster_f6b7b2a09f6fb667b57d580314f1f1d9_1_0_6",
+   "body_path": "/World/House/Geometry/toaster_f6b7b2a09f6fb667b57d580314f1f1d9_1_0_6/Geometry/Toaster_15",
+   "pos": [
+    0.4064,
+    10.4231,
+    1.0556
+   ],
+   "aabb": [
+    [
+     0.2918,
+     10.1984,
+     0.9414
+    ],
+    [
+     0.5207,
+     10.6461,
+     1.1662
+    ]
+   ],
+   "is_static": false,
+   "articulated": true,
+   "asset_id": "Toaster_15",
+   "extra_prims": []
+  },
+  {
+   "id": "Fork|surface|6|3",
+   "name": "fork_1",
+   "category": "Fork",
+   "label": "fork",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/fork_a17d780ca6a79038b069eb7768c962c4_1_0_6",
+   "body_path": "/World/House/Geometry/fork_a17d780ca6a79038b069eb7768c962c4_1_0_6/Geometry/Fork_1",
+   "pos": [
+    1.9234,
+    10.3539,
+    0.9482
+   ],
+   "aabb": [
+    [
+     1.9074,
+     10.189,
+     0.9369
+    ],
+    [
+     1.9395,
+     10.4318,
+     0.9572
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Fork_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Fork|surface|6|4",
+   "name": "fork_2",
+   "category": "Fork",
+   "label": "fork",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/fork_a17d780ca6a79038b069eb7768c962c4_2_0_6",
+   "body_path": "/World/House/Geometry/fork_a17d780ca6a79038b069eb7768c962c4_2_0_6/Geometry/Fork_1",
+   "pos": [
+    2.2328,
+    10.6931,
+    0.9483
+   ],
+   "aabb": [
+    [
+     2.2167,
+     10.5281,
+     0.9367
+    ],
+    [
+     2.2488,
+     10.771,
+     0.9577
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Fork_1",
+   "extra_prims": []
+  },
+  {
+   "id": "SoapBottle|surface|6|7",
+   "name": "soap_bottle_1",
+   "category": "SoapBottle",
+   "label": "soap_bottle",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/soapdispenser_861861ca3ac76e2bd59ef00001dfc01c_1_0_6",
+   "body_path": "/World/House/Geometry/soapdispenser_861861ca3ac76e2bd59ef00001dfc01c_1_0_6/Geometry/Soap_Bottle_10",
+   "pos": [
+    0.4066,
+    10.75,
+    1.0961
+   ],
+   "aabb": [
+    [
+     0.3446,
+     10.688,
+     0.9404
+    ],
+    [
+     0.4685,
+     10.812,
+     1.2522
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Soap_Bottle_10",
+   "extra_prims": []
+  },
+  {
+   "id": "Bowl|surface|6|9",
+   "name": "bowl_2",
+   "category": "Bowl",
+   "label": "bowl",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/bowl_2f9f64388a995199e35022d1cbe33117_1_0_6",
+   "body_path": "/World/House/Geometry/bowl_2f9f64388a995199e35022d1cbe33117_1_0_6/Geometry/Bowl_24",
+   "pos": [
+    0.1761,
+    10.4331,
+    0.9737
+   ],
+   "aabb": [
+    [
+     0.0784,
+     10.3354,
+     0.9403
+    ],
+    [
+     0.2738,
+     10.5308,
+     1.0092
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Bowl_24",
+   "extra_prims": []
+  },
+  {
+   "id": "CellPhone|surface|6|10",
+   "name": "cell_phone_3",
+   "category": "CellPhone",
+   "label": "cell_phone",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/cellulartelephone_7e064d39aa61ae3983505d5955fcd947_1_0_6",
+   "body_path": "/World/House/Geometry/cellulartelephone_7e064d39aa61ae3983505d5955fcd947_1_0_6/Geometry/Cellphone_3",
+   "pos": [
+    1.8569,
+    11.1309,
+    0.9432
+   ],
+   "aabb": [
+    [
+     1.8125,
+     11.0409,
+     0.9384
+    ],
+    [
+     1.9009,
+     11.2209,
+     0.9479
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Cellphone_3",
+   "extra_prims": []
+  },
+  {
+   "id": "Apple|surface|6|14",
+   "name": "apple_1",
+   "category": "Apple",
+   "label": "apple",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/apple_1d4990dc37d751a859248eaa9d6ecea0_1_0_6",
+   "body_path": "/World/House/Geometry/apple_1d4990dc37d751a859248eaa9d6ecea0_1_0_6/Geometry/Apple_23",
+   "pos": [
+    2.1618,
+    10.9741,
+    0.9842
+   ],
+   "aabb": [
+    [
+     2.1092,
+     10.92,
+     0.9348
+    ],
+    [
+     2.2138,
+     11.0287,
+     1.0473
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Apple_23",
+   "extra_prims": []
+  },
+  {
+   "id": "Potato|surface|6|15",
+   "name": "potato_1",
+   "category": "Potato",
+   "label": "potato",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/Irishpotato_e51aa2a563ab175e3b1f5198b977b65c_1_0_6",
+   "body_path": "/World/House/Geometry/Irishpotato_e51aa2a563ab175e3b1f5198b977b65c_1_0_6/Geometry/Potato_7",
+   "pos": [
+    2.3222,
+    10.6837,
+    0.9725
+   ],
+   "aabb": [
+    [
+     2.2606,
+     10.6221,
+     0.9217
+    ],
+    [
+     2.3851,
+     10.7495,
+     1.0277
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Potato_7",
+   "extra_prims": []
+  },
+  {
+   "id": "SaltShaker|surface|6|16",
+   "name": "salt_shaker_1",
+   "category": "SaltShaker",
+   "label": "salt_shaker",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/saltshaker_ae8db92b68885e8a5331b49cf1534319_1_0_6",
+   "body_path": "/World/House/Geometry/saltshaker_ae8db92b68885e8a5331b49cf1534319_1_0_6/Geometry/RoboTHOR_salt_pepper_shaker_bnyd_salt_v",
+   "pos": [
+    1.5513,
+    11.1308,
+    0.9877
+   ],
+   "aabb": [
+    [
+     1.5313,
+     11.1108,
+     0.9398
+    ],
+    [
+     1.5713,
+     11.1509,
+     1.0349
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "RoboTHOR_salt_pepper_shaker_bnyd_salt_v",
+   "extra_prims": []
+  },
+  {
+   "id": "DiningTable|6|1|0",
+   "name": "dining_table_2",
+   "category": "DiningTable",
+   "label": "dining_table",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/diningtable_9c02a064c4b425976de085d4eaaa59cb_1_0_6",
+   "body_path": null,
+   "pos": [
+    1.7546,
+    7.0955,
+    0.3708
+   ],
+   "aabb": [
+    [
+     1.1524,
+     6.7129,
+     -0.0001
+    ],
+    [
+     2.3567,
+     7.4781,
+     0.7411
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "RoboTHOR_dining_table_jokkmokk_v",
+   "extra_prims": []
+  },
+  {
+   "id": "CellPhone|surface|6|0",
+   "name": "cell_phone_2",
+   "category": "CellPhone",
+   "label": "cell_phone",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/cellulartelephone_79d81841705619222272d6979ea2970b_1_0_6",
+   "body_path": "/World/House/Geometry/cellulartelephone_79d81841705619222272d6979ea2970b_1_0_6/Geometry/Cellphone_5",
+   "pos": [
+    2.2018,
+    7.284,
+    0.7459
+   ],
+   "aabb": [
+    [
+     2.1651,
+     7.214,
+     0.7419
+    ],
+    [
+     2.2385,
+     7.3531,
+     0.7496
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Cellphone_5",
+   "extra_prims": []
+  },
+  {
+   "id": "Bottle|surface|6|8",
+   "name": "bottle_1",
+   "category": "Bottle",
+   "label": "bottle",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/bottle_8382d4ed00ffcc00a477337974541bb1_1_0_6",
+   "body_path": "/World/House/Geometry/bottle_8382d4ed00ffcc00a477337974541bb1_1_0_6/Geometry/Bottle_1",
+   "pos": [
+    1.9022,
+    6.9999,
+    0.8707
+   ],
+   "aabb": [
+    [
+     1.8465,
+     6.9442,
+     0.744
+    ],
+    [
+     1.9579,
+     7.0556,
+     0.9983
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Bottle_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Cup|surface|6|13",
+   "name": "cup_1",
+   "category": "Cup",
+   "label": "cup",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/cup_c2a1d01cc61341b5eb8c564a7fb9c769_1_0_6",
+   "body_path": "/World/House/Geometry/cup_c2a1d01cc61341b5eb8c564a7fb9c769_1_0_6/Geometry/Cup_18",
+   "pos": [
+    1.3032,
+    6.9999,
+    0.824
+   ],
+   "aabb": [
+    [
+     1.2442,
+     6.9405,
+     0.7435
+    ],
+    [
+     1.363,
+     7.0593,
+     0.9035
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Cup_18",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|6|1|1",
+   "name": "chair_5",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/chair_4a98dd07b4eedfbacf6122c1e99a3eed_1_0_6",
+   "body_path": null,
+   "pos": [
+    1.7546,
+    6.6119,
+    0.5217
+   ],
+   "aabb": [
+    [
+     1.4819,
+     6.3104,
+     -0.0004
+    ],
+    [
+     2.0276,
+     6.9132,
+     1.0418
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_007_2",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|6|1|2",
+   "name": "chair_6",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/chair_4a98dd07b4eedfbacf6122c1e99a3eed_2_0_6",
+   "body_path": null,
+   "pos": [
+    0.9929,
+    7.0955,
+    0.5217
+   ],
+   "aabb": [
+    [
+     0.7026,
+     6.8362,
+     -0.0004
+    ],
+    [
+     1.283,
+     7.3545,
+     1.0418
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_007_2",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|6|1|3",
+   "name": "chair_7",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/chair_4a98dd07b4eedfbacf6122c1e99a3eed_3_0_6",
+   "body_path": null,
+   "pos": [
+    2.5163,
+    7.0955,
+    0.5217
+   ],
+   "aabb": [
+    [
+     2.1978,
+     6.8008,
+     -0.0004
+    ],
+    [
+     2.8351,
+     7.3905,
+     1.0418
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_007_2",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|6|1|4",
+   "name": "chair_8",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/chair_4a98dd07b4eedfbacf6122c1e99a3eed_4_0_6",
+   "body_path": null,
+   "pos": [
+    1.7546,
+    7.5791,
+    0.5217
+   ],
+   "aabb": [
+    [
+     1.4554,
+     7.2574,
+     -0.0004
+    ],
+    [
+     2.0535,
+     7.9011,
+     1.0418
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_007_2",
+   "extra_prims": []
+  },
+  {
+   "id": "Fridge|6|2",
+   "name": "fridge_1",
+   "category": "Fridge",
+   "label": "fridge",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/refrigerator_499a7ea0591eb6b83faae667ac7ccdfa_1_0_6",
+   "body_path": null,
+   "pos": [
+    4.3997,
+    11.0737,
+    0.901
+   ],
+   "aabb": [
+    [
+     3.9104,
+     10.7061,
+     0.0
+    ],
+    [
+     4.9153,
+     11.435,
+     1.802
+    ]
+   ],
+   "is_static": true,
+   "articulated": true,
+   "asset_id": "Fridge_6",
+   "extra_prims": []
+  },
+  {
+   "id": "Potato|surface|6|5",
+   "name": "potato_2",
+   "category": "Potato",
+   "label": "potato",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/Irishpotato_53955c8c21163cdb723abd33fb4c248d_1_0_6",
+   "body_path": "/World/House/Geometry/Irishpotato_53955c8c21163cdb723abd33fb4c248d_1_0_6/Geometry/Potato_9",
+   "pos": [
+    4.1929,
+    11.0769,
+    1.1322
+   ],
+   "aabb": [
+    [
+     4.1519,
+     11.0138,
+     1.0773
+    ],
+    [
+     4.2496,
+     11.1394,
+     1.1905
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Potato_9",
+   "extra_prims": []
+  },
+  {
+   "id": "Potato|surface|6|6",
+   "name": "potato_3",
+   "category": "Potato",
+   "label": "potato",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/Irishpotato_27f41066f714b93c23f7a8f42a932407_1_0_6",
+   "body_path": "/World/House/Geometry/Irishpotato_27f41066f714b93c23f7a8f42a932407_1_0_6/Geometry/Potato_19",
+   "pos": [
+    4.6579,
+    11.0959,
+    0.6417
+   ],
+   "aabb": [
+    [
+     4.6099,
+     11.0072,
+     0.5763
+    ],
+    [
+     4.7079,
+     11.1827,
+     0.7166
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Potato_19",
+   "extra_prims": []
+  },
+  {
+   "id": "Egg|surface|6|11",
+   "name": "egg_1",
+   "category": "Egg",
+   "label": "egg",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/egg_42ba097bdb4a3b55fe0b3765a6f91265_1_0_6",
+   "body_path": "/World/House/Geometry/egg_42ba097bdb4a3b55fe0b3765a6f91265_1_0_6/Geometry/Egg_22",
+   "pos": [
+    4.1022,
+    11.1191,
+    1.1204
+   ],
+   "aabb": [
+    [
+     4.0543,
+     11.0731,
+     1.0812
+    ],
+    [
+     4.1493,
+     11.1659,
+     1.1597
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Egg_22",
+   "extra_prims": []
+  },
+  {
+   "id": "Egg|surface|6|12",
+   "name": "egg_2",
+   "category": "Egg",
+   "label": "egg",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/egg_8105fb5ffac56e85221c0eea53ac4fb5_1_0_6",
+   "body_path": "/World/House/Geometry/egg_8105fb5ffac56e85221c0eea53ac4fb5_1_0_6/Geometry/Egg_24",
+   "pos": [
+    4.1944,
+    11.1686,
+    1.1374
+   ],
+   "aabb": [
+    [
+     4.1615,
+     11.1326,
+     1.0934
+    ],
+    [
+     4.2273,
+     11.2049,
+     1.1825
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Egg_24",
+   "extra_prims": []
+  },
+  {
+   "id": "HousePlant|6|3|0",
+   "name": "house_plant_1",
+   "category": "HousePlant",
+   "label": "house_plant",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/houseplant_7f13f69584deff8d995848cc6d47b47d_1_0_6",
+   "body_path": "/World/House/Geometry/houseplant_7f13f69584deff8d995848cc6d47b47d_1_0_6/Geometry/Houseplant_26",
+   "pos": [
+    5.4435,
+    7.2679,
+    0.5484
+   ],
+   "aabb": [
+    [
+     5.1527,
+     7.0083,
+     0.005
+    ],
+    [
+     5.7203,
+     7.5255,
+     1.1095
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Houseplant_26",
+   "extra_prims": []
+  },
+  {
+   "id": "GarbageBag|6|4",
+   "name": "garbage_bag_1",
+   "category": "GarbageBag",
+   "label": "garbage_bag",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/binliner_0016d94f6a5a3c52abcc276311af7ca0_1_0_6",
+   "body_path": "/World/House/Geometry/binliner_0016d94f6a5a3c52abcc276311af7ca0_1_0_6/Geometry/GarbageBag_21_1",
+   "pos": [
+    4.8889,
+    9.0473,
+    0.2726
+   ],
+   "aabb": [
+    [
+     4.6739,
+     8.7864,
+     -0.0143
+    ],
+    [
+     5.1636,
+     9.3119,
+     0.598
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "GarbageBag_21_1",
+   "extra_prims": []
+  },
+  {
+   "id": "TVStand|7|0|0",
+   "name": "tvstand_1",
+   "category": "TVStand",
+   "label": "tvstand",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/stand_f6248a86c5b683b58be4307d13baa977_1_0_7",
+   "body_path": null,
+   "pos": [
+    6.0568,
+    4.4474,
+    0.3763
+   ],
+   "aabb": [
+    [
+     5.7616,
+     3.8488,
+     -0.0006
+    ],
+    [
+     6.3616,
+     5.0488,
+     0.7494
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "TV_Stand_206_3",
+   "extra_prims": []
+  },
+  {
+   "id": "Television|7|0|1",
+   "name": "television_2",
+   "category": "Television",
+   "label": "television",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/television_dad551dd28c2c99000bad2e7cf10ab0b_1_0_7",
+   "body_path": null,
+   "pos": [
+    6.0568,
+    4.4474,
+    1.1736
+   ],
+   "aabb": [
+    [
+     5.8204,
+     3.9529,
+     0.7531
+    ],
+    [
+     6.2959,
+     4.9419,
+     1.5894
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Television_29",
+   "extra_prims": []
+  },
+  {
+   "id": "Book|surface|7|17",
+   "name": "book_2",
+   "category": "Book",
+   "label": "book",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/book_c511b780fbec4933ff97730178eb1b70_1_0_7",
+   "body_path": null,
+   "pos": [
+    6.0011,
+    4.4425,
+    0.1778
+   ],
+   "aabb": [
+    [
+     5.8831,
+     4.3521,
+     0.1678
+    ],
+    [
+     6.1191,
+     4.5317,
+     0.188
+    ]
+   ],
+   "is_static": true,
+   "articulated": true,
+   "asset_id": "RoboTHOR_book_ai2_1_v",
+   "extra_prims": []
+  },
+  {
+   "id": "Pencil|surface|7|21",
+   "name": "pencil_1",
+   "category": "Pencil",
+   "label": "pencil",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/pencil_2c624e64d6f8a208a3a089ad77d16aa1_1_0_7",
+   "body_path": "/World/House/Geometry/pencil_2c624e64d6f8a208a3a089ad77d16aa1_1_0_7/Geometry/Pencil_4",
+   "pos": [
+    6.2084,
+    4.5977,
+    0.7571
+   ],
+   "aabb": [
+    [
+     6.1577,
+     4.5937,
+     0.7536
+    ],
+    [
+     6.2432,
+     4.6017,
+     0.7605
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Pencil_4",
+   "extra_prims": []
+  },
+  {
+   "id": "DogBed|7|1",
+   "name": "dog_bed_1",
+   "category": "DogBed",
+   "label": "dog_bed",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/pad_40f0405be70264b3ffe8b32e9347537b_1_0_7",
+   "body_path": "/World/House/Geometry/pad_40f0405be70264b3ffe8b32e9347537b_1_0_7/Geometry/Dog_Bed_2_1",
+   "pos": [
+    8.0207,
+    4.2422,
+    0.1579
+   ],
+   "aabb": [
+    [
+     7.5364,
+     3.8437,
+     -0.0098
+    ],
+    [
+     8.497,
+     4.6359,
+     0.3241
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Dog_Bed_2_1",
+   "extra_prims": []
+  },
+  {
+   "id": "DiningTable|7|2|0",
+   "name": "dining_table_3",
+   "category": "DiningTable",
+   "label": "dining_table",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/diningtable_ccf909fdcb2bcd7c1441fe7740cecd0b_1_0_7",
+   "body_path": null,
+   "pos": [
+    6.631,
+    7.6088,
+    0.3391
+   ],
+   "aabb": [
+    [
+     6.1367,
+     6.7226,
+     -0.0013
+    ],
+    [
+     7.1249,
+     8.4953,
+     0.6797
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Dining_Table_201_1",
+   "extra_prims": []
+  },
+  {
+   "id": "HousePlant|surface|7|19",
+   "name": "house_plant_3",
+   "category": "HousePlant",
+   "label": "house_plant",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/houseplant_d37aebaa50ea58533e6603f1787122b6_1_0_7",
+   "body_path": "/World/House/Geometry/houseplant_d37aebaa50ea58533e6603f1787122b6_1_0_7/Geometry/Houseplant_21",
+   "pos": [
+    6.7472,
+    7.8369,
+    1.0146
+   ],
+   "aabb": [
+    [
+     6.4492,
+     7.5372,
+     0.6792
+    ],
+    [
+     7.0345,
+     8.2055,
+     1.3746
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Houseplant_21",
+   "extra_prims": []
+  },
+  {
+   "id": "Bowl|surface|7|20",
+   "name": "bowl_3",
+   "category": "Bowl",
+   "label": "bowl",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/bowl_4d97da0c296398947839b0e020453a0f_1_0_7",
+   "body_path": "/World/House/Geometry/bowl_4d97da0c296398947839b0e020453a0f_1_0_7/Geometry/Bowl_19",
+   "pos": [
+    6.6317,
+    7.1657,
+    0.7085
+   ],
+   "aabb": [
+    [
+     6.5227,
+     7.0582,
+     0.6803
+    ],
+    [
+     6.7392,
+     7.2747,
+     0.7333
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Bowl_19",
+   "extra_prims": []
+  },
+  {
+   "id": "RemoteControl|surface|7|22",
+   "name": "remote_control_2",
+   "category": "RemoteControl",
+   "label": "remote_control",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/remotecontrol_dbbd4afce0b009e98224c7453fb4cfc5_1_0_7",
+   "body_path": "/World/House/Geometry/remotecontrol_dbbd4afce0b009e98224c7453fb4cfc5_1_0_7/Geometry/Remote_2",
+   "pos": [
+    7.0018,
+    7.3869,
+    0.6902
+   ],
+   "aabb": [
+    [
+     6.897,
+     7.3588,
+     0.6792
+    ],
+    [
+     7.1066,
+     7.415,
+     0.6977
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Remote_2",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|7|2|1",
+   "name": "chair_9",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/chair_32e90ac9966403f2e9bc9d3ea9297c04_1_0_7",
+   "body_path": null,
+   "pos": [
+    6.631,
+    6.5592,
+    0.3868
+   ],
+   "aabb": [
+    [
+     6.3912,
+     6.2984,
+     -0.0017
+    ],
+    [
+     6.8749,
+     6.8343,
+     0.7689
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_227_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|7|2|2",
+   "name": "chair_10",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/chair_32e90ac9966403f2e9bc9d3ea9297c04_2_0_7",
+   "body_path": null,
+   "pos": [
+    6.631,
+    8.6584,
+    0.3868
+   ],
+   "aabb": [
+    [
+     6.4182,
+     8.4048,
+     -0.0017
+    ],
+    [
+     6.8452,
+     8.8972,
+     0.7689
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_227_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|7|2|3",
+   "name": "chair_11",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/chair_32e90ac9966403f2e9bc9d3ea9297c04_3_0_7",
+   "body_path": null,
+   "pos": [
+    6.0371,
+    8.0759,
+    0.3868
+   ],
+   "aabb": [
+    [
+     5.771,
+     7.8244,
+     -0.0017
+    ],
+    [
+     6.3173,
+     8.3227,
+     0.7689
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_227_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|7|2|4",
+   "name": "chair_12",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/chair_32e90ac9966403f2e9bc9d3ea9297c04_4_0_7",
+   "body_path": null,
+   "pos": [
+    7.2248,
+    8.1146,
+    0.3868
+   ],
+   "aabb": [
+    [
+     6.9728,
+     7.9039,
+     -0.0017
+    ],
+    [
+     7.4622,
+     8.3272,
+     0.7689
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_227_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|7|2|5",
+   "name": "chair_13",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/chair_32e90ac9966403f2e9bc9d3ea9297c04_5_0_7",
+   "body_path": null,
+   "pos": [
+    7.2248,
+    7.1181,
+    0.3868
+   ],
+   "aabb": [
+    [
+     6.9613,
+     6.8932,
+     -0.0017
+    ],
+    [
+     7.4739,
+     7.3459,
+     0.7689
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_227_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|7|2|6",
+   "name": "chair_14",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/chair_32e90ac9966403f2e9bc9d3ea9297c04_6_0_7",
+   "body_path": null,
+   "pos": [
+    6.0371,
+    7.145,
+    0.3868
+   ],
+   "aabb": [
+    [
+     5.7688,
+     6.8949,
+     -0.0017
+    ],
+    [
+     6.3196,
+     7.3996,
+     0.7689
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Chair_227_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Sofa|7|3",
+   "name": "sofa_1",
+   "category": "Sofa",
+   "label": "sofa",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/sofa_89353741c15887a8129188676266700a_1_0_7",
+   "body_path": null,
+   "pos": [
+    9.0126,
+    10.3575,
+    0.46
+   ],
+   "aabb": [
+    [
+     8.4833,
+     9.2616,
+     -0.0015
+    ],
+    [
+     9.5284,
+     11.4095,
+     0.8992
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Sofa_208_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Bed|2|0|0",
+   "name": "bed_1",
+   "category": "Bed",
+   "label": "bed",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/bed_acf63c37b33cbff356a9057645cc06bc_1_0_2",
+   "body_path": null,
+   "pos": [
+    1.0345,
+    0.6071,
+    0.3371
+   ],
+   "aabb": [
+    [
+     0.028,
+     -0.3914,
+     0.0015
+    ],
+    [
+     2.304,
+     1.1957,
+     0.6751
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Bed_20",
+   "extra_prims": []
+  },
+  {
+   "id": "Pillow|2|0|2",
+   "name": "pillow_2",
+   "category": "Pillow",
+   "label": "pillow",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/pillow_f841eb7a24133aeb82c269ae8cdfa1a4_1_0_2",
+   "body_path": "/World/House/Geometry/pillow_f841eb7a24133aeb82c269ae8cdfa1a4_1_0_2/Geometry/pillow_30",
+   "pos": [
+    0.4892,
+    0.3419,
+    0.5911
+   ],
+   "aabb": [
+    [
+     0.2701,
+     0.1232,
+     0.5295
+    ],
+    [
+     0.7078,
+     0.5606,
+     0.6522
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "pillow_30",
+   "extra_prims": []
+  },
+  {
+   "id": "Pillow|2|0|1",
+   "name": "pillow_1",
+   "category": "Pillow",
+   "label": "pillow",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/pillow_f841eb7a24133aeb82c269ae8cdfa1a4_2_0_2",
+   "body_path": "/World/House/Geometry/pillow_f841eb7a24133aeb82c269ae8cdfa1a4_2_0_2/Geometry/pillow_30",
+   "pos": [
+    0.4891,
+    0.8711,
+    0.5911
+   ],
+   "aabb": [
+    [
+     0.2701,
+     0.6524,
+     0.5295
+    ],
+    [
+     0.7078,
+     1.0898,
+     0.6522
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "pillow_30",
+   "extra_prims": []
+  },
+  {
+   "id": "AlarmClock|surface|2|31",
+   "name": "alarm_clock_1",
+   "category": "AlarmClock",
+   "label": "alarm_clock",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/alarmclock_6aae73a7c34df52d7bbc4d7c8f6e9d3d_1_0_2",
+   "body_path": "/World/House/Geometry/alarmclock_6aae73a7c34df52d7bbc4d7c8f6e9d3d_1_0_2/Geometry/Alarm_Clock_26",
+   "pos": [
+    0.8049,
+    1.0298,
+    0.6227
+   ],
+   "aabb": [
+    [
+     0.7241,
+     0.9788,
+     0.5327
+    ],
+    [
+     0.8858,
+     1.0811,
+     0.7152
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Alarm_Clock_26",
+   "extra_prims": []
+  },
+  {
+   "id": "Dresser|2|1",
+   "name": "dresser_1",
+   "category": "Dresser",
+   "label": "dresser",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/chestofdrawers_22b31e6c8819e16e5b2ab4f7bfe7202c_1_0_2",
+   "body_path": null,
+   "pos": [
+    9.175,
+    1.1687,
+    0.4905
+   ],
+   "aabb": [
+    [
+     8.7856,
+     0.0321,
+     -0.0002
+    ],
+    [
+     9.5365,
+     2.3054,
+     0.9808
+    ]
+   ],
+   "is_static": true,
+   "articulated": true,
+   "asset_id": "Dresser_217_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Mug|surface|2|23",
+   "name": "mug_1",
+   "category": "Mug",
+   "label": "mug",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/mug_38903e9f02926f380b587d1b9de9c00b_1_0_2",
+   "body_path": "/World/House/Geometry/mug_38903e9f02926f380b587d1b9de9c00b_1_0_2/Geometry/Mug_2",
+   "pos": [
+    9.1029,
+    1.1689,
+    1.0345
+   ],
+   "aabb": [
+    [
+     9.0737,
+     1.1241,
+     0.9826
+    ],
+    [
+     9.1837,
+     1.2134,
+     1.0857
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Mug_2",
+   "extra_prims": []
+  },
+  {
+   "id": "Book|surface|2|25",
+   "name": "book_1",
+   "category": "Book",
+   "label": "book",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/book_1d86bd20453959c2ac45aaec57a3e0b1_1_0_2",
+   "body_path": null,
+   "pos": [
+    9.1755,
+    1.7371,
+    0.9894
+   ],
+   "aabb": [
+    [
+     9.0439,
+     1.5564,
+     0.981
+    ],
+    [
+     9.3059,
+     1.9179,
+     0.9982
+    ]
+   ],
+   "is_static": true,
+   "articulated": true,
+   "asset_id": "Book_21",
+   "extra_prims": []
+  },
+  {
+   "id": "TissueBox|surface|2|26",
+   "name": "tissue_box_1",
+   "category": "TissueBox",
+   "label": "tissue_box",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/tissuepaper_1f28299e6e99a63de7abb400051cb351_1_0_2",
+   "body_path": "/World/House/Geometry/tissuepaper_1f28299e6e99a63de7abb400051cb351_1_0_2/Geometry/Tissue_Box_1",
+   "pos": [
+    9.0874,
+    1.453,
+    1.056
+   ],
+   "aabb": [
+    [
+     8.9933,
+     1.4041,
+     0.9821
+    ],
+    [
+     9.1816,
+     1.5018,
+     1.1402
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Tissue_Box_1",
+   "extra_prims": []
+  },
+  {
+   "id": "RemoteControl|surface|2|30",
+   "name": "remote_control_1",
+   "category": "RemoteControl",
+   "label": "remote_control",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/remotecontrol_dbbd4afce0b009e98224c7453fb4cfc5_2_0_2",
+   "body_path": "/World/House/Geometry/remotecontrol_dbbd4afce0b009e98224c7453fb4cfc5_2_0_2/Geometry/Remote_2",
+   "pos": [
+    8.9123,
+    1.7371,
+    0.993
+   ],
+   "aabb": [
+    [
+     8.8842,
+     1.6323,
+     0.982
+    ],
+    [
+     8.9405,
+     1.842,
+     1.0005
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Remote_2",
+   "extra_prims": []
+  },
+  {
+   "id": "CellPhone|surface|2|32",
+   "name": "cell_phone_1",
+   "category": "CellPhone",
+   "label": "cell_phone",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/cellulartelephone_eebaa73634b56074933036e2a1bdf24c_1_0_2",
+   "body_path": "/World/House/Geometry/cellulartelephone_eebaa73634b56074933036e2a1bdf24c_1_0_2/Geometry/Cellphone_4",
+   "pos": [
+    9.2625,
+    1.4522,
+    0.9861
+   ],
+   "aabb": [
+    [
+     9.2183,
+     1.363,
+     0.9818
+    ],
+    [
+     9.3068,
+     1.5429,
+     0.9913
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Cellphone_4",
+   "extra_prims": []
+  },
+  {
+   "id": "DiningTable|2|2|0",
+   "name": "dining_table_1",
+   "category": "DiningTable",
+   "label": "dining_table",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/diningtable_12409cd5f7f694b8bf89ae1089f0bfa4_1_0_2",
+   "body_path": null,
+   "pos": [
+    4.5666,
+    0.9461,
+    0.3902
+   ],
+   "aabb": [
+    [
+     3.6803,
+     0.452,
+     0.0003
+    ],
+    [
+     5.4529,
+     1.4402,
+     0.7822
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Dining_Table_208_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Bowl|surface|2|27",
+   "name": "bowl_1",
+   "category": "Bowl",
+   "label": "bowl",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/bowl_af17ff58172d67a87a93d1cfa1195c4b_1_0_2",
+   "body_path": "/World/House/Geometry/bowl_af17ff58172d67a87a93d1cfa1195c4b_1_0_2/Geometry/Bowl_15",
+   "pos": [
+    4.7886,
+    1.317,
+    0.8208
+   ],
+   "aabb": [
+    [
+     4.7159,
+     1.2443,
+     0.782
+    ],
+    [
+     4.8613,
+     1.3897,
+     0.8587
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Bowl_15",
+   "extra_prims": []
+  },
+  {
+   "id": "Vase|surface|2|28",
+   "name": "vase_1",
+   "category": "Vase",
+   "label": "vase",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/vase_0dddf4ef0a8e7abaf196194af6f49dbe_1_0_2",
+   "body_path": "/World/House/Geometry/vase_0dddf4ef0a8e7abaf196194af6f49dbe_1_0_2/Geometry/Vase_Tall_1",
+   "pos": [
+    3.9009,
+    0.8224,
+    0.9294
+   ],
+   "aabb": [
+    [
+     3.8092,
+     0.7306,
+     0.783
+    ],
+    [
+     3.9925,
+     0.9142,
+     1.0815
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Vase_Tall_1",
+   "extra_prims": []
+  },
+  {
+   "id": "HousePlant|surface|2|29",
+   "name": "house_plant_2",
+   "category": "HousePlant",
+   "label": "house_plant",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/houseplant_25ffbf5c497590a2b32f38a0dbd3d34a_1_0_2",
+   "body_path": "/World/House/Geometry/houseplant_25ffbf5c497590a2b32f38a0dbd3d34a_1_0_2/Geometry/Houseplant_2",
+   "pos": [
+    4.0952,
+    1.1938,
+    1.1294
+   ],
+   "aabb": [
+    [
+     3.8148,
+     0.9484,
+     0.7846
+    ],
+    [
+     4.2375,
+     1.3858,
+     1.5277
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "Houseplant_2",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|2|2|1",
+   "name": "chair_1",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/chair_6ce2511c956e74ebea218fd672588d7e_1_0_2",
+   "body_path": null,
+   "pos": [
+    4.5666,
+    1.54,
+    0.3946
+   ],
+   "aabb": [
+    [
+     4.1854,
+     1.1642,
+     -0.0
+    ],
+    [
+     4.9566,
+     1.9159,
+     0.7732
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "RoboTHOR_office_chair_skruvsta",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|2|2|2",
+   "name": "chair_2",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/chair_6ce2511c956e74ebea218fd672588d7e_2_0_2",
+   "body_path": null,
+   "pos": [
+    5.6162,
+    0.9461,
+    0.3946
+   ],
+   "aabb": [
+    [
+     5.2784,
+     0.5912,
+     -0.0
+    ],
+    [
+     5.9525,
+     1.2923,
+     0.7732
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "RoboTHOR_office_chair_skruvsta",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|2|2|3",
+   "name": "chair_3",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/chair_6ce2511c956e74ebea218fd672588d7e_3_0_2",
+   "body_path": null,
+   "pos": [
+    3.517,
+    0.9461,
+    0.3946
+   ],
+   "aabb": [
+    [
+     3.1799,
+     0.5971,
+     -0.0
+    ],
+    [
+     3.8588,
+     1.3026,
+     0.7732
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "RoboTHOR_office_chair_skruvsta",
+   "extra_prims": []
+  },
+  {
+   "id": "Chair|2|2|4",
+   "name": "chair_4",
+   "category": "Chair",
+   "label": "chair",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/chair_6ce2511c956e74ebea218fd672588d7e_4_0_2",
+   "body_path": null,
+   "pos": [
+    4.5666,
+    0.3523,
+    0.3946
+   ],
+   "aabb": [
+    [
+     4.2384,
+     0.0454,
+     -0.0
+    ],
+    [
+     4.8868,
+     0.6628,
+     0.7732
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "RoboTHOR_office_chair_skruvsta",
+   "extra_prims": []
+  },
+  {
+   "id": "BaseballBat|2|3",
+   "name": "baseball_bat_1",
+   "category": "BaseballBat",
+   "label": "baseball_bat",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/baseballbat_a5dd09cf0637d5eeed6fe0007634fd32_1_0_2",
+   "body_path": "/World/House/Geometry/baseballbat_a5dd09cf0637d5eeed6fe0007634fd32_1_0_2/Geometry/BaseballBat_4",
+   "pos": [
+    0.5118,
+    2.7079,
+    0.0389
+   ],
+   "aabb": [
+    [
+     0.2782,
+     2.2557,
+     -0.0077
+    ],
+    [
+     0.7507,
+     3.1555,
+     0.082
+    ]
+   ],
+   "is_static": false,
+   "articulated": false,
+   "asset_id": "BaseballBat_4",
+   "extra_prims": []
+  },
+  {
+   "id": "Television|2|4",
+   "name": "television_1",
+   "category": "Television",
+   "label": "television",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/television_b74c2b0c2d314e6da686b36162009430_1_0_2",
+   "body_path": null,
+   "pos": [
+    9.4606,
+    1.3598,
+    1.7695
+   ],
+   "aabb": [
+    [
+     9.39,
+     0.7054,
+     1.4442
+    ],
+    [
+     9.5423,
+     2.0142,
+     2.0951
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Television_14",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|2|5",
+   "name": "painting_1",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/painting_c5c122ccdccf23927c81520c82e4e6d4_1_0_2",
+   "body_path": null,
+   "pos": [
+    9.5291,
+    2.6219,
+    2.0983
+   ],
+   "aabb": [
+    [
+     9.5442,
+     2.1948,
+     1.5303
+    ],
+    [
+     9.5453,
+     3.0491,
+     2.3824
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Photo_3V",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|2|6",
+   "name": "painting_2",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/painting_e21990e8985b4a99a0a6d3ebd5a8317d_1_0_2",
+   "body_path": null,
+   "pos": [
+    8.4106,
+    0.0209,
+    2.2231
+   ],
+   "aabb": [
+    [
+     7.9792,
+     0.0047,
+     1.666
+    ],
+    [
+     8.8419,
+     0.0261,
+     2.5018
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Photo_6",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|2|7",
+   "name": "painting_3",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 2,
+   "room": "bedroom",
+   "prim_path": "/World/House/Geometry/painting_15263d2b255589f4c092ac496ce41840_1_0_2",
+   "body_path": null,
+   "pos": [
+    9.2074,
+    0.0209,
+    2.0992
+   ],
+   "aabb": [
+    [
+     8.8756,
+     0.0048,
+     1.6067
+    ],
+    [
+     9.5392,
+     0.0236,
+     2.3456
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Photo_1",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|6|5",
+   "name": "painting_4",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/painting_46a48fc2364572687fb03db59e5ca930_1_0_6",
+   "body_path": null,
+   "pos": [
+    1.7242,
+    3.833,
+    1.4426
+   ],
+   "aabb": [
+    [
+     1.3497,
+     3.8255,
+     0.6933
+    ],
+    [
+     2.0987,
+     3.8269,
+     1.8167
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Painting_10",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|6|6",
+   "name": "painting_5",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 6,
+   "room": "kitchen",
+   "prim_path": "/World/House/Geometry/painting_a86183c3957ca96a65278c63ee7d82b8_1_0_6",
+   "body_path": null,
+   "pos": [
+    0.0146,
+    6.8555,
+    1.316
+   ],
+   "aabb": [
+    [
+     0.0059,
+     6.6285,
+     0.8625
+    ],
+    [
+     0.0228,
+     7.0813,
+     1.6176
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Painting_9",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|7|4",
+   "name": "painting_6",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/painting_333386c8c19ef0585b2f6063f950f64b_1_0_7",
+   "body_path": null,
+   "pos": [
+    9.5291,
+    8.5847,
+    1.73
+   ],
+   "aabb": [
+    [
+     9.5441,
+     8.1513,
+     1.0651
+    ],
+    [
+     9.5453,
+     9.0182,
+     2.0626
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Photo_9",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|7|5",
+   "name": "painting_7",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/painting_e62843c8d605d893cb8f8aa0b0c840b0_1_0_7",
+   "body_path": null,
+   "pos": [
+    5.7514,
+    5.8691,
+    1.7142
+   ],
+   "aabb": [
+    [
+     5.7314,
+     5.4681,
+     1.1142
+    ],
+    [
+     5.7544,
+     6.2671,
+     2.0141
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Painting_6",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|7|6",
+   "name": "painting_8",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/painting_8cbaf499936a0f66ced34354e5215369_1_0_7",
+   "body_path": null,
+   "pos": [
+    7.9616,
+    11.4391,
+    1.1138
+   ],
+   "aabb": [
+    [
+     7.5611,
+     11.4333,
+     0.5413
+    ],
+    [
+     8.362,
+     11.4553,
+     1.4003
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Photo_3",
+   "extra_prims": []
+  },
+  {
+   "id": "Painting|7|7",
+   "name": "painting_9",
+   "category": "Painting",
+   "label": "painting",
+   "room_id": 7,
+   "room": "living_room",
+   "prim_path": "/World/House/Geometry/painting_bd728858f980dade85e9a893ae8544ec_1_0_7",
+   "body_path": null,
+   "pos": [
+    7.6244,
+    3.8409,
+    1.245
+   ],
+   "aabb": [
+    [
+     7.2688,
+     3.8248,
+     0.8233
+    ],
+    [
+     7.98,
+     3.841,
+     1.4561
+    ]
+   ],
+   "is_static": true,
+   "articulated": false,
+   "asset_id": "Wall_Decor_Photo_10",
+   "extra_prims": []
+  }
+ ],
+ "spawn": {
+  "x": 7.75,
+  "y": 5.75,
+  "yaw": 1.5707963267948966,
+  "clearance_m": 1.069,
+  "forward_free_m": 5.38,
+  "source": "procthor_agent_start",
+  "room": "living_room"
+ },
+ "room_points": [
+  {
+   "room": "bedroom",
+   "room_id": 2,
+   "ok": true,
+   "x": 7.125,
+   "y": 2.175,
+   "yaw": -3.1416,
+   "clearance_m": 1.61,
+   "forward_free_m": 6.0,
+   "free_cells": 8144
+  },
+  {
+   "room": "kitchen",
+   "room_id": 6,
+   "ok": true,
+   "x": 4.125,
+   "y": 6.075,
+   "yaw": 1.5708,
+   "clearance_m": 1.588,
+   "forward_free_m": 4.37,
+   "free_cells": 10720
+  },
+  {
+   "room": "living_room",
+   "room_id": 7,
+   "ok": true,
+   "x": 8.275,
+   "y": 5.925,
+   "yaw": 1.5708,
+   "clearance_m": 1.25,
+   "forward_free_m": 3.12,
+   "free_cells": 5368
+  }
+ ],
+ "connectivity": {
+  "start": [
+   7.75,
+   5.75
+  ],
+  "start_component": 1,
+  "n_components": 2,
+  "component_area_m2": 60.56,
+  "rooms": {
+   "bedroom": {
+    "free_cells": 8144,
+    "reachable_cells": 8144,
+    "reachable": true,
+    "reachable_area_m2": 20.36
+   },
+   "kitchen": {
+    "free_cells": 10720,
+    "reachable_cells": 10712,
+    "reachable": true,
+    "reachable_area_m2": 26.78
+   },
+   "living_room": {
+    "free_cells": 5368,
+    "reachable_cells": 5368,
+    "reachable": true,
+    "reachable_area_m2": 13.42
+   }
+  },
+  "all_rooms_reachable": true
+ },
+ "warnings": [],
+ "stats": {
+  "reference_s": 0.174,
+  "geometry_children": 135,
+  "collision_filter": {
+   "/physicsScene": false
+  },
+  "labels_applied": 100,
+  "objects_s": 0.153,
+  "physics": {
+   "floor_material": {
+    "path": "/World/House_PhysicsMaterials/floor",
+    "static": 1.0,
+    "dynamic": 1.0,
+    "combine": "multiply",
+    "bound_colliders": 1
+   },
+   "rugs_disabled": 0,
+   "kinematic_props": 0,
+   "locked_joints": 21,
+   "damped_props": 34
+  },
+  "load_s": 0.539
+ },
+ "assets_dir": "/work/worldline-g1/assets/houses/procthor-train-38"
+}
