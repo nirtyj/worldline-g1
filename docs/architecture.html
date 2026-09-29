@@ -75,6 +75,8 @@ td.op { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
 .proc h3 { color: var(--c); }
 .proc .where { font: 12px/1.4 var(--mono); color: var(--muted); }
 .proc ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
+.proc .pill { white-space: normal; line-height: 1.35; max-width: 100%; }
+.proc .pill::before { flex: none; }
 .pill { display: inline-flex; align-items: center; gap: 6px; font: 600 11px/1 var(--mono); letter-spacing: 0.04em; text-transform: uppercase; padding: 5px 8px; border-radius: 999px; white-space: nowrap; justify-self: start; }
 .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .ok { color: var(--ok); background: var(--ok-bg); }
@@ -96,7 +98,8 @@ ol.steps li::marker { font-family: var(--mono); color: var(--accent); }
 .legend .ln { display: inline-block; width: 22px; height: 0; margin-right: 6px; vertical-align: 3px; border-top: 2px solid var(--ink); }
 .legend .ln.acc { border-top: 2.5px solid var(--accent); }
 .legend .ln.bundle { border-top: 4px solid var(--ink); }
-.legend .ln.proc { border-top: 2px dashed var(--muted); }
+.legend .ln.inproc { border-top: 2px dashed var(--muted); }
+.legend .ln.bnd { border-top: 2px dashed var(--accent); }
 .legend .ln.dash { border-top: 2px dashed var(--p5); }
 /* block diagram (inline SVG, themed from the page tokens). The figure breaks out of the 980px column. */
 figure.bdfig { --figw: min(1500px, calc(100vw - 32px)); width: var(--figw); margin-block: 0; margin-inline: calc((100% - var(--figw)) / 2); display: grid; gap: 10px; }
@@ -110,6 +113,8 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
 .bd .box.p1 { stroke: var(--p1); } .bd .box.p2 { stroke: var(--p2); } .bd .box.p3 { stroke: var(--p3); } .bd .box.p4 { stroke: var(--p4); stroke-width: 1.6; } .bd .box.p5 { stroke: var(--p5); }
 .bd .box.viz { stroke: var(--viz); stroke-width: 1.8; } .bd .box.fut { stroke: var(--future); stroke-dasharray: 5 4; } .bd .box.test { stroke: var(--muted); stroke-dasharray: 3 4; }
 .bd .box.dash { stroke-dasharray: 5 4; } .bd .box.cloud { stroke: var(--muted); }
+.bd .box.api { stroke: var(--accent); stroke-width: 1.6; stroke-dasharray: 8 4; }
+.bd .dot { fill: var(--ink); }
 .bd .skill { fill: none; stroke: var(--p5); stroke-width: 1.4; stroke-dasharray: 7 5; }
 .bd .tunnel { fill: var(--code-bg); stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
 .bd .chip { fill: var(--code-bg); stroke: var(--muted); stroke-width: 1; }
@@ -143,7 +148,7 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <h1>Worldline G1 Architecture</h1>
   <p class="lede">The whole loop: the Worldline runtime plans and watches, calls the robot API, and P3, the robot, turns those skills into commands for SONIC, which balances and walks a simulated Unitree G1 through a ProcTHOR house in Isaac Sim. GR00T N1.7 moves the arms from a second GPU box.</p>
   <div class="meta">
-    <span>Revision <b>r11</b></span>
+    <span>Revision <b>r12</b></span>
     <span>Updated <b>2026-09-29</b></span>
     <span>Milestone <b>M1 verified · M2b: navigation live, manipulation in test</b></span>
     <span>Boxes <b>main ludo-g1-brev2 · dev ludo-g1-arena · 1× L40S each</b></span>
@@ -152,17 +157,18 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
 
 <section>
   <h2>At a glance</h2>
-  <p class="prose">Four machines take part. The main box runs four processes that talk only over sockets: <b>P1</b> wraps Isaac Sim and plays the G1's hardware, <b>P2</b> is NVIDIA's unmodified SONIC controller, <b>P3</b> is the robot, whose API merges leg and arm commands into one 50 Hz message to SONIC, and <b>P5</b> is the Worldline runtime. In P5, System 2 plans one tool call at a time with Gemini 3.8 Flash, System 1 labels chat with TypeSafe Jev and watches gated head-camera frames through Gemini Live, and the world model is the only reader of simulator ground truth. The GR00T PolicyServer (<b>P4</b>) runs on the dev box and sends 0.8 s arm chunks back through an SSH tunnel into P3's arm channel. The laptop opens two browser tabs through another SSH tunnel and can also run a stand-in UI that uses the cloud APIs but no simulator. Today the robot-side skills code still runs inside P5; per PLAN §0.14 it moves into P3 next, so Worldline will see only the robot API.</p>
+  <p class="prose">Four machines take part. The main box runs four processes that talk only over sockets: <b>P1</b> wraps Isaac Sim and plays the G1's hardware, <b>P2</b> is NVIDIA's unmodified SONIC controller, <b>P3</b> is the robot, whose API merges leg and arm commands into one 50 Hz message to SONIC, and <b>P5</b> is the Worldline runtime. In P5, System 2 plans one tool call at a time with Gemini 3.8 Flash, System 1 labels chat with TypeSafe Jev and watches gated head-camera frames through Gemini Live, and the world model is the only reader of simulator ground truth. The GR00T PolicyServer (<b>P4</b>) runs on the dev box and sends 0.8 s arm chunks back through groot-link, the OD3 SSH tunnel, into P3's arm channel. The laptop opens two browser tabs, the Sim Viewer :8765 and the Worldline UI :8766, through another SSH tunnel, and can also run the Stand-in UI :8777, which uses the cloud APIs but no simulator. Today the robot-side skills code still runs inside P5; per PLAN §0.14 it moves into P3 next, so Worldline will see only the robot API.</p>
   <div class="legend">
     <span><i class="swatch" style="background:var(--p1)"></i>P1 wl-isaac · Isaac Sim</span>
     <span><i class="swatch" style="background:var(--p2)"></i>P2 SONIC deploy · NVIDIA, unmodified</span>
     <span><i class="swatch" style="background:var(--p3)"></i>P3 the robot · wl-body</span>
     <span><i class="swatch" style="background:var(--p4)"></i>P4 GR00T · server + client</span>
     <span><i class="swatch" style="background:var(--p5)"></i>P5 Worldline runtime</span>
-    <span><i class="swatch" style="background:var(--viz)"></i>Sim Viewer + recorder</span>
+    <span><i class="swatch" style="background:var(--viz)"></i>Sim Viewer :8765 + recorder</span>
     <span><i class="ln acc"></i>head camera → Gemini Live</span>
     <span><i class="ln bundle"></i>bundle: several sockets</span>
-    <span><i class="ln proc"></i>in-process call</span>
+    <span><i class="ln inproc"></i>in-process call</span>
+    <span><i class="ln bnd"></i>robot API boundary · target API</span>
     <span><i class="ln dash"></i>runs in P5 today, moves to P3</span>
     <span><i class="swatch" style="background:transparent; border:1.5px solid var(--muted)"></i>machine</span>
   </div>
@@ -172,7 +178,7 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <h2>Block diagram</h2>
   <figure class="bdfig">
     <div class="bdwrap">
-<svg class="bd" viewBox="0 0 1440 1516" role="img" aria-label="Block diagram of the whole Worldline G1 loop across four machines. The laptop reaches the Sim Viewer on port 8765 and the Worldline UI on port 8766 through an SSH tunnel, and can run a stand-in UI on 8777 against the cloud APIs. On the main box the Worldline runtime P5 holds the UI hub, System 2 with the Gemini planner, System 1 with the frame gate, the Gemini Live observer and Jev labels, persistence and the world model. It calls the robot API. Below that boundary P3, the robot, has a skills layer that runs inside P5 today, the wl-body API on ports 5610, 5611 and 5612, the Drive and Arm channel layers, and SonicMux, which sends one planner message at 50 Hz on port 5556 to the unmodified SONIC deploy P2. SONIC exchanges rt/lowcmd and rt/lowstate over DDS with P1 wl-isaac, which publishes ground truth on 5600 and 5601, the head camera on 5565 (the highlighted path through the frame gate to Gemini Live), ego_view on 5566 for GR00T and viz frames on 5602. The GR00T client reaches the PolicyServer P4 on the dev box through the groot-link SSH tunnel on port 5550 and streams arm chunks into P3&#x27;s arm channel. The Sim Viewer drives P3&#x27;s low-level drive ops and reads P1 directly.">
+<svg class="bd" viewBox="0 0 1440 1570" role="img" aria-label="Block diagram of the whole Worldline G1 loop across four machines. The laptop reaches the Sim Viewer :8765 and the Worldline UI :8766 through an SSH tunnel, and can run the Stand-in UI :8777 against the cloud APIs. On the main box the Worldline runtime P5 holds the Worldline UI :8766 hub, System 2 with the Gemini planner, System 1 with the frame gate, the Gemini Live observer and Jev labels, persistence with recall, the world model and the camera panes. It calls only the robot API, drawn as the orange dashed boundary and the target API bar: navigate or go_to, check_reachability, scan, pick, place, stop or halt, and events, plus low-level drive and arm ops. Below it P3, the robot, has a skills layer that runs inside P5 today, the wl-body API on ports 5610, 5611 and 5612, the Drive and Arm channel layers, SonicMux, which sends one planner message at 50 Hz on port 5556 to the unmodified SONIC deploy P2, and DeployMonitor, which reads SONIC&#x27;s g1_debug on 5557. SONIC exchanges rt/lowcmd and rt/lowstate over DDS with P1 wl-isaac, which publishes ground truth on 5600 and 5601, the head camera on 5565 (the highlighted path through the frame gate to Gemini Live), ego_view on 5566 for GR00T and viz frames on 5602. The GR00T client reaches the PolicyServer P4 on the dev box through groot-link, the OD3 SSH tunnel on port 5550, and streams arm chunks into P3&#x27;s arm channel. The Sim Viewer :8765 drives P3&#x27;s low-level drive ops and reads P1 directly.">
   <defs>
     <marker id="bd-arr" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker>
     <marker id="bd-arr-acc" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path class="arrowhead acc" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -214,19 +220,19 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <text class="el" x="595" y="250" text-anchor="middle">ui.server --port 8777</text>
   <text class="el" x="595" y="264" text-anchor="middle">no tunnel · no simulator</text>
   <!-- MAIN BOX -->
-  <rect class="mach" x="20" y="300" width="1112" height="1204" rx="10"/>
+  <rect class="mach" x="20" y="300" width="1112" height="1258" rx="10"/>
   <text class="ml" x="34" y="318">MAIN BOX · ludo-g1-brev2</text>
   <text class="el" x="34" y="334">1× L40S 48 GB · 16 vCPU</text>
   <!-- DEV BOX -->
-  <rect class="mach" x="1160" y="760" width="260" height="250" rx="10"/>
-  <text class="ml" x="1174" y="778">DEV BOX · ludo-g1-arena</text>
-  <text class="el" x="1174" y="794">1× L40S 48 GB</text>
+  <rect class="mach" x="1160" y="904" width="260" height="180" rx="10"/>
+  <text class="ml" x="1174" y="922">DEV BOX · ludo-g1-arena</text>
+  <text class="el" x="1174" y="938">1× L40S 48 GB · sshd :22</text>
   <!-- SIM VIEWER -->
   <rect class="box viz" x="40" y="346" width="240" height="134" rx="6"/>
   <text class="t" x="160" y="366">Sim Viewer :8765</text>
   <text class="s" x="160" y="382">viz/server.py · viz-server</text>
   <text class="s" x="160" y="397">WS /ws · MJPEG · REST</text>
-  <text class="s" x="160" y="412">telemetry → page 10 Hz</text>
+  <text class="s" x="160" y="412">telemetry → browser 10 Hz</text>
   <text class="s" x="160" y="427">head ≤15 fps · chase ~10</text>
   <text class="s" x="160" y="442">keys → velocity 10 Hz</text>
   <text class="s" x="160" y="457">deadman 0.6 s · no arm ops</text>
@@ -241,7 +247,7 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <rect class="box p5" x="320" y="390" width="150" height="170" rx="6"/>
   <text class="t" x="395" y="410">Worldline UI :8766</text>
   <text class="s" x="395" y="426">HTTP + WS /ws hub</text>
-  <text class="s" x="395" y="441">frame → page 5 Hz</text>
+  <text class="s" x="395" y="441">frame → browser 5 Hz</text>
   <text class="s" x="395" y="456">panes ≤5 Hz</text>
   <text class="s" x="395" y="471">in: say · reset</text>
   <text class="s" x="395" y="486">step · estop</text>
@@ -270,129 +276,138 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <text class="tc" x="997" y="436">Jev</text>
   <text class="s" x="997" y="451">labels</text>
   <text class="s" x="997" y="465">per msg</text>
-  <rect class="box p5" x="320" y="590" width="150" height="100" rx="6"/>
-  <text class="t" x="395" y="610">Persistence</text>
-  <text class="s" x="395" y="626">runs/memory/*.json</text>
-  <text class="s" x="395" y="641">episodes/*.jsonl</text>
-  <text class="s" x="395" y="656">procedures.json</text>
-  <text class="s" x="395" y="671">model-call log</text>
-  <rect class="box p5" x="545" y="590" width="210" height="100" rx="6"/>
-  <text class="t" x="650" y="610">World model</text>
-  <text class="s" x="650" y="626">belief · fused 10 Hz</text>
-  <text class="s" x="650" y="641">IsaacGTWorldModel</text>
-  <text class="s" x="650" y="656">the only GT reader</text>
-  <text class="s" x="650" y="671">static map · keypoints</text>
+  <rect class="box p5" x="320" y="590" width="205" height="110" rx="6"/>
+  <text class="t" x="422.5" y="610">Persistence</text>
+  <text class="s" x="422.5" y="626">runs/memory/*.json</text>
+  <text class="s" x="422.5" y="641">episodes/*.jsonl</text>
+  <text class="s" x="422.5" y="656">procedures.json</text>
+  <text class="s" x="422.5" y="671">model-call log (traces)</text>
+  <text class="s" x="422.5" y="686">recall(query) · no model</text>
+  <rect class="box p5" x="560" y="590" width="195" height="100" rx="6"/>
+  <text class="t" x="657.5" y="610">World model</text>
+  <text class="s" x="657.5" y="626">belief · fused 10 Hz</text>
+  <text class="s" x="657.5" y="641">IsaacGTWorldModel</text>
+  <text class="s" x="657.5" y="656">the only GT reader</text>
+  <text class="s" x="657.5" y="671">static map · keypoints</text>
   <rect class="box p5" x="795" y="590" width="240" height="100" rx="6"/>
-  <text class="t" x="915" y="610">Page camera panes</text>
+  <text class="t" x="915" y="610">Camera panes</text>
   <text class="s" x="915" y="626">FrameTap :5565 · :5602</text>
   <text class="s" x="915" y="641">SubCamera :5566 (ego)</text>
-  <text class="s" x="915" y="656">→ hub · ≤5 / 5 / 2 / 1 Hz</text>
+  <text class="s" x="915" y="656">→ Worldline UI :8766</text>
+  <text class="s" x="915" y="671">≤5 / 5 / 2 / 1 Hz</text>
   <!-- ROBOT API BOUNDARY -->
-  <line class="boundary" x1="300" y1="740" x2="1052" y2="740"/>
-  <text class="bl acc" x="640" y="758">ROBOT API BOUNDARY · PLAN §0.14</text>
+  <line class="boundary" x1="300" y1="736" x2="1052" y2="736"/>
+  <text class="bl acc" x="1046" y="730" text-anchor="end">ROBOT API BOUNDARY · PLAN §0.14</text>
   <!-- P3 THE ROBOT -->
-  <rect class="band p3" x="300" y="772" width="752" height="388" rx="8"/>
-  <text class="bl p3" x="314" y="790">P3 · THE ROBOT</text>
-  <text class="el" x="640" y="790">body.service today = the solid layers</text>
-  <rect class="skill" x="320" y="808" width="722" height="122" rx="7"/>
-  <text class="bl p5" x="334" y="824">ROBOT SKILLS</text>
-  <text class="el" x="470" y="924">today inside the P5 process · move into P3 next</text>
-  <rect class="box p5" x="335" y="834" width="205" height="74" rx="6"/>
-  <text class="t" x="437.5" y="851">Robot facade · G1Robot</text>
-  <text class="s" x="437.5" y="867">capability policy (RTF)</text>
-  <text class="s" x="437.5" y="881">health 4 Hz · halt resend</text>
-  <text class="s" x="437.5" y="895">SonicBody client</text>
-  <rect class="box p5" x="555" y="834" width="150" height="74" rx="6"/>
-  <text class="t" x="630" y="851">Services</text>
-  <text class="s" x="630" y="867">navigation</text>
-  <text class="s" x="630" y="881">observation · scan</text>
-  <text class="s" x="630" y="895">reachability · speech</text>
-  <rect class="box p5" x="720" y="834" width="145" height="74" rx="6"/>
-  <text class="t" x="792.5" y="851">Manipulation</text>
-  <text class="s" x="792.5" y="867">groot_arms (GR00T)</text>
-  <text class="s" x="792.5" y="881">→ sonic_arm_script</text>
-  <text class="s" x="792.5" y="895">→ kinematic_attach</text>
-  <rect class="box p4" x="880" y="834" width="155" height="74" rx="6"/>
-  <text class="t" x="957.5" y="851">GR00T client</text>
-  <text class="s" x="957.5" y="867">worker thread</text>
-  <text class="s" x="957.5" y="881">get_action 2.5 Hz</text>
-  <text class="s" x="957.5" y="895">timeout 1.5 s</text>
-  <rect class="box p3" x="335" y="956" width="505" height="54" rx="6"/>
-  <text class="t" x="587.5" y="976">wl-body API · ROUTER :5610 · PULL :5612 halt · PUB :5611</text>
-  <text class="s" x="587.5" y="992">fences · leases · sessions (hello / ping 4 Hz / bye)</text>
-  <rect class="box p3" x="335" y="1030" width="245" height="70" rx="6"/>
-  <text class="t" x="457.5" y="1048">Drive · leg owner</text>
-  <text class="s" x="457.5" y="1064">go_to: A* + pure pursuit</text>
-  <text class="s" x="457.5" y="1078">walk · turn_to · velocity</text>
-  <text class="s" x="457.5" y="1092">approach · stand · stop</text>
-  <rect class="box p3" x="595" y="1030" width="245" height="70" rx="6"/>
-  <text class="t" x="717.5" y="1048">Arm channel · arm owner</text>
-  <text class="s" x="717.5" y="1064">chunk playback 50 Hz</text>
-  <text class="s" x="717.5" y="1078">arm_script (IK worker)</text>
-  <text class="s" x="717.5" y="1092">scan · CarryLock · latch</text>
-  <rect class="box p3" x="335" y="1118" width="505" height="26" rx="6"/>
-  <text class="tc" x="587" y="1136">SonicMux · legs + arms + halt → one planner msg · 50 Hz</text>
+  <rect class="band p3" x="300" y="748" width="752" height="452" rx="8"/>
+  <text class="bl p3" x="314" y="764">P3 · THE ROBOT</text>
+  <text class="el" x="640" y="764">body.service today = the solid layers</text>
+  <!-- the target robot API (PLAN §0.14) -->
+  <rect class="box api" x="320" y="774" width="722" height="58" rx="6"/>
+  <text class="t" x="681" y="792">Robot API (target, PLAN §0.14): the only thing Worldline calls</text>
+  <text class="s" x="681" y="808">navigate / go_to · check_reachability · scan · pick · place · stop / halt · events</text>
+  <text class="s" x="681" y="823">+ low-level drive and arm ops · the Sim Viewer :8765 uses only the drive subset</text>
+  <rect class="skill" x="320" y="848" width="722" height="122" rx="7"/>
+  <text class="bl p5" x="334" y="864">ROBOT SKILLS</text>
+  <text class="el" x="470" y="964">today inside the P5 process · move into P3 next</text>
+  <rect class="box p5" x="335" y="874" width="205" height="74" rx="6"/>
+  <text class="t" x="437.5" y="891">Robot facade · G1Robot</text>
+  <text class="s" x="437.5" y="907">capability policy (RTF)</text>
+  <text class="s" x="437.5" y="921">health 4 Hz · halt resend</text>
+  <text class="s" x="437.5" y="935">SonicBody client</text>
+  <rect class="box p5" x="555" y="874" width="150" height="74" rx="6"/>
+  <text class="t" x="630" y="891">Services</text>
+  <text class="s" x="630" y="907">navigation</text>
+  <text class="s" x="630" y="921">observation · scan</text>
+  <text class="s" x="630" y="935">reachability · speech</text>
+  <rect class="box p5" x="720" y="874" width="145" height="74" rx="6"/>
+  <text class="t" x="792.5" y="891">Manipulation</text>
+  <text class="s" x="792.5" y="907">groot_arms (GR00T)</text>
+  <text class="s" x="792.5" y="921">→ sonic_arm_script</text>
+  <text class="s" x="792.5" y="935">→ kinematic_attach</text>
+  <rect class="box p4" x="880" y="874" width="155" height="74" rx="6"/>
+  <text class="t" x="957.5" y="891">GR00T client</text>
+  <text class="s" x="957.5" y="907">worker thread</text>
+  <text class="s" x="957.5" y="921">get_action 2.5 Hz</text>
+  <text class="s" x="957.5" y="935">timeout 1.5 s</text>
+  <rect class="box p3" x="335" y="996" width="505" height="54" rx="6"/>
+  <text class="t" x="587.5" y="1016">wl-body API · ROUTER :5610 · PULL :5612 halt · PUB :5611</text>
+  <text class="s" x="587.5" y="1032">today's low-level ops · fences · leases · sessions (ping 4 Hz)</text>
+  <rect class="box p3" x="335" y="1070" width="245" height="70" rx="6"/>
+  <text class="t" x="457.5" y="1088">Drive · leg owner</text>
+  <text class="s" x="457.5" y="1104">go_to: A* + pure pursuit</text>
+  <text class="s" x="457.5" y="1118">walk · turn_to · velocity</text>
+  <text class="s" x="457.5" y="1132">approach · stand · stop</text>
+  <rect class="box p3" x="595" y="1070" width="245" height="70" rx="6"/>
+  <text class="t" x="717.5" y="1088">Arm channel · arm owner</text>
+  <text class="s" x="717.5" y="1104">arm target · chunk playback 50 Hz</text>
+  <text class="s" x="717.5" y="1118">arm_script (IK worker)</text>
+  <text class="s" x="717.5" y="1132">scan · CarryLock · latch</text>
+  <rect class="box p3" x="335" y="1158" width="505" height="26" rx="6"/>
+  <text class="tc" x="587" y="1176">SonicMux · legs + arms + halt → one planner msg · 50 Hz</text>
+  <rect class="box p3" x="855" y="1158" width="130" height="26" rx="6"/>
+  <text class="tc" x="920" y="1176">DeployMonitor</text>
   <!-- P2 SONIC -->
-  <rect class="band p2" x="300" y="1186" width="540" height="88" rx="8"/>
-  <rect class="box p2" x="314" y="1198" width="120" height="44" rx="6"/>
-  <text class="tc" x="374" y="1216">input 100 Hz</text>
-  <text class="s" x="374" y="1232">SUB :5556</text>
-  <rect class="box p2" x="444" y="1198" width="120" height="44" rx="6"/>
-  <text class="tc" x="504" y="1216">planner 10 Hz</text>
-  <text class="s" x="504" y="1232">kinematic</text>
-  <rect class="box p2" x="574" y="1198" width="120" height="44" rx="6"/>
-  <text class="tc" x="634" y="1216">policy 50 Hz</text>
-  <text class="s" x="634" y="1232">PUB :5557</text>
-  <rect class="box p2" x="704" y="1198" width="120" height="44" rx="6"/>
-  <text class="tc" x="764" y="1216">DDS writer</text>
-  <text class="s" x="764" y="1232">lowcmd ~500 Hz</text>
-  <text class="bl p2" x="314" y="1264">P2 · SONIC DEPLOY · NVIDIA C++ · UNMODIFIED · CPUs 0-3</text>
+  <rect class="band p2" x="300" y="1240" width="540" height="88" rx="8"/>
+  <rect class="box p2" x="314" y="1252" width="112" height="44" rx="6"/>
+  <text class="tc" x="370" y="1270">input 100 Hz</text>
+  <text class="s" x="370" y="1286">SUB :5556</text>
+  <rect class="box p2" x="436" y="1252" width="112" height="44" rx="6"/>
+  <text class="tc" x="492" y="1270">planner 10 Hz</text>
+  <text class="s" x="492" y="1286">kinematic</text>
+  <rect class="box p2" x="558" y="1252" width="112" height="44" rx="6"/>
+  <text class="tc" x="614" y="1270">policy 50 Hz</text>
+  <text class="s" x="614" y="1286">PUB :5557</text>
+  <rect class="box p2" x="680" y="1252" width="112" height="44" rx="6"/>
+  <text class="tc" x="736" y="1270">DDS writer</text>
+  <text class="s" x="736" y="1286">lowcmd ~500 Hz</text>
+  <text class="bl p2" x="314" y="1318">P2 · SONIC DEPLOY · NVIDIA C++ · UNMODIFIED · CPUs 0-3</text>
   <!-- P1 ISAAC -->
-  <rect class="band p1" x="40" y="1314" width="1082" height="176" rx="8"/>
-  <text class="bl p1" x="80" y="1332">P1 · WL-ISAAC</text>
-  <text class="el" x="300" y="1332">Isaac Sim 5.1 · headless · wall-clock paced</text>
-  <rect class="box p1" x="60" y="1344" width="270" height="132" rx="6"/>
-  <text class="t" x="195" y="1364">Ground truth server</text>
-  <text class="s" x="195" y="1380">REP :5600 · WorldRPC ops</text>
-  <text class="s" x="195" y="1395">PUB :5601 gt.pose 50 Hz</text>
-  <text class="s" x="195" y="1410">gt.objects 10 · sim.health 1 Hz</text>
-  <text class="s" x="195" y="1425">gt.event on change</text>
-  <text class="s" x="195" y="1440">≤2 requests per physics step</text>
-  <rect class="box p1" x="350" y="1344" width="290" height="132" rx="6"/>
-  <text class="t" x="495" y="1364">Isaac physics · 200 Hz</text>
-  <rect class="chip p1" x="366" y="1376" width="258" height="30" rx="5"/>
-  <text class="tc" x="495" y="1396">Unitree G1 · 29 DoF + Dex3 hands</text>
-  <rect class="chip p1" x="366" y="1414" width="258" height="30" rx="5"/>
-  <text class="tc" x="495" y="1434">ProcTHOR house · MolmoSpaces USD</text>
-  <text class="s" x="495" y="1464">CPU PhysX · RtPacer (wall clock)</text>
-  <rect class="box p1" x="660" y="1344" width="180" height="132" rx="6"/>
-  <text class="t" x="750" y="1364">G1 DDS bridge</text>
-  <text class="s" x="750" y="1380">200 Hz · PD per motor</text>
-  <text class="s" x="750" y="1395">lowstate heartbeat</text>
-  <text class="s" x="750" y="1410">after 50 ms silence</text>
-  <text class="s" x="750" y="1425">domain 0 on lo</text>
-  <rect class="box p1" x="855" y="1344" width="263" height="132" rx="6"/>
-  <text class="t" x="900" y="1364">Cameras</text>
-  <rect class="chip p1" x="861" y="1380" width="76" height="84" rx="5"/>
-  <text class="s" x="899" y="1400">viz :5602</text>
-  <text class="s" x="899" y="1418">chase 10 Hz</text>
-  <text class="s" x="899" y="1434">top 3-10 s</text>
-  <rect class="chip p1" x="943" y="1380" width="84" height="84" rx="5"/>
-  <text class="s" x="985" y="1400">ego :5566</text>
-  <text class="s" x="985" y="1418">on demand</text>
-  <text class="s" x="985" y="1434">GR00T 2.5 Hz</text>
-  <rect class="chip acc" x="1033" y="1380" width="81" height="84" rx="5"/>
-  <text class="s" x="1073.5" y="1400">head :5565</text>
-  <text class="s" x="1073.5" y="1418">30 Hz</text>
-  <text class="s" x="1073.5" y="1434">→ System 1</text>
+  <rect class="band p1" x="40" y="1368" width="1082" height="176" rx="8"/>
+  <text class="bl p1" x="80" y="1386">P1 · WL-ISAAC</text>
+  <text class="el" x="300" y="1386">Isaac Sim 5.1 · headless · wall-clock paced</text>
+  <rect class="box p1" x="60" y="1398" width="270" height="132" rx="6"/>
+  <text class="t" x="195" y="1418">Ground truth server</text>
+  <text class="s" x="195" y="1434">REP :5600 · WorldRPC ops</text>
+  <text class="s" x="195" y="1449">PUB :5601 gt.pose 50 Hz</text>
+  <text class="s" x="195" y="1464">gt.objects 10 · sim.health 1 Hz</text>
+  <text class="s" x="195" y="1479">gt.event on change</text>
+  <text class="s" x="195" y="1494">≤2 requests per physics step</text>
+  <rect class="box p1" x="350" y="1398" width="290" height="132" rx="6"/>
+  <text class="t" x="495" y="1418">Isaac physics · 200 Hz</text>
+  <rect class="chip p1" x="366" y="1430" width="258" height="30" rx="5"/>
+  <text class="tc" x="495" y="1450">Unitree G1 · 29 DoF + Dex3 hands</text>
+  <rect class="chip p1" x="366" y="1468" width="258" height="30" rx="5"/>
+  <text class="tc" x="495" y="1488">ProcTHOR house · MolmoSpaces USD</text>
+  <text class="s" x="495" y="1518">CPU PhysX · RtPacer (wall clock)</text>
+  <rect class="box p1" x="660" y="1398" width="180" height="132" rx="6"/>
+  <text class="t" x="750" y="1418">G1 DDS bridge</text>
+  <text class="s" x="750" y="1434">200 Hz · PD per motor</text>
+  <text class="s" x="750" y="1449">lowstate heartbeat</text>
+  <text class="s" x="750" y="1464">after 50 ms silence</text>
+  <text class="s" x="750" y="1479">domain 0 on lo</text>
+  <rect class="box p1" x="855" y="1398" width="263" height="132" rx="6"/>
+  <text class="t" x="900" y="1418">Cameras</text>
+  <rect class="chip p1" x="861" y="1434" width="76" height="84" rx="5"/>
+  <text class="s" x="899" y="1454">viz :5602</text>
+  <text class="s" x="899" y="1472">chase 10 Hz</text>
+  <text class="s" x="899" y="1488">top 3-10 s</text>
+  <rect class="chip p1" x="943" y="1434" width="84" height="84" rx="5"/>
+  <text class="s" x="985" y="1454">ego :5566</text>
+  <text class="s" x="985" y="1472">on demand</text>
+  <text class="s" x="985" y="1488">GR00T 2.5 Hz</text>
+  <rect class="chip acc" x="1033" y="1434" width="81" height="84" rx="5"/>
+  <text class="s" x="1073.5" y="1454">head :5565</text>
+  <text class="s" x="1073.5" y="1472">30 Hz</text>
+  <text class="s" x="1073.5" y="1488">→ System 1</text>
   <!-- P4 GR00T -->
-  <rect class="box p4" x="1176" y="880" width="230" height="116" rx="6"/>
-  <text class="t" x="1291" y="900">P4 · GR00T PolicyServer :5550</text>
-  <text class="s" x="1291" y="916">N1.7 · Arena-G1-Static-PickNPlace</text>
-  <text class="s" x="1291" y="931">p50 144 ms · 40 rows @ 50 Hz</text>
-  <text class="s" x="1291" y="946">VRAM 6.5 GB · one req at a time</text>
-  <text class="s" x="1291" y="961">here since the main-box gate</text>
-  <text class="s" x="1291" y="976">failed (RTF p10 0.84-0.97)</text>
+  <rect class="box p4" x="1176" y="952" width="230" height="116" rx="6"/>
+  <text class="t" x="1291" y="972">P4 · GR00T PolicyServer :5550</text>
+  <text class="s" x="1291" y="988">N1.7 · Arena-G1-Static-PickNPlace</text>
+  <text class="s" x="1291" y="1003">p50 144 ms · 40 rows @ 50 Hz</text>
+  <text class="s" x="1291" y="1018">VRAM 6.5 GB · one req at a time</text>
+  <text class="s" x="1291" y="1033">here since the main-box gate</text>
+  <text class="s" x="1291" y="1048">failed (RTF p10 0.84-0.97)</text>
   <!-- laptop tunnels -->
   <path class="edge " d="M240,218 V346" marker-end="url(#bd-arr)"/>
   <text class="el" x="246" y="322">:8765</text>
@@ -407,16 +422,18 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <text class="el" x="706" y="182">HTTPS · generate_content</text>
   <text class="el" x="706" y="196">one tool call per step</text>
   <text class="el" x="706" y="210">20 s cap · 3 retries</text>
-  <path class="edge acc" d="M882,418 V96" marker-end="url(#bd-arr-acc)"/>
-  <text class="el acc" x="888" y="250">WSS session</text>
-  <text class="el acc" x="888" y="264">≤1 JPEG/s</text>
-  <text class="el acc" x="888" y="278">STATE ≤1/s</text>
-  <text class="el acc" x="888" y="292">OBSERVE 5 s</text>
+  <path class="edge acc" d="M882,418 V96" marker-start="url(#bd-arr-acc)" marker-end="url(#bd-arr-acc)"/>
+  <text class="el acc" x="888" y="222">WSS · two-way</text>
+  <text class="el acc" x="888" y="236">↑ ≤1 JPEG/s</text>
+  <text class="el acc" x="888" y="250">↑ STATE ≤1/s</text>
+  <text class="el acc" x="888" y="264">↑ OBSERVE 5 s</text>
+  <text class="el acc" x="888" y="278">↓ observe</text>
+  <text class="el acc" x="888" y="292">(≤3 items)</text>
   <path class="edge " d="M997,418 V96" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
   <text class="el" x="1003" y="182">HTTPS</text>
   <text class="el" x="1003" y="196">1 call per chat</text>
   <text class="el" x="1003" y="210">2 s timeout</text>
-  <path class="edge " d="M1398,880 V96" marker-end="url(#bd-arr)"/>
+  <path class="edge " d="M1398,952 V96" marker-end="url(#bd-arr)"/>
   <text class="el" x="1392" y="420" text-anchor="end">HTTPS · at each</text>
   <text class="el" x="1392" y="434" text-anchor="end">PolicyServer start</text>
   <text class="el" x="1392" y="448" text-anchor="end">(Cosmos-Reason2-2B</text>
@@ -433,55 +450,63 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <text class="el" x="775" y="486" text-anchor="middle">hints</text>
   <path class="edge proc" d="M650,590 V560" marker-end="url(#bd-arr-mut)"/>
   <text class="el" x="656" y="579">belief</text>
+  <path class="edge proc" d="M515,590 V560" marker-start="url(#bd-arr-mut)" marker-end="url(#bd-arr-mut)"/>
+  <text class="el" x="509" y="580" text-anchor="end">memory · episodes · recall</text>
   <!-- robot API crossing -->
-  <path class="edge " d="M525,560 V834" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
-  <text class="el" x="519" y="730" text-anchor="end">robot.start() · halt · events</text>
-  <path class="edge proc" d="M620,690 V834" marker-start="url(#bd-arr-mut)" marker-end="url(#bd-arr-mut)"/>
-  <text class="el" x="626" y="730">today: WorldModel calls, in-proc</text>
+  <path class="edge " d="M540,560 V774" marker-end="url(#bd-arr)"/>
+  <text class="el" x="534" y="726" text-anchor="end">calls only the robot API</text>
+  <path class="edge proc" d="M620,690 V774" marker-start="url(#bd-arr-mut)" marker-end="url(#bd-arr-mut)"/>
+  <text class="el" x="626" y="726">events · in-proc today</text>
+  <path class="edge proc" d="M440,832 V874" marker-end="url(#bd-arr-mut)"/>
+  <text class="el" x="446" y="864">today: in-process calls</text>
   <!-- skills to wl-body -->
-  <path class="edge " d="M440,908 V956" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
-  <text class="el" x="446" y="944">:5610 ops · :5612 halt · :5611 events 5 Hz</text>
-  <path class="edge p4" d="M890,908 V983 H840" marker-end="url(#bd-arr-p4)"/>
-  <text class="el" x="895" y="946">op arm · chunk</text>
-  <text class="el" x="895" y="960">:5610 · 2.5 Hz</text>
-  <text class="el" x="895" y="974">40 rows @ 50 Hz</text>
+  <path class="edge " d="M440,948 V996" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
+  <text class="el" x="446" y="984">:5610 ops · :5612 halt · :5611 events 5 Hz</text>
+  <path class="edge p4" d="M890,948 V1023 H840" marker-end="url(#bd-arr-p4)"/>
+  <text class="el" x="895" y="986">op arm · chunk</text>
+  <text class="el" x="895" y="1000">:5610 · 2.5 Hz</text>
+  <text class="el" x="895" y="1014">40 rows @ 50 Hz</text>
   <!-- wl-body internal -->
-  <path class="edge " d="M450,1010 V1030" marker-end="url(#bd-arr)"/>
-  <text class="el" x="456" y="1024">leg ops</text>
-  <path class="edge " d="M720,1010 V1030" marker-end="url(#bd-arr)"/>
-  <text class="el" x="726" y="1024">arm ops · halt latch</text>
-  <path class="edge " d="M450,1100 V1118" marker-end="url(#bd-arr)"/>
-  <text class="el" x="456" y="1113">legs</text>
-  <path class="edge " d="M720,1100 V1118" marker-end="url(#bd-arr)"/>
-  <text class="el" x="726" y="1113">upper body 17 + hands 7+7</text>
-  <!-- P3 <-> P2 -->
-  <path class="edge " d="M380,1144 V1198" marker-end="url(#bd-arr)"/>
-  <text class="el" x="386" y="1176">:5556 planner · ZMQ · 50 Hz</text>
-  <path class="edge " d="M660,1198 V1144" marker-end="url(#bd-arr)"/>
-  <text class="el" x="666" y="1176">:5557 g1_debug · 50 Hz</text>
-  <!-- GR00T sensor feeds -->
-  <path class="edge " d="M840,1220 H1000 V908" marker-end="url(#bd-arr)"/>
-  <text class="el" x="994" y="1130" text-anchor="end">:5557 g1_debug</text>
-  <text class="el" x="994" y="1144" text-anchor="end">50 Hz · ≤60 ms old</text>
-  <path class="edge " d="M1016,1380 V908" marker-end="url(#bd-arr)"/>
-  <text class="el" x="1010" y="1250" text-anchor="end">:5566 ego_view</text>
-  <text class="el" x="1010" y="1264" text-anchor="end">2.5 Hz in a session</text>
+  <path class="edge " d="M450,1050 V1070" marker-end="url(#bd-arr)"/>
+  <text class="el" x="456" y="1064">leg ops</text>
+  <path class="edge " d="M720,1050 V1070" marker-end="url(#bd-arr)"/>
+  <text class="el" x="726" y="1064">arm ops · halt latch</text>
+  <path class="edge " d="M450,1140 V1158" marker-end="url(#bd-arr)"/>
+  <text class="el" x="456" y="1153">legs</text>
+  <path class="edge " d="M720,1140 V1158" marker-end="url(#bd-arr)"/>
+  <text class="el" x="726" y="1153">upper body 17 + hands 7+7</text>
+  <!-- P3 -> P2 -->
+  <path class="edge " d="M380,1184 V1252" marker-end="url(#bd-arr)"/>
+  <text class="el" x="386" y="1230">:5556 planner · ZMQ · 50 Hz</text>
+  <!-- P2 g1_debug -> P3 DeployMonitor and the GR00T client -->
+  <path class="edge " d="M640,1252 V1214 H1000 V948" marker-end="url(#bd-arr)"/>
+  <path class="edge " d="M920,1214 V1184" marker-end="url(#bd-arr)"/>
+  <circle class="dot" cx="920" cy="1214" r="3.2"/>
+  <text class="el" x="646" y="1230">:5557 g1_debug PUB · 50 Hz</text>
+  <text class="el" x="994" y="1100" text-anchor="end">:5557 g1_debug</text>
+  <text class="el" x="994" y="1114" text-anchor="end">50 Hz · ≤60 ms old</text>
+  <!-- GR00T camera feed -->
+  <path class="edge " d="M1016,1434 V948" marker-end="url(#bd-arr)"/>
+  <text class="el" x="1010" y="1290" text-anchor="end">:5566 ego_view</text>
+  <text class="el" x="1010" y="1304" text-anchor="end">2.5 Hz in a session</text>
   <!-- P2 <-> P1 DDS -->
-  <path class="edge " d="M780,1242 V1344" marker-end="url(#bd-arr)"/>
-  <path class="edge " d="M810,1344 V1242" marker-end="url(#bd-arr)"/>
-  <text class="el" x="816" y="1290">↓ DDS rt/lowcmd ~500 Hz</text>
-  <text class="el" x="816" y="1304">↑ rt/lowstate + IMU 200 Hz</text>
+  <path class="edge " d="M760,1296 V1398" marker-end="url(#bd-arr)"/>
+  <path class="edge " d="M816,1398 V1328" marker-end="url(#bd-arr)"/>
+  <text class="el" x="822" y="1346">↓ DDS rt/lowcmd ~500 Hz</text>
+  <text class="el" x="822" y="1360">↑ rt/lowstate + IMU 200 Hz</text>
   <!-- P3 <-> P1 -->
-  <path class="edge " d="M335,1070 H285 V1344" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
-  <text class="el" x="279" y="1194" text-anchor="end">P3 ⇄ P1</text>
-  <text class="el" x="279" y="1208" text-anchor="end">:5601 gt.pose 50 Hz</text>
-  <text class="el" x="279" y="1222" text-anchor="end">:5600 occupancy</text>
-  <text class="el" x="279" y="1236" text-anchor="end">band · reset_robot</text>
+  <path class="edge " d="M335,1105 H285 V1398" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
+  <text class="el" x="279" y="1234" text-anchor="end">P3 ⇄ P1</text>
+  <text class="el" x="279" y="1248" text-anchor="end">:5601 gt.pose 50 Hz</text>
+  <text class="el" x="279" y="1262" text-anchor="end">:5600 occupancy</text>
+  <text class="el" x="279" y="1276" text-anchor="end">band · reset_robot</text>
   <!-- Sim Viewer links -->
   <path class="edge viz" d="M165,480 V520" marker-end="url(#bd-arr-viz)"/>
-  <text class="el" x="159" y="504" text-anchor="end">spawn</text>
-  <text class="el" x="171" y="504">:5630 1 Hz</text>
-  <path class="edge viz" d="M265,480 V983 H335" marker-start="url(#bd-arr-viz)" marker-end="url(#bd-arr-viz)"/>
+  <text class="el" x="159" y="496" text-anchor="end">spawn</text>
+  <text class="el" x="159" y="510" text-anchor="end">status 1 Hz</text>
+  <text class="el" x="171" y="496">control REP</text>
+  <text class="el" x="171" y="510">free port</text>
+  <path class="edge viz" d="M265,480 V1023 H335" marker-start="url(#bd-arr-viz)" marker-end="url(#bd-arr-viz)"/>
   <text class="el" x="259" y="626" text-anchor="end">DEALER :5610</text>
   <text class="el" x="259" y="640" text-anchor="end">stand · stop · status</text>
   <text class="el" x="259" y="654" text-anchor="end">go_to (click)</text>
@@ -489,8 +514,8 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <text class="el" x="259" y="682" text-anchor="end">velocity 10 Hz · walk</text>
   <text class="el" x="259" y="696" text-anchor="end">ping · clear_fault</text>
   <text class="el" x="259" y="714" text-anchor="end">SUB :5611 body.* 5 Hz</text>
-  <path class="edge viz bundle" d="M60,1314 V480" marker-start="url(#bd-arr-viz)" marker-end="url(#bd-arr-viz)"/>
-  <text class="el" x="68" y="1000">P1 → Sim Viewer</text>
+  <path class="edge viz bundle" d="M60,1368 V480" marker-start="url(#bd-arr-viz)" marker-end="url(#bd-arr-viz)"/>
+  <text class="el" x="68" y="1000">P1 → Sim Viewer :8765</text>
   <text class="el" x="68" y="1014">:5565 head 30 Hz</text>
   <text class="el" x="68" y="1028">:5602 chase 10 Hz · top</text>
   <text class="el" x="68" y="1042">:5601 gt.pose 50 Hz</text>
@@ -498,27 +523,28 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
   <text class="el" x="68" y="1070">topdown · stats 2 s</text>
   <text class="el" x="68" y="1084">viz_level</text>
   <!-- right corridor: P1 to P5, bridged under the GR00T link -->
-  <path class="edge bundle" d="M1072,1314 V862 M1072,838 V700 H740 V690" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
-  <path class="edge bundle" d="M1092,1314 V862 M1092,838 V640 H1035" marker-end="url(#bd-arr)"/>
-  <path class="edge acc" d="M1112,1380 V862 M1112,838 V535 H957" marker-end="url(#bd-arr-acc)"/>
-  <text class="el" x="1066" y="769" text-anchor="middle" transform="rotate(-90 1066 769)">→ world model</text>
-  <text class="el" x="1066" y="1086" text-anchor="middle" transform="rotate(-90 1066 1086)">:5600 REP · :5601 gt.pose 50 · objects 10 · health 1 Hz</text>
-  <text class="el" x="1086" y="1086" text-anchor="middle" transform="rotate(-90 1086 1086)">:5565 FrameTap · :5602 chase/top · :5566 ego → panes</text>
-  <text class="el acc" x="1106" y="1100" text-anchor="middle" transform="rotate(-90 1106 1100)">head camera :5565 · 30 Hz sim time → System 1</text>
+  <path class="edge bundle" d="M1072,1368 V902 M1072,878 V700 H740 V690" marker-start="url(#bd-arr)" marker-end="url(#bd-arr)"/>
+  <path class="edge bundle" d="M1092,1368 V902 M1092,878 V640 H1035" marker-end="url(#bd-arr)"/>
+  <path class="edge acc" d="M1112,1434 V902 M1112,878 V535 H957" marker-end="url(#bd-arr-acc)"/>
+  <text class="el" x="1066" y="790" text-anchor="middle" transform="rotate(-90 1066 790)">→ world model</text>
+  <text class="el" x="1066" y="1135" text-anchor="middle" transform="rotate(-90 1066 1135)">:5600 REP · :5601 gt.pose 50 · objects 10 · health 1 Hz</text>
+  <text class="el" x="1086" y="1135" text-anchor="middle" transform="rotate(-90 1086 1135)">:5565 FrameTap · :5602 chase/top · :5566 ego → panes</text>
+  <text class="el acc" x="1106" y="1150" text-anchor="middle" transform="rotate(-90 1106 1150)">head camera :5565 · 30 Hz sim time → System 1</text>
   <text class="el acc" x="1106" y="690" text-anchor="middle" transform="rotate(-90 1106 690)">2.5 Hz while GR00T holds ego_view</text>
-  <!-- GR00T link to the dev box -->
-  <path class="edge p4 link" d="M1035,850 H1290 V880" marker-start="url(#bd-arr-p4)" marker-end="url(#bd-arr-p4)"/>
-  <text class="el" x="1174" y="822">groot-link · autossh -L 5550</text>
-  <text class="el" x="1174" y="836">REQ/REP · get_action 2.5 Hz</text>
+  <!-- GR00T link (the OD3 SSH tunnel) from the main box to the dev box -->
+  <path class="edge p4 link" d="M1035,890 H1370 V952" marker-start="url(#bd-arr-p4)" marker-end="url(#bd-arr-p4)"/>
+  <text class="el" x="1140" y="848">groot-link · the OD3 SSH tunnel</text>
+  <text class="el" x="1140" y="862">autossh -L 5550 on the main box</text>
+  <text class="el" x="1140" y="876">REQ/REP · get_action 2.5 Hz</text>
 </svg>
     </div>
-    <figcaption class="caption">One picture of the whole loop, grouped by machine. Worldline (P5) talks to the robot only through the robot API, drawn as the orange dashed boundary. Below it, P3 is the robot: the dashed purple skills layer still runs inside the P5 process today and moves into P3 next (PLAN §0.14). The solid wl-body layers already run in P3. The Sim Viewer drives P3's low-level drive ops directly and never touches the arms. The orange line is the only camera path to a model: head frames from P1 :5565, through System 1's frame gate at no more than one per second, to Gemini Live. GR00T gets its own ego_view camera (:5566) and SONIC's joint state (:5557) and sends chunks through the dev-box tunnel. Where the tunnel crosses the three P1 → P5 lines, the gap marks a bridge, not a join.</figcaption>
+    <figcaption class="caption">One picture of the whole loop, grouped by machine. Worldline (P5) controls the robot only through the robot API: the orange dashed boundary and, under it, the target API bar (navigate/go_to, check_reachability, scan, pick, place, stop/halt, events, plus the low-level drive and arm ops). The other lines into P5 and the GR00T client are not robot control: P1's ground truth to the world model, frames to the camera panes and to System 1, and the :5557 and :5566 feeds into the GR00T client are simulator ground truth and sensor streams, used as hints. Below the bar, P3 is the robot: the dashed purple skills layer still runs inside the P5 process today and moves into P3 next (PLAN §0.14); the solid wl-body layers already run in P3. The Sim Viewer :8765 drives P3's low-level drive ops directly and never touches the arms. The orange line is the only camera path to a model: head frames from P1 :5565, through System 1's frame gate at no more than one per second, to Gemini Live. SONIC's <code>g1_debug</code> (:5557) goes to P3's DeployMonitor and to the GR00T client, which also takes its own ego_view camera (:5566) and calls the dev box through groot-link, the OD3 SSH tunnel. Where the tunnel crosses the three P1 → P5 lines, the gap marks a bridge, not a join.</figcaption>
   </figure>
 </section>
 
 <section>
   <h2>Who uses which API</h2>
-  <p class="prose">Three browser UIs and two headless clients. Each has the same name and port everywhere on this page. Only the Worldline UI goes through the Worldline runtime; the Sim Viewer drives P3 and reads P1 directly.</p>
+  <p class="prose">Three browser UIs and two headless clients. Each has the same name and port everywhere on this page. Only the Worldline UI :8766 goes through the Worldline runtime; the Sim Viewer :8765 drives P3 and reads P1 directly.</p>
   <div class="scroll">
     <table class="wide">
       <thead><tr><th>UI</th><th>Runs where</th><th>The browser talks to</th><th>Its server talks to</th><th>Can control</th></tr></thead>
@@ -526,8 +552,8 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
         <tr>
           <td><b>Worldline UI :8766</b></td>
           <td>P5 <code>ui.server</code> on the main box (tmux <code>wl-m2</code>, window <code>p5</code>), started by <code>m2_up.sh --p5-port 8766</code>. Laptop: <code>tunnel.sh 8766</code>.</td>
-          <td>Only P5: <code>GET /</code>, <code>/views/*.js</code> and one WebSocket <code>/ws</code>. In: <code>init</code>, <code>frame</code> 5 Hz, <code>camera</code> ≤5 Hz, <code>scan</code>, <code>memory</code>, <code>system1</code>, <code>notice</code>. Out: <code>say</code>, <code>hello</code>, <code>persona</code>, <code>step</code>, <code>reset</code>, <code>estop</code>, <code>relearn</code>. Never P1, P3, P4 or a cloud API.</td>
-          <td>P3 <code>:5610</code> ops + heartbeat 4 Hz, <code>:5612</code> halt, <code>:5611</code> events · P1 <code>:5600</code>, <code>:5601</code> (world model only), <code>:5565</code>, <code>:5602</code>, <code>:5566</code> · P2 <code>:5557</code> (GR00T client) · P4 <code>:5550</code> through groot-link · Gemini API, Gemini Live, TypeSafe Jev.</td>
+          <td>Only P5: <code>GET /</code>, <code>/views/*.js</code> and one WebSocket <code>/ws</code>. In: <code>init</code>, <code>loading</code>, <code>frame</code> 5 Hz, <code>camera</code> ≤5 Hz, <code>scan</code>, <code>memory</code>, <code>system1</code>, <code>notice</code>. Out: <code>say</code>, <code>hello</code>, <code>persona</code>, <code>step</code>, <code>reset</code>, <code>estop</code>, <code>relearn</code>. Never P1, P3, P4 or a cloud API.</td>
+          <td>P3 <code>:5610</code> ops + heartbeat 4 Hz, <code>:5612</code> halt, <code>:5611</code> events · P1 <code>:5600</code>, <code>:5601</code> (world model only), <code>:5565</code>, <code>:5602</code>, <code>:5566</code> · P2 <code>:5557</code> (GR00T client) · P4 <code>:5550</code> through groot-link (the OD3 SSH tunnel) · Gemini API, Gemini Live, TypeSafe Jev.</td>
           <td>Tasks by chat; stop (the word "stop" → halt lane); the kill button (<code>estop</code> → <code>shutdown_control</code>); scene reset; step mode; persona.</td>
         </tr>
         <tr>
@@ -540,9 +566,9 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
         <tr>
           <td><b>Stand-in UI :8777</b></td>
           <td>The laptop: <code>python -m ui.server --profile lite --port 8777</code> (the code default is 8765, which the tunnel uses). No tunnel, no simulator.</td>
-          <td>The same Worldline page and WebSocket API as :8766.</td>
+          <td>The same browser app and WebSocket API as the Worldline UI :8766.</td>
           <td>No sockets to a robot: LiteWorld (a recorded house), LiteBody (kinematic), LiteFrames (a schematic, not a render). The cloud APIs as on the box (Gemini planner, Jev + Gemini Live) unless started with the scripted planner and the System 1 stub.</td>
-          <td>The same page controls. Every body result is labelled executor <code>lite</code> (stepping stone). With live Gemini Flash, Jev and Gemini Live it passes 15/17 scenarios.</td>
+          <td>The same controls as the Worldline UI :8766. Every body result is labelled executor <code>lite</code> (stepping stone). With live Gemini Flash, Jev and Gemini Live it passes 15/17 scenarios.</td>
         </tr>
         <tr>
           <td><b>Eval drivers</b> (headless)</td>
@@ -566,32 +592,32 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
 <section>
   <h2>P3 robot API</h2>
   <p class="prose">P3 (<code>body.service</code>) binds three sockets: ROUTER <code>:5610</code> for ops, PULL <code>:5612</code> for the halt lane, and PUB <code>:5611</code> for events. A reply is <code>{id, ok, state: accepted | rejected | failed | done, error?, data?}</code>, and every op ends with exactly one terminal <code>body.event</code>. <b>Fences:</b> each gated op carries <code>execution_id</code>, <code>generation</code>, <code>control_epoch</code> and <code>session</code>; an older one is refused as <code>stale_command</code>. <b>Leases</b> (<code>LOCOMOTION</code>, <code>ARM_STREAM</code>, <code>ARM_SCRIPT</code>, <code>MANIP</code>) give one owner per resource. <b>Sessions</b> (<code>hello</code>, <code>ping</code> at 4 Hz, <code>bye</code>; watchdog 1 s) let P3 halt the robot itself when the runtime disappears.</p>
-  <p class="legend"><span><span class="tag skill">skill</span> the §0.14 robot API</span><span><span class="tag low">low-level</span> drive and arm ops (Sim Viewer, executors)</span><span><span class="tag admin">admin</span> sessions, leases, maintenance</span></p>
+  <p class="legend"><span><span class="tag skill">skill</span> the §0.14 robot API</span><span><span class="tag low">low-level</span> drive and arm ops (Sim Viewer :8765, executors)</span><span><span class="tag admin">admin</span> sessions, leases, maintenance</span></p>
   <div class="scroll">
     <table class="wide">
       <thead><tr><th>Op on :5610</th><th>Args</th><th>Called by</th><th>Level</th><th>Fenced</th></tr></thead>
       <tbody>
         <tr class="group"><td colspan="5">Legs · the Drive layer</td></tr>
-        <tr><td class="op">go_to</td><td>x, y, yaw, speed, timeout_s, final_pos_tol, final_yaw_tol_deg. Backend A* + pure pursuit (Nav2 deferred).</td><td>Worldline <code>navigate</code>; Sim Viewer click</td><td><span class="tag skill">skill</span> (navigate)</td><td>yes</td></tr>
+        <tr><td class="op">go_to</td><td>x, y, yaw, speed, timeout_s, final_pos_tol, final_yaw_tol_deg. Backend A* + pure pursuit (Nav2 deferred).</td><td>Worldline <code>navigate</code>; Sim Viewer :8765 click</td><td><span class="tag skill">skill</span> (navigate)</td><td>yes</td></tr>
         <tr><td class="op">approach</td><td>x, y, yaw, v, tol, timeout_s</td><td>Worldline <code>navigate(reach_stance)</code></td><td><span class="tag skill">skill</span> (reposition)</td><td>yes</td></tr>
-        <tr><td class="op">turn_to</td><td>yaw, relative, tol_deg</td><td>Worldline (turn-in-place scan fallback); Sim Viewer shift-click</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
-        <tr><td class="op">velocity</td><td>vx, vy, wz, stream, t_wall, watchdog_s 0.5, end; goal_id when fed by Nav2</td><td>Sim Viewer held keys, 10 Hz; Nav2 bridge <code>/cmd_vel</code> 20 Hz (deferred)</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
-        <tr><td class="op">walk</td><td>vx, vy, yaw_rate, duration_s</td><td>Sim Viewer fallback walk mode; tools</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
-        <tr><td class="op">stand</td><td>release_band, settle_s, verify_s</td><td><code>m1_up.sh</code>; Sim Viewer; Worldline page reset</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
-        <tr><td class="op">stop</td><td>arms?</td><td>Worldline cancel; Sim Viewer Stop / Space</td><td><span class="tag skill">skill</span> (stop)</td><td>no</td></tr>
+        <tr><td class="op">turn_to</td><td>yaw, relative, tol_deg</td><td>Worldline (turn-in-place scan fallback); Sim Viewer :8765 shift-click</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
+        <tr><td class="op">velocity</td><td>vx, vy, wz, stream, t_wall, watchdog_s 0.5, end; goal_id when fed by Nav2</td><td>Sim Viewer :8765 held keys, 10 Hz; Nav2 bridge <code>/cmd_vel</code> 20 Hz (deferred)</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
+        <tr><td class="op">walk</td><td>vx, vy, yaw_rate, duration_s</td><td>Sim Viewer :8765 fallback walk mode; tools</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
+        <tr><td class="op">stand</td><td>release_band, settle_s, verify_s</td><td><code>m1_up.sh</code>; Sim Viewer :8765; Worldline UI :8766 reset</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
+        <tr><td class="op">stop</td><td>arms?</td><td>Worldline cancel; Sim Viewer :8765 Stop / Space</td><td><span class="tag skill">skill</span> (stop)</td><td>no</td></tr>
         <tr class="group"><td colspan="5">Arms · the Arm channel</td></tr>
         <tr><td class="op">arm</td><td>mode <code>target</code> | <code>chunk</code>; stream, session_id, generation, control_epoch, execution_id; chunk {seq, t0_mono, dt 0.02, upper_body T×17, left/right_hand T×7}; keepalive; end {hold_on_end}; release {blend_s}</td><td>GR00T client (chunks ~2.5 Hz + keepalive every 0.5 s); <code>sonic_arm_script</code> (end, release)</td><td><span class="tag low">low-level</span></td><td>yes</td></tr>
         <tr><td class="op">arm_script</td><td>phase pregrasp | grasp | lift | carry | lower | release | retract; arm; target_w. The reply waits for the IK worker (2-430 ms).</td><td>Worldline <code>sonic_arm_script</code> executor</td><td><span class="tag low">low-level</span> (pick, place)</td><td>yes</td></tr>
         <tr><td class="op">scan</td><td>yaw_deg [−35, 0, 35], move_s, hold_s: one waist-yaw row</td><td>Worldline observation (arrival scan)</td><td><span class="tag skill">skill</span> (scan)</td><td>yes</td></tr>
         <tr class="group"><td colspan="5">Safety, leases, sessions, maintenance</td></tr>
-        <tr><td class="op">halt · resume</td><td>epoch. The same pair as the :5612 lane.</td><td>tools; the lane is the main path</td><td><span class="tag skill">skill</span> (halt)</td><td>no</td></tr>
+        <tr><td class="op">halt · resume</td><td>epoch. The same pair as the :5612 lane.</td><td>halt: tools (Worldline P5 sends its halts on the :5612 lane). resume: Worldline SonicBody (runtime resume, latch release on hello, Worldline UI :8766 reset)</td><td><span class="tag skill">skill</span> (halt)</td><td>no</td></tr>
         <tr><td class="op">acquire · release</td><td>execution_id, generation, control_epoch, session, mode</td><td>Worldline services, per navigate, scan, pick, place</td><td><span class="tag admin">admin</span></td><td>no</td></tr>
-        <tr><td class="op">hello · ping · bye</td><td>session, watchdog_s 1.0</td><td>Worldline SonicBody (ping 4 Hz); Sim Viewer <code>ping</code></td><td><span class="tag admin">admin</span></td><td>no</td></tr>
+        <tr><td class="op">hello · ping · bye</td><td>session, watchdog_s 1.0</td><td>Worldline SonicBody (ping 4 Hz); Sim Viewer :8765 <code>ping</code></td><td><span class="tag admin">admin</span></td><td>no</td></tr>
         <tr><td class="op">status</td><td>id?</td><td>everyone</td><td><span class="tag admin">admin</span></td><td>no</td></tr>
         <tr><td class="op">recover</td><td>(P1 <code>reset_robot</code>)</td><td>tools</td><td><span class="tag admin">admin</span></td><td>no</td></tr>
-        <tr><td class="op">clear_fault</td><td>—</td><td>Sim Viewer allow-list (the page never sends it); operator</td><td><span class="tag admin">admin</span></td><td>no</td></tr>
+        <tr><td class="op">clear_fault</td><td>—</td><td>Sim Viewer :8765 allow-list (the Worldline UI :8766 never sends it); operator</td><td><span class="tag admin">admin</span></td><td>no</td></tr>
         <tr><td class="op">reload_map</td><td>—</td><td>tools</td><td><span class="tag admin">admin</span></td><td>no</td></tr>
-        <tr><td class="op">shutdown_control</td><td>confirm. Sends <code>command{stop}</code>: the deploy damps and exits.</td><td>Worldline <code>estop</code> (kill button); <code>m1_down.sh</code></td><td><span class="tag admin">admin</span></td><td>no</td></tr>
+        <tr><td class="op">shutdown_control</td><td>confirm. Sends <code>command{stop}</code>: the deploy damps and exits.</td><td>Worldline UI :8766 <code>estop</code> (kill button); <code>m1_down.sh</code></td><td><span class="tag admin">admin</span></td><td>no</td></tr>
       </tbody>
     </table>
   </div>
@@ -674,7 +700,7 @@ svg.bd { display: block; width: 100%; min-width: 1380px; height: auto; color: va
       <ul>
         <li>PolicyServer with <code>nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace</code> (N1.7); one request at a time</li>
         <li>get_action p50 144 ms on the dev box; each reply is 40 rows at 50 Hz (0.8 s) of arm and Dex3 targets</li>
-        <li>groot-link: <code>autossh -L 5550</code> on the main box with a key restricted to that one port</li>
+        <li>groot-link (the OD3 SSH tunnel): <code>autossh -L 5550</code> on the main box with a key restricted to that one port</li>
         <li>Here because GR00T on the main box broke SONIC's timing (RTF p10 0.84-0.97, §0.12)</li>
       </ul>
       <span class="pill warn">Serving · live arm test running</span>
@@ -740,7 +766,10 @@ sequenceDiagram
   I-->>W: head frames, gated to 1/s, to Gemini Live
   W->>K: check_reachability(apple)
   K-->>W: needs_reposition
+  W->>K: navigate(reach_stance)
   K->>B: approach (final error ~1.5 cm)
+  W->>K: check_reachability(apple)
+  K-->>W: reachable
   W->>K: manipulate(pick apple)
   loop GR00T session, 2.5 Hz
     K->>G: get_action(ego_view :5566 + joints :5557) via groot-link
@@ -756,7 +785,7 @@ sequenceDiagram
   W-->>U: speak "Here is the apple"
 </pre>
   </div>
-  <p class="caption">Each planner step is one Gemini call that returns one tool call, and the validator checks it before the robot sees it. A "stop" typed at any point goes to P3's halt lane first (1-2 ms), before the planner hears about it. Live on the main box today: the robot side of steps 3-13 (navigate on A* and SONIC, the waist scan, <code>check_reachability</code>, the approach reposition to 1.5 cm) and a scripted pick from a set stance (step 19: grasp error 2.35 cm, lifted 0.148 m, carried 7.4 m). That run's place (step 21) failed <code>ik_unreachable</code>. GR00T driving SONIC's real arms (steps 15-18) is the run in progress.</p>
+  <p class="caption">Each planner step is one Gemini call that returns one tool call, and the validator checks it before the robot sees it. A "stop" typed at any point goes to P3's halt lane first (1-2 ms), before the planner hears about it. Live on the main box today: the robot side of steps 3-16 (navigate on A* and SONIC, the waist scan, <code>check_reachability</code>, <code>navigate(reach_stance)</code> with the approach reposition to 1.5 cm, and the second check) and a scripted pick from a set stance (step 22: grasp error 2.35 cm, lifted 0.148 m, carried 7.4 m). That run's place (step 24) failed <code>ik_unreachable</code>. GR00T driving SONIC's real arms (steps 18-21) is the run in progress.</p>
 </section>
 
 <section class="two">
@@ -771,7 +800,7 @@ sequenceDiagram
       <li><b>Arrive.</b> A waist scan (yaw −35/0/+35°) looks around; <code>check_reachability</code> may ask for <code>approach</code>, which repositions to about 1.5 cm.</li>
       <li><b>Step.</b> SONIC's planner and policy do the legs and balance. Navigation never touches joints.</li>
     </ol>
-    <p class="caption">Nav2 stays in the tree behind <code>:5620</code> and is deferred (PLAN §0.8); <code>m1_up.sh</code> and <code>m2_up.sh</code> force <code>NAV_BACKEND=astar</code>.</p>
+    <p class="caption">Nav2 stays in the tree behind <code>:5620</code> and is deferred (PLAN §0.8); <code>m1_up.sh</code> defaults <code>NAV_BACKEND</code> to astar and <code>m2_up.sh</code> forces it.</p>
   </div>
   <div style="display:grid; gap:14px">
     <h2>Models and checkpoints</h2>
@@ -782,7 +811,7 @@ sequenceDiagram
           <tr><td>SONIC release (<code>nvidia/GEAR-SONIC</code>)</td><td>Main box, P2. Whole-body controller: deploy ONNX + planner on TensorRT.</td></tr>
           <tr><td><code>nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace</code> @ 7f78beb (GR00T N1.7)</td><td>Dev box, P4. Outputs G1 arm and Dex3 hand joints. Off the shelf, trained on one apple-to-plate scene: in a house it should move the arms plausibly but usually not finish a grasp. The tests prove plumbing and control semantics.</td></tr>
           <tr><td><code>nvidia/Cosmos-Reason2-2B</code></td><td>Dev box. The gated backbone every N1.7 checkpoint loads; licence accepted, cached. Its metadata is fetched from Hugging Face at each server start.</td></tr>
-          <tr><td><code>gemini-3.8-flash</code></td><td>Cloud. System 2 planner, one forced tool call per step. The page can switch to <code>:think</code>, <code>claude-sonnet-5</code> or <code>claude-haiku-4-5</code>.</td></tr>
+          <tr><td><code>gemini-3.8-flash</code></td><td>Cloud. System 2 planner, one forced tool call per step. The Worldline UI :8766 can switch to <code>:think</code>, <code>claude-sonnet-5</code> or <code>claude-haiku-4-5</code>.</td></tr>
           <tr><td><code>gemini-3.8-live</code> + TypeSafe Jev</td><td>Cloud. System 1: Live observes gated head frames; Jev labels each chat line.</td></tr>
           <tr><td>Our GR00T fine-tune</td><td><span class="pill todo">Deferred</span> Demo collection and fine-tuning wait until the whole loop is tested (PLAN §0.8).</td></tr>
         </tbody>
@@ -796,7 +825,7 @@ sequenceDiagram
     <h2>Start-up and stopping</h2>
     <p class="caption"><code>scripts/m2_up.sh --profile full --p5-port 8766</code>, in this order; each stage waits on a readiness probe.</p>
     <ol class="steps">
-      <li><b>GR00T link.</b> <code>groot_link.sh ensure</code>: the dev-box PolicyServer must answer through the tunnel, or <code>m2_up.sh</code> exits 3 before anything starts.</li>
+      <li><b>GR00T link.</b> <code>groot_link.sh ensure</code>: the dev-box PolicyServer must answer through the OD3 tunnel, or <code>m2_up.sh</code> exits 3 before anything starts.</li>
       <li><b>P1.</b> Isaac starts with the robot held by the elastic band and prints <code>WL_ISAAC_READY</code> once lowstate flows.</li>
       <li><b>P3 body.</b> Binds <code>:5556</code> before the deploy connects to it.</li>
       <li><b>P2 deploy.</b> Connects to lowstate and waits (<code>Init Done</code> after 32-36 s; the first start builds TensorRT engines, about 2 min).</li>
@@ -834,15 +863,15 @@ sequenceDiagram
         <tr><td>Body loop · SonicMux planner · arm playback</td><td class="num">50 Hz</td><td>P3</td><td>mux measured 50.0 Hz; a halt sends IDLE at once (p50 0.7 ms on the wire)</td></tr>
         <tr><td><code>body.state</code></td><td class="num">5 Hz</td><td>P3</td><td>progress events 2 Hz (motions), 1 Hz (velocity), 5 Hz (arm chunk)</td></tr>
         <tr><td>IK re-solve during <code>arm_script</code> settle</td><td class="num">10 Hz</td><td>P3</td><td>worker process; first solve 2-430 ms, 5 s timeout</td></tr>
-        <tr><td>Page frame · camera panes</td><td class="num">5 Hz</td><td>P5</td><td>panes head 5, chase 5, ego 2, top 1 Hz</td></tr>
+        <tr><td>Worldline UI :8766 frame · camera panes</td><td class="num">5 Hz</td><td>P5</td><td>panes head 5, chase 5, ego 2, top 1 Hz</td></tr>
         <tr><td>System 1 frames · OBSERVE</td><td class="num">≤1/s · 5 s</td><td>P5</td><td>feed loop polls at 4 Hz; context updates ≤1/s</td></tr>
         <tr><td>Fused state · persona</td><td class="num">10 · 2 Hz</td><td>P5</td><td>belief sampling for the planner</td></tr>
         <tr><td>Body heartbeat · health · halt resend</td><td class="num">4 · 4 · 10 Hz</td><td>P5</td><td>session watchdog 1 s; halt resend only until acked</td></tr>
         <tr><td>GR00T get_action · GT judge</td><td class="num">2.5 · 10 Hz</td><td>P5</td><td>replan every 0.4 s or when fewer than 12 rows remain; timeout 1.5 s; keepalive 0.5 s</td></tr>
-        <tr><td>Sim Viewer telemetry · drive</td><td class="num">10 Hz</td><td>viz</td><td>head ≤15 fps; the page heartbeat 5 Hz; deadman 0.6 s; recorder 10 fps</td></tr>
+        <tr><td>groot-link (OD3 SSH tunnel, <code>autossh</code> on the main box)</td><td class="num">≈2.3 MB/s</td><td>main box</td><td>0.92 MB request at 2.5 Hz; ping 2.2-9.2 ms; keepalive 5 s × 3; reconnect after 2 s</td></tr>
+        <tr><td>Sim Viewer :8765 telemetry · drive</td><td class="num">10 Hz</td><td>Sim Viewer :8765</td><td>head ≤15 fps; browser heartbeat 5 Hz; deadman 0.6 s; recorder 10 fps</td></tr>
         <tr class="group"><td colspan="4">Dev box · ludo-g1-arena</td></tr>
         <tr><td>GR00T get_action (on the dev box)</td><td class="num">p50 144 ms</td><td>P4</td><td>p95 148 ms; first call 0.7-1.7 s; each reply 40 rows at 50 Hz = 0.8 s. Main → dev over the tunnel: not measured yet</td></tr>
-        <tr><td>groot-link</td><td class="num">≈2.3 MB/s</td><td>link</td><td>0.92 MB request at 2.5 Hz; ping 2.2-9.2 ms; keepalive 5 s × 3; reconnect after 2 s</td></tr>
         <tr class="group"><td colspan="4">Cloud</td></tr>
         <tr><td>Gemini planner</td><td class="num">per step</td><td>cloud</td><td>≤40 decisions per wake; caps 20 s (next_action), 8 s (classify); client 30 s × 3 retries</td></tr>
         <tr><td>Gemini Live observer</td><td class="num">≤1 frame/s</td><td>cloud</td><td>OBSERVE every 5 s or after an event; 8 s timeout; new session past 4000 tokens</td></tr>
@@ -860,24 +889,24 @@ sequenceDiagram
       <tbody>
         <tr class="group"><td colspan="3">Laptop</td></tr>
         <tr><td class="mono">:8765 · :8766</td><td>ssh -L</td><td>local ends of <code>tunnel.sh 8766 8765</code> → Sim Viewer :8765 and Worldline UI :8766 on the main box</td></tr>
-        <tr><td class="mono">:8777 HTTP/WS</td><td>Stand-in UI</td><td><code>ui.server --profile lite --port 8777</code>; no simulator</td></tr>
+        <tr><td class="mono">:8777 HTTP/WS</td><td>Stand-in UI :8777</td><td><code>ui.server --profile lite --port 8777</code>; no simulator</td></tr>
         <tr class="group"><td colspan="3">Main box (127.0.0.1, + <code>WL_PORT_OFFSET</code> unless noted)</td></tr>
         <tr><td class="mono">DDS domain 0 · lo</td><td>P1 ⇄ P2</td><td><code>rt/lowstate</code>, <code>rt/secondary_imu</code>, <code>rt/odostate</code> (unused), <code>rt/dex3/*/state</code> ← P1 · <code>rt/lowcmd</code>, <code>rt/dex3/*/cmd</code> ← P2. Not moved by the offset</td></tr>
-        <tr><td class="mono">:5550</td><td>groot-link</td><td>local end of the SSH tunnel to the dev box PolicyServer; not offset</td></tr>
+        <tr><td class="mono">:5550</td><td>groot-link (OD3 tunnel)</td><td>local end of the SSH tunnel to the dev box PolicyServer; not offset</td></tr>
         <tr><td class="mono">:5556 PUB</td><td>P3 SonicMux</td><td>SONIC input: <code>command</code>, <code>planner</code> with the optional upper-body and hand fields → P2</td></tr>
         <tr><td class="mono">:5557 PUB</td><td>P2</td><td><code>g1_debug</code> → P3 DeployMonitor, P5 GR00T client. Binds all interfaces (<code>tcp://*</code>)</td></tr>
-        <tr><td class="mono">:5565 PUB</td><td>P1</td><td>head camera, key <code>head</code> → System 1 (IsaacFrames), page panes (FrameTap), Sim Viewer, recorder</td></tr>
-        <tr><td class="mono">:5566 PUB</td><td>P1</td><td>ego_view, Arena's G1 head camera, on demand → GR00T client, the page's ego pane</td></tr>
+        <tr><td class="mono">:5565 PUB</td><td>P1</td><td>head camera, key <code>head</code> → System 1 (IsaacFrames), Worldline UI :8766 camera panes (FrameTap), Sim Viewer :8765, recorder</td></tr>
+        <tr><td class="mono">:5566 PUB</td><td>P1</td><td>ego_view, Arena's G1 head camera, on demand → GR00T client, the Worldline UI :8766 ego pane</td></tr>
         <tr><td class="mono">:5600 REP</td><td>P1</td><td>WorldRPC: 11 M1 + 14 M2b ops (scene, occupancy, objects, attach/detach, camera, detections, reset), +2 with <code>--viz</code>, +5 with <code>--test-ops</code></td></tr>
-        <tr><td class="mono">:5601 PUB</td><td>P1</td><td><code>gt.pose</code>, <code>gt.objects</code>, <code>sim.health</code>, <code>gt.event</code> → P3, P5 world model, Sim Viewer, recorder</td></tr>
-        <tr><td class="mono">:5602 PUB</td><td>P1 VizCams</td><td><code>frame.chase</code>, <code>frame.top</code>, <code>frame.overview</code> → Sim Viewer, page panes, recorder</td></tr>
-        <tr><td class="mono">:5610 ROUTER</td><td>P3</td><td>ops (see P3 robot API) ← P5, GR00T client, Sim Viewer, tools</td></tr>
+        <tr><td class="mono">:5601 PUB</td><td>P1</td><td><code>gt.pose</code>, <code>gt.objects</code>, <code>sim.health</code>, <code>gt.event</code> → P3, P5 world model, Sim Viewer :8765, recorder</td></tr>
+        <tr><td class="mono">:5602 PUB</td><td>P1 VizCams</td><td><code>frame.chase</code>, <code>frame.top</code>, <code>frame.overview</code> → Sim Viewer :8765, Worldline UI :8766 camera panes, recorder</td></tr>
+        <tr><td class="mono">:5610 ROUTER</td><td>P3</td><td>ops (see P3 robot API) ← P5, GR00T client, Sim Viewer :8765, tools</td></tr>
         <tr><td class="mono">:5611 PUB</td><td>P3</td><td><code>body.*</code> events and 5 Hz state</td></tr>
         <tr><td class="mono">:5612 PULL</td><td>P3</td><td>halt lane ← P5 PUSH; ack on :5611</td></tr>
         <tr><td class="mono">:5620 REP</td><td>Nav2 bridge</td><td>deferred; not started while <code>NAV_BACKEND=astar</code></td></tr>
-        <tr><td class="mono">:5630 REP</td><td>recorder</td><td>control (start, stop, status, note) from the CLI; the Sim Viewer picks a free port instead</td></tr>
-        <tr><td class="mono">:8765 HTTP/WS</td><td>Sim Viewer</td><td><code>viz/server.py</code></td></tr>
-        <tr><td class="mono">:8766 HTTP/WS</td><td>P5</td><td>Worldline UI (<code>m2_up.sh --p5-port 8766</code>)</td></tr>
+        <tr><td class="mono">:5630 REP</td><td>recorder</td><td>control (start, stop, status, note) from the CLI; the Sim Viewer :8765 picks a free port instead</td></tr>
+        <tr><td class="mono">:8765 HTTP/WS</td><td>Sim Viewer :8765</td><td><code>viz/server.py</code></td></tr>
+        <tr><td class="mono">:8766 HTTP/WS</td><td>P5</td><td>Worldline UI :8766 (<code>m2_up.sh --p5-port 8766</code>)</td></tr>
         <tr class="group"><td colspan="3">Dev box</td></tr>
         <tr><td class="mono">:5550 REP</td><td>P4</td><td>GR00T PolicyServer, 127.0.0.1 only: <code>ping</code>, <code>get_action</code>, <code>get_modality_config</code>, <code>reset</code></td></tr>
         <tr><td class="mono">:22</td><td>sshd</td><td>groot-link only: a restricted key that may forward to 127.0.0.1:5550 and nothing else</td></tr>
@@ -887,13 +916,13 @@ sequenceDiagram
   <h3>Where the docs and the code disagree (the code wins)</h3>
   <ul class="prose" style="margin:0; padding-left:18px; display:grid; gap:6px; font-size:14px">
     <li><code>:5565</code> is the <b>head</b> camera (key <code>head</code>, System 1's input); ego_view is <code>:5566</code>. <code>config/ports.env</code> calls 5565 <code>EGO_CAMERA_PORT</code> and has no 5566; <code>body/config.py</code>, <code>viz/common.py</code> and <code>docs/viz.md</code> still say ego_view.</li>
-    <li><code>ui.server</code> and <code>viz/server.py</code> both default to 8765, so the Worldline UI runs on 8766 via <code>m2_up.sh --p5-port 8766</code>; <code>config/stack.yaml</code> and <code>ports.env</code> still say 8765 for the UI.</li>
+    <li><code>ui.server</code> and <code>viz/server.py</code> both default to 8765, so the Worldline UI :8766 gets its port from <code>m2_up.sh --p5-port 8766</code>; <code>config/stack.yaml</code> and <code>ports.env</code> still say 8765 for the UI.</li>
     <li><code>docs/bringup.md</code> §1 says <code>m2_up.sh</code> checks the GR00T link after P5 and only warns; the code runs <code>ensure</code> before P1 and after P5 and exits 3 on failure.</li>
     <li><code>docs/contracts/p1_m2b.md</code> §5.4 keeps the head at 30 Hz during GR00T sessions; the full profile drops head and ego_view to 2.5 Hz.</li>
     <li>The GR00T endpoint 5550 does not follow <code>WL_PORT_OFFSET</code>, although <code>bringup.md</code> says every ZMQ port shifts.</li>
-    <li>The waist scan is one yaw row (−35/0/+35°), not two rows: SONIC does not move waist pitch under the override (PLAN §8, the harness docstring and the page's diagram.js still say two).</li>
-    <li><code>body/config.py</code> defaults <code>NAV_BACKEND</code> to nav2; the launch scripts force astar.</li>
-    <li>The Worldline UI's own diagram (<code>ui/views/diagram.js</code>) still shows GR00T as a later, token-based path; the code runs <code>groot_arms</code> into the arm channel.</li>
+    <li>The waist scan is one yaw row (−35/0/+35°), not two rows: SONIC does not move waist pitch under the override (PLAN §1.3 row 8, §5.10 and §6, the harness docstring and the Worldline UI :8766's <code>diagram.js</code> still say two).</li>
+    <li><code>body/config.py</code> defaults <code>NAV_BACKEND</code> to nav2; <code>m1_up.sh</code> defaults it to astar and <code>m2_up.sh</code> forces astar.</li>
+    <li>The Worldline UI :8766's own diagram (<code>ui/views/diagram.js</code>) still shows GR00T as a later, token-based path; the code runs <code>groot_arms</code> into the arm channel.</li>
   </ul>
 </section>
 
@@ -923,7 +952,8 @@ sequenceDiagram
 <section>
   <h2>Status log</h2>
   <div class="log">
-    <div class="entry"><time>2026-09-29</time><p><b>r11.</b> Redrawn around the whole loop: four machines (laptop, main box, dev box, cloud), every UI with one name and port (Sim Viewer :8765, Worldline UI :8766, Stand-in UI :8777), P3 drawn as layers, the robot API boundary, and the head-camera path to Gemini Live; new sections for who uses which API and for the P3 robot API. The day's changes: GR00T on the main box failed SONIC's timing gate standing (RTF p10 0.84-0.97, leg-target windows irregular even with CPU pinning), so the PolicyServer went back to the dev box behind groot-link (§0.12). The POC stays on the wall clock after a sim-time study (§0.13, <code>docs/simtime_options.md</code>); a deploy sim-clock patch is the fallback. New boundary (§0.14): P3 becomes the robot and Worldline sees only its API. Live on the main box: navigate → A* → SONIC, the waist scan, <code>check_reachability</code>, the approach reposition (1.5 cm) and 20/20 halts (1-2 ms); a scripted pick (2.35 cm, lifted 0.148 m, 7.4 m carry), whose place failed <code>ik_unreachable</code>. The lite stand-in passes 15/17 scenarios with live Gemini Flash, Jev and Gemini Live. GR00T in SONIC's real arms is under test.</p></div>
+    <div class="entry"><time>2026-09-29</time><p><b>r12.</b> Review fixes to the r11 redraw, no status change. The diagram now shows the target robot API as a bar under the boundary (navigate/go_to, check_reachability, scan, pick, place, stop/halt, events, plus the low-level drive and arm ops); SONIC's <code>g1_debug</code> goes to P3's DeployMonitor, not SonicMux; the arm channel lists arm target mode; persistence names recall and connects to System 2; groot-link is named as the OD3 SSH tunnel and labelled outside the dev box; Gemini Live is two-way. Every UI mention carries its port, the halt and resume callers match the code, and the "bring me the apple" sequence shows <code>navigate(reach_stance)</code> and the second reachability check.</p></div>
+    <div class="entry"><time>2026-09-29</time><p><b>r11.</b> Redrawn around the whole loop: four machines (laptop, main box, dev box, cloud), every UI with one name and port (Sim Viewer :8765, Worldline UI :8766, Stand-in UI :8777), P3 drawn as layers, the robot API boundary, and the head-camera path to Gemini Live; new sections for who uses which API and for the P3 robot API. The day's changes: GR00T on the main box failed SONIC's timing gate standing (RTF p10 0.84-0.97, leg-target windows irregular even with CPU pinning), so the PolicyServer went back to the dev box behind groot-link (§0.12). The POC stays on the wall clock after a sim-time study (§0.13, <code>docs/simtime_options.md</code>); a deploy sim-clock patch is the fallback. New boundary (§0.14): P3 becomes the robot and Worldline sees only its API. Live on the main box: navigate → A* → SONIC, the waist scan, <code>check_reachability</code>, the approach reposition (1.5 cm) and 20/20 halts (1-2 ms); a scripted pick (2.35 cm, lifted 0.148 m, 7.4 m carry), whose place failed <code>ik_unreachable</code>. The Stand-in UI :8777 (lite profile) passes 15/17 scenarios with live Gemini Flash, Jev and Gemini Live. GR00T in SONIC's real arms is under test.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r10.</b> Wave 1 merged into master (670 tests). Live on the dev box: P1 attach/detach 150/150, live object poses in 3-47 ms, scene reset 13 ms, the Arena-exact GR00T camera on demand (RTF p10 0.993 with both cameras); the N1.7 G1 checkpoint served on the dev box and checked open-loop against NVIDIA's Arena demos; the live GR00T chain (camera → policy → arm chunks) at p50 178 ms, halts 1-2 ms. Body wave on the main box: halt lane (receipt under 1.4 ms, 0 falls), leases, modes/faults, approach (p90 3.7-4 cm), chunk playback (no row after a stop), scripted pick with CarryLock, yaw scan, Dex3 hands fixed (closure 0.99). Four body defects remain (halt behind IK, hand latch, free-arm latch, grasp 4.5-4.9 cm). Wave 2 started: those fixes, the robot on the halt lane, the scripted arm fallback, calibration and GR00T stance, the main-to-dev GR00T link, the full profile on the main box, then E0-E5 and E-1.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r9.</b> Arm tracking (G0): conditional GO. SONIC stays balanced with the arms driven, standing and walking (0 falls). Raw tracking is slow (127-215 ms) and loose (17-52 mm); with the body correction loop and chunks sent 0.15 s early, held poses are 2-13 mm and carrying 9-17 mm, the scripted grasp 22-28 mm. Wrist pitch barely moves; the simulated Dex3 thumbs do not move at all (P1 asset). Open before GR00T runs: stop/halt must latch the arms. Dev box proven identical to main.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r8.</b> M2a done: the offline "bring me the alarm clock" episode passes on the lite G1 with the real harness and page (477 tests). Its verifier flagged ground-truth reads in <code>robot/</code> and gaps in the M2b list; both are in wave 1. Dev box verified as a full replica (M1 drive test passes there). Wave 1 of the whole-loop build started on branch <code>m2b-wave1</code>: P1 ops and the Arena-matched GR00T camera, world/runtime fixes, the <code>groot_arms</code> executor, the GR00T server on the dev box, dev-box bring-up, UI/eval. Wave 2 (body arm/halt work and the live loop on the main box) waits for the arm-tracking GO/NO-GO.</p></div>
