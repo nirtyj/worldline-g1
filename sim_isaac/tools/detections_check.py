@@ -7,6 +7,8 @@ the head camera sits exactly where world's model puts it.
 
     .venv-rt/bin/python -m sim_isaac.tools.detections_check --port-offset 100 --views 50 --out DIR [--seed 0]
 
+world's side is evaluated at P1's actual head-camera pose (`get_link_poses cam:head`), so the comparison is of the
+two visibility methods through one camera; its agreement at world's nominal upright-torso pose is reported too.
 Views: world's surface keypoints (the stands the planner walks to) with yaw jitter of +-25 deg, cycled until
 --views. Per view: world's visible objects (kind object, gt-geometric) vs P1's objects with px >= --min-px within
 2.5 m (world's object range). Agreement: exact set equality per view, per-object decisions over the union, and the
@@ -36,6 +38,17 @@ if ROOT not in sys.path:
 
 from body.config import ep  # noqa: E402
 from body.p1_client import P1Rpc  # noqa: E402
+
+
+def camera_pose_from_p1(link: dict):
+    """P1 `get_link_poses` cam:head (world convention: x forward, y left, z up) -> world.perception.CameraPose."""
+    from sim_isaac.wire import matrix_from_quat
+    from world.perception import CameraPose
+
+    R = matrix_from_quat(link["quat_wxyz"])
+    fwd = R[:, 0]
+    return CameraPose(pos=tuple(float(v) for v in link["pos"]), R=R, yaw=math.atan2(fwd[1], fwd[0]),
+                      pitch_down=math.asin(max(-1.0, min(1.0, -fwd[2]))))
 
 
 def head_frame(sub, after_render_seq: int, timeout_s: float = 3.0):
@@ -103,9 +116,14 @@ def main(argv=None) -> int:
             if not rep.get("ok", True):
                 raise SystemExit(f"reset_robot failed: {rep}")
             time.sleep(a.settle_s)
-            wd = w.detections(camera="head")
+            # world's gt-geometric at P1's actual head-camera pose (so the two methods look through the same camera),
+            # and at world's nominal upright-torso pose (what world uses today without link poses)
+            lp = rpc.call("get_link_poses", links=["cam:head", "torso_link"])["links"]
+            cp = camera_pose_from_p1(lp["cam:head"])
+            wd = w.detections(camera="head", cam_pose=cp)
             w_obj = {d.id for d in wd if d.kind == "object"}
             w_lm = {d.id for d in wd if d.kind == "landmark"}
+            nominal = {d.id for d in w.detections(camera="head") if d.kind == "object"}
             det = rpc.call("detections", camera="head", min_px=a.min_px, timeout_s=20.0)
             if not det.get("ok", True):
                 raise SystemExit(f"detections failed: {det}")
@@ -118,6 +136,9 @@ def main(argv=None) -> int:
                  "world_objects": sorted(w_obj), "p1_objects": sorted(p_obj), "world_landmarks": sorted(w_lm),
                  "p1_landmarks": sorted(p_lm), "objects_equal": w_obj == p_obj, "landmarks_equal": w_lm == p_lm,
                  "p1_px": {sid_to_oid.get(d["id"], d["id"]): d["px"] for d in det["detections"]},
+                 "world_objects_nominal_pose": sorted(nominal), "objects_equal_nominal": nominal == p_obj,
+                 "cam_pitch_down_deg": round(math.degrees(cp.pitch_down), 2),
+                 "torso_quat_wxyz": lp["torso_link"]["quat_wxyz"],
                  "det_ms": det.get("ms"), "cam_pose_wl": det.get("cam_pose_wl")}
             agg["obj_both"] += len(w_obj & p_obj)
             agg["obj_p1_only"] += len(p_obj - w_obj)
@@ -145,6 +166,9 @@ def main(argv=None) -> int:
     res = {"views": n, "min_px": a.min_px, "range_m": a.range, "seed": a.seed,
            "objects_view_agreement": round(sum(v["objects_equal"] for v in views) / max(1, n), 4),
            "landmarks_view_agreement": round(sum(v["landmarks_equal"] for v in views) / max(1, n), 4),
+           "objects_view_agreement_nominal_pose": round(sum(v["objects_equal_nominal"] for v in views) / max(1, n), 4),
+           "cam_pitch_down_deg": {"min": min(v["cam_pitch_down_deg"] for v in views) if views else None,
+                                  "max": max(v["cam_pitch_down_deg"] for v in views) if views else None},
            "object_decisions": agg, "object_jaccard": round(agg["obj_both"] / obj_dec, 4) if obj_dec else None,
            "landmark_jaccard": round(agg["lm_both"] / lm_dec, 4) if lm_dec else None,
            "views_with_objects": sum(1 for v in views if v["world_objects"] or v["p1_objects"]),

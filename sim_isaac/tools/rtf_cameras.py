@@ -59,6 +59,13 @@ def apply(rpc: P1Rpc, cfg: dict) -> dict:
     return reps
 
 
+def restore(rpc: P1Rpc) -> dict:
+    """P1 defaults: head on at 30 Hz; ego_view off with its rate back at 30 Hz (a camera's hz persists)."""
+    out = apply(rpc, {"head": 30.0, "ego": 0.0})
+    out["ego_hz"] = rpc.call("camera", name="ego_view", hz=30.0)
+    return out
+
+
 def summarize(samples: list, stats0: dict, stats1: dict) -> dict:
     """samples: [(recv_mono, t_sim, rtf_1s, fallen)]."""
     if len(samples) < 2:
@@ -165,7 +172,7 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001
         res["error"] = repr(e)
     finally:
-        res["restore"] = apply(rpc, {"head": 30.0, "ego": 0.0})
+        res["restore"] = restore(rpc)
         bc.stop()
         bc.close()
         sub.stop()

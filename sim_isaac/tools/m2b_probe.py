@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import sys
 import time
@@ -158,8 +159,10 @@ def check_smoke(pr: Probe, a) -> dict:
                                 "age_ms": round((time.time() - m["t_capture"]) * 1e3, 1),
                                 "png": pr.save_frame(m, "ego_view")})
     res["ego_view"]["disable_reply"] = pr.call("camera", name="ego_view", on=False, consumer="m2b_probe")
+    t_off = time.time()
     after = pr.collect(s, 1.0)
-    res["ego_view"]["frames_1s_after_disable"] = len(after)
+    res["ego_view"]["frames_1s_after_disable"] = len(after)          # includes frames already in the encoder queue
+    res["ego_view"]["frames_captured_after_disable"] = sum(1 for _, _, m in after if m["t_capture"] > t_off)
     s.close(0)
     # gt.* topics
     s = pr.sub(5601 + pr.off, [b"gt.pose", b"gt.objects", b"sim.health"])
@@ -191,8 +194,9 @@ def check_smoke(pr: Probe, a) -> dict:
     res["stats"] = {k: st.get(k) for k in ("rtf_1s", "rtf_10s", "render_hz", "render_ms", "cameras", "render_calls",
                                             "n_view_errors", "dynamic_objects", "gt_slowest_ms")}
     res["pass"] = bool(res["head"].get("frames_3s") and res["ego_view"].get("frames")
-                       and res["ego_view"]["frames_before_enable"] == 0 and res["ego_view"]["frames_1s_after_disable"]
-                       <= 1 and res.get("gt_pose_links") and res.get("sim_health") and det.get("ok"))
+                       and res["ego_view"]["frames_before_enable"] == 0
+                       and res["ego_view"]["frames_captured_after_disable"] == 0
+                       and res.get("gt_pose_links") and res.get("sim_health") and det.get("ok"))
     return res
 
 
@@ -314,7 +318,8 @@ def check_reset(pr: Probe, a) -> dict:
     wall = time.monotonic() - t0
     time.sleep(1.0)
     objs1 = pr.objects(dynamic_only=True)
-    resid = {oid: round(float(np.linalg.norm(centre(objs1[oid]) - centre(objs0[oid]))), 4) for oid in objs0}
+    load = {o["id"]: o for o in pr.call("get_scene_info")["objects"]}      # load-time boxes: what reset restores
+    resid = {oid: round(float(np.linalg.norm(centre(objs1[oid]) - centre(load[oid]))), 4) for oid in objs0}
     big = {k: v for k, v in resid.items() if v > 0.02}
     return {"reply": rep, "round_trip_s": round(wall, 3), "moved": ids, "residual_max_m": max(resid.values()),
             "residual_gt_2cm": big, "pass": bool(rep.get("ok")) and wall < 30.0 and not big}
@@ -324,9 +329,14 @@ def check_carry(pr: Probe, a) -> dict:
     from body.client import BodyClient
 
     bc = BodyClient(port_offset=pr.off).connect(10)
+    res: dict = {}
+    if a.home:                                    # the scene spawn, facing its free run
+        sp = pr.call("get_scene_info")["spawn"]
+        h = bc.go_to(float(sp["x"]), float(sp["y"]), yaw=float(sp["yaw"]), timeout_s=120)
+        res["home"] = {"ok": h.ok, "reason": h.reason}
     oid = pr.pick_object(a.id)
     o0 = pr.objects(ids=[oid])[oid]
-    res: dict = {"object": oid}
+    res["object"] = oid
     res["attach"] = pr.call("attach", id=oid, arm=a.arm, mode=a.mode)
     time.sleep(1.0)
     p0 = pr.pose()
@@ -344,6 +354,90 @@ def check_carry(pr: Probe, a) -> dict:
     res["detach"] = pr.call("detach", id=oid, pose=centre(o0).tolist())
     bc.close()
     res["pass"] = bool(res["attach"].get("ok") and h.ok and res["grip_err_m"] < 0.03 and not res["fallen"])
+    return res
+
+
+def check_scanload(pr: Probe, a) -> dict:
+    """`detections` at a scan-like rate while the controller holds the robot: op time, gt.pose wall gaps (the
+    physics thread stalls while the op renders), falls, RTF."""
+    s = pr.sub(5601 + pr.off, [b"gt.pose"])
+    time.sleep(0.3)
+    st0 = pr.call("get_stats")
+    calls, gaps, t_last, fallen = [], [], None, False
+    t_end = time.monotonic() + a.n * a.period_s
+    next_call = time.monotonic()
+    rtf = []
+    while time.monotonic() < t_end:
+        t, m = pr.recv(s, 0.01)
+        if m is not None:
+            now = time.monotonic()
+            if t_last is not None:
+                gaps.append(now - t_last)
+            t_last = now
+            fallen = fallen or bool(m.get("fallen"))
+            if m.get("rtf") is not None:
+                rtf.append(float(m["rtf"]))
+        if time.monotonic() >= next_call:
+            next_call += a.period_s
+            for cam in a.cameras.split(","):
+                rep = pr.call("detections", camera=cam, min_px=40)
+                calls.append({"camera": cam, "ok": rep.get("ok"), "ms": rep.get("ms"), "rtt_ms": rep["_rtt_ms"],
+                              "n": len(rep.get("detections") or []), "error": rep.get("error")})
+    s.close(0)
+    st1 = pr.call("get_stats")
+    g = np.array(gaps) * 1e3 if gaps else np.zeros(1)
+    r = np.array(rtf) if rtf else np.zeros(1)
+    ms = [c["ms"] for c in calls if c["ms"] is not None]
+    return {"calls": calls, "op_ms": {"mean": float(np.mean(ms)) if ms else None, "max": max(ms) if ms else None},
+            "gt_pose_gap_ms": {"p50": float(np.percentile(g, 50)), "p99": float(np.percentile(g, 99)),
+                               "max": float(g.max())},
+            "rtf1s": {"mean": float(r.mean()), "p10": float(np.percentile(r, 10)), "min": float(r.min())},
+            "fallen": fallen, "heartbeat_pubs": [st0.get("heartbeat_pubs"), st1.get("heartbeat_pubs")],
+            "overruns": [st0.get("overruns"), st1.get("overruns")],
+            "pass": all(c["ok"] for c in calls) and not fallen}
+
+
+def check_frames(pr: Probe, a) -> dict:
+    """head + ego_view frames (raw and with P1 detections boxes) at named stands (robot teleported, band on; for a
+    P1 without a controller). --stands 'name:x,y,yaw_deg;...'"""
+    from PIL import Image, ImageDraw
+
+    res: dict = {}
+    subs = {"head": pr.sub(5565 + pr.off, conflate=True), "ego_view": pr.sub(W.EGO_PORT + pr.off, conflate=True)}
+    res["ego_on"] = pr.call("camera", name="ego_view", on=True, consumer="m2b_probe_frames", ttl_s=120)
+    for item in [x for x in a.stands.split(";") if x.strip()]:
+        name, xyz = item.split(":")
+        x, y, yawd = (float(v) for v in xyz.split(","))
+        pr.call("reset_robot", x=x, y=y, yaw=math.radians(yawd))
+        time.sleep(a.settle_s)
+        for cam, s in subs.items():
+            det = pr.call("detections", camera=cam, min_px=a.min_px)
+            m = None
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 3.0:
+                _, mm = pr.recv(s, 0.2)
+                if mm is not None and mm.get("render_seq", 0) >= det.get("render_seq", 0):
+                    m = mm
+                    break
+            if m is None:
+                res[f"{name}/{cam}"] = {"error": "no frame"}
+                continue
+            raw = pr.save_frame(m, f"{name}_{cam}_raw")
+            im = Image.open(raw).convert("RGB")
+            d = ImageDraw.Draw(im)
+            dets = [x for x in det.get("detections", []) if x.get("dist_m") is None or x["dist_m"] <= a.range]
+            for x in dets:
+                u0, v0, u1, v1 = x["bbox"]
+                d.rectangle([u0, v0, u1, v1], outline=(0, 220, 0), width=2)
+                d.text((u0 + 2, v0 + 2), f"{x['name']} {x['px']}", fill=(0, 220, 0))
+            im.save(pr.out / f"{name}_{cam}_dets.png")
+            res[f"{name}/{cam}"] = {"cam_pose_wl": m.get("cam_pose_wl"), "cam_pos": m.get("cam_pos"),
+                                    "hfov": m.get("hfov"), "det_ms": det.get("ms"),
+                                    "dets": [(x["name"], x["px"], x.get("dist_m")) for x in dets]}
+    res["ego_off"] = pr.call("camera", name="ego_view", on=False, consumer="m2b_probe_frames")
+    for s in subs.values():
+        s.close(0)
+    res["pass"] = all("error" not in v for k, v in res.items() if "/" in k)
     return res
 
 
@@ -369,15 +463,25 @@ def main(argv=None) -> int:
     p = sp.add_parser("reset")
     p.add_argument("--n-moved", type=int, default=5)
     p.add_argument("--robot", action="store_true")
+    p = sp.add_parser("scanload")
+    p.add_argument("--n", type=int, default=20)
+    p.add_argument("--period-s", type=float, default=1.0)
+    p.add_argument("--cameras", default="head")
+    p = sp.add_parser("frames")
+    p.add_argument("--stands", required=True, help="name:x,y,yaw_deg;...")
+    p.add_argument("--settle-s", type=float, default=1.5)
+    p.add_argument("--min-px", type=int, default=40)
+    p.add_argument("--range", type=float, default=2.5)
     p = sp.add_parser("carry")
     p.add_argument("--id", default=None)
     p.add_argument("--arm", default="right", choices=list(W.ARMS))
     p.add_argument("--mode", default="follow", choices=list(W.ATTACH_MODES))
     p.add_argument("--walk-s", type=float, default=4.0)
+    p.add_argument("--home", action="store_true")
     a = ap.parse_args(argv)
     pr = Probe(a.port_offset, Path(a.out))
     fn = {"smoke": check_smoke, "attach": check_attach, "latency": check_latency, "reset": check_reset,
-          "carry": check_carry}[a.check]
+          "carry": check_carry, "frames": check_frames, "scanload": check_scanload}[a.check]
     res = fn(pr, a)
     name = a.check if a.check != "attach" else f"attach_{a.mode}"
     pr.write(name, res)

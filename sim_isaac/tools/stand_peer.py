@@ -244,6 +244,9 @@ def main():
     ap.add_argument("--reset", action="store_true", help="reset_robot to the spawn pose (band on) first")
     ap.add_argument("--load-only", type=float, default=0.0,
                     help="only generate deploy-like DDS traffic (lowcmd 500 Hz + Dex3 cmds) for N seconds")
+    ap.add_argument("--load-gains", choices=["train", "stiff"], default="train",
+                    help="--load-only gains: stiff holds legs and waist upright (the head camera then sits where "
+                         "world's upright-torso model puts it; sim_isaac/tools/detections_check.py)")
     ap.add_argument("--ops", action="store_true", help="exercise the REP ops (occupancy, topdown, record)")
     ap.add_argument("--out", default="/work/worldline-g1/outputs/m1/isaac/stand_test.json")
     a = ap.parse_args()
@@ -251,6 +254,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     if a.load_only > 0:
         peer = Peer(a.domain, a.iface)
+        if a.load_gains == "stiff":
+            peer.kp[:12], peer.kd[:12] = 350.0, 10.0
+            peer.kp[12:15], peer.kd[12:15] = 400.0, 10.0
         peer.start()
         time.sleep(a.load_only)
         print(f"LOAD_DONE sent={peer.sent} lowstate_rx={len(peer.ls_times)}", flush=True)

@@ -1,6 +1,6 @@
 # P1 (wl-isaac) M2b additions: the wire
 
-Status: **v1 (isaac owner, M2b wave 1, 2026-09-29).** This document is the wire for P1.1-P1.10 of `docs/M2.md` §7.1
+Status: **v1 (isaac owner, M2b wave 1, 2026-09-29), implemented and measured on the dev box (§13).** This document is the wire for P1.1-P1.10 of `docs/M2.md` §7.1
 plus the two-camera decision OD1. It extends `docs/contracts/m1.md` §0-§1; everything there still holds unless a
 section below says otherwise. The runtime side (`world/isaac_client.py`, `tests/fakes/fake_p1_world.py` with
 `m2b=True`) already speaks P1.1-P1.3; this contract keeps exactly that wire and extends it. Implementation:
@@ -157,7 +157,12 @@ Detaches every held object in place (`reset_scene` does this first). Reply `{rel
 - `fixed_joint` creates one `UsdPhysics.FixedJoint` prim per attach under `/World/wl_grip/` and deletes it on
   detach. Structural stage changes are exactly what can invalidate tensor views, which is why the 50-cycle test
   runs both modes (§13). If a tensor-view error ever appears, P1 disables `fixed_joint` for the rest of the run
-  (`code: "mode_disabled"`) and keeps `follow`.
+  (`code: "mode_disabled"`) and keeps `follow`. Every `fixed_joint` attach logs PhysX's `CreateJoint - found a joint
+  with disjointed body transforms`: the USD parser compares against the USD transforms, which are stale because the
+  live poses are in Fabric. The joint frames are computed from the live PhysX poses, and no snap is measured (§13).
+- Both modes change USD attributes (collider flags) or prims, and the next render re-syncs them: while attaching and
+  detaching back to back, P1's render time p99 went from about 10 to about 20 ms (§13). One attach per `manipulate`
+  costs nothing noticeable.
 
 ---
 
@@ -258,16 +263,20 @@ box as P1); `timestamps.ego_view` is the same instant in wall time. A frame olde
   cannot leave the camera rendering (and costing RTF) forever.
 - Enabling re-arms the render product (annotator detach → enable → attach, `docs/viz.md` §4 finding 3), about
   15-20 ms of sim-thread work once, and the first `warmup_frames` (4) frames after enabling are rendered but not
-  published (the `balanced` denoiser needs a few frames, docs/viz.md finding 6). The first frame arrives about
-  0.13 s after `camera {on: true}` at 30 Hz.
+  published (the `balanced` denoiser needs a few frames, docs/viz.md finding 6). Measured: the first frame arrives
+  0.18-0.19 s after `camera {on: true}` at 30 Hz (§13).
+- **`hz` persists** across off/on (and across consumers): a consumer that needs a rate passes `hz` with
+  `on: true`. The GR00T client enables with `{name: "ego_view", on: true, hz: 30, consumer, ttl_s}`.
 - Disabling stops the render product's GPU work (`hydra_texture.set_updates_enabled(False)`).
 - Rates are in sim time and aligned on one grid, so cameras at 30 and 15 Hz share renders. **Every enabled render
   product is rendered on every render call** (docs/viz.md finding 2): what costs RTF is the number of enabled
   products times the render rate, not a camera's own rate. Lowering `head` while `ego_view` runs at 30 Hz only
   saves read-back and encode; lowering both lowers the render rate.
 - `gt.event {event: "camera", name, on, hz, consumers}` on every change.
-- Measured RTF with none / head / head + ego_view, standing and walking: §13. The rate policy for GR00T sessions
-  that follows from it: §13.
+- **Rate policy (measured, §13.2):** keep `head` at 30 Hz during GR00T sessions and run `ego_view` at 30 Hz. With
+  SONIC walking, head alone gives RTF p10 0.997 and head + ego_view 0.993, above the 0.98 target, and lowering
+  both to 15 Hz did not raise p10 (0.993). No automatic head-rate change is built in; `set_render_rates` exists if a
+  busier box needs it.
 
 ---
 
@@ -297,9 +306,10 @@ Unknown names are listed in `unknown` (not an error).
 Args: `camera` (`head` default, or `ego_view`), `min_px` (40), `max_range` (m, optional: drop objects whose
 centre is farther from the camera), `ids` (optional filter), `bbox` (true).
 
-The op renders once more (all enabled cameras; the frames from that render are published as usual and share its
-`render_seq`), reads Replicator's `instance_id_segmentation_fast` annotator on the camera's render product, maps
-each instance prim to a scene object (longest prefix of the object's `prim_path`/extra prims), and counts pixels.
+The op renders once more (every enabled product renders; the requested camera's frame from that render is
+published and carries the reply's `render_seq`), reads Replicator's `instance_id_segmentation_fast` annotator on the
+camera's render product, maps each instance prim to a scene object (longest prefix of the object's
+`prim_path`/extra prims), and counts pixels.
 
 Reply:
 
@@ -318,6 +328,9 @@ Reply:
   detached (while attached it adds GPU work to every render).
 - This is instance segmentation of the render, labelled `instance_id_segmentation_fast`. world's
   `gt-geometric` (`world/perception.py`) stays the fallback. Agreement measured: §13.
+- **Cost:** the op runs on the physics thread and stalls it for its duration: 15-35 ms per call, about 100 ms for
+  the first call on a camera (annotator attach) (§13). Call it per scan view, not continuously: two calls per
+  second (head + ego_view at 1 Hz) while SONIC stood gave RTF p10 0.977.
 
 ---
 
@@ -328,7 +341,7 @@ Reply:
 | `reset_scene` | `variant` (`"default"`), `poses` (optional `{id: [x,y,z] \| [x,y,z,yaw]}`, object centres), `robot` (optional: `true` = spawn, or `{x, y, yaw}`), `band` (true, only with `robot`) | `{variant, objects_reset, poses_applied, robot_reset, released, ms, object_writes, root_writes}` | Releases every held object, puts every dynamic object back at its load pose (orientation and position) with zero velocity, applies `poses`, optionally resets the robot exactly like `reset_robot` (band on), puts the house props back to sleep. `gt.event reset_scene`. Only `default` exists as a named variant in wave 1; eval fixtures pass their placements in `poses` |
 | `move_object` (test-only) | `id`, `pose` (`[x,y,z]` \| `[x,y,z,yaw]`, the centre as in §4.2), `vel` (optional `[vx,vy,vz]`) | `{id, pos, aabb}` | teleport; releases it if held. `gt.event object_moved {id, by: "move_object"}` |
 | `set_object_pose` | same as `move_object` | same | alias (the name `groot_arms_design.md` §3.6 asks for) |
-| `push_object` (test-only) | `id`, `vel` `[vx,vy,vz]` (m/s) | `{id, vel}` | sets the linear velocity once: PhysX then slides/tips it. `gt.event object_moved {by: "push_object"}` |
+| `push_object` (test-only) | `id`, `vel` `[vx,vy,vz]` (m/s) | `{id, vel}` | sets the linear velocity once: PhysX then slides/tips it. `gt.event object_moved {by: "push_object"}`. Friction is high (1.0): 0.6 m/s moved an alarm clock by under 2 cm, 1.2-1.5 m/s moves props 0.1-0.3 m (§13) |
 
 Every test-only write increments `get_stats.object_writes`. `reset_scene` with `robot` also increments
 `root_writes` like `reset_robot` (m1.md §1.6). The robot reset leaves SONIC's planner facing to the body (the body
@@ -402,4 +415,63 @@ heavy op while SONIC holds the robot), `internal` (an exception; the text says w
 
 ## 13. Measured on the dev box (wave 1)
 
-Filled in from the live runs; every number names its run. Until then: **[u]**.
+Dev box `ludo-g1-arena` (L40S, 16 vCPU), house `procthor-train-38`, 2026-09-29, under the dev-box stack lock.
+Another owner's GR00T PolicyServer (`groot-server`, port 5550) was loaded and idle during both sessions (0% GPU
+utilisation, 6.7 GB VRAM). Evidence on the laptop in `outputs/m2b_wave1/isaac/` (box:
+`/work/worldline-g1/outputs/m2b_wave1/isaac/`), logs in `outputs/m2b_wave1/isaac/logs/`.
+
+- **Session A** (`p1a/`, `detections/`): P1 alone, DDS domain 7, port offset 100, band on, no controller (for the
+  detections check a stiff-gain DDS peer, `stand_peer --load-only --load-gains stiff`, held the torso upright).
+- **Session B** (`drive/`, `rtf/`, `stack/`, `recording/`): the M1 stack (`scripts/m1_up.sh --session isaac-m1`:
+  P1 + body + the unmodified deploy, pinned as m1_up defaults), SONIC standing and walking.
+
+### 13.1 Wire and ops
+
+| Check | Result | Evidence |
+|---|---|---|
+| Start-up | `WL_ISAAC_READY` with `p1_contract m2b-1`, head on / ego_view off, 34 dynamic props in one rigid-body view (43 static/articulated), camera warm-up 30 renders in 1.4 s | `logs/isaac-m2b-a.log` |
+| P1.1 discovery | `ping.ops` lists 25 ops (the M1 ops + §2-§10) | `p1a/smoke.json` |
+| Topics (SONIC standing) | `gt.pose` 50.0 Hz, `gt.objects` 10.0 Hz (34 dynamic objects), `sim.health` 1.0 Hz; `gt.pose.links` and `waist_q` present | `stack/smoke/smoke.json` |
+| Head stream | 30.25 Hz received, frame age at receipt 6.0 ms, `hfov` 90, `cam_pose_wl` pitch 13.9° while SONIC stood (torso pitch included) | `stack/smoke/smoke.json` |
+| ego_view on demand | no frame before enabling; first frame 0.193 s after `camera {on: true}`; 30.11 Hz; no frame captured after disabling | `stack/smoke/smoke.json` (session A: 0.183 s, 30.1 Hz) |
+| P1.2 live poses | `move_object`: seen by `get_objects` within 3-4 ms, by `gt.objects` within 94-97 ms; `push_object` 1.2 m/s: `get_objects` 26-47 ms, `gt.objects` 48-96 ms (5 + 5 runs, apple). **Exit (< 0.5 s): met** | `p1a/latency.json` |
+| P1.3 attach cycles | alarm clock, right arm: **50/50 `follow`** (grip error max 0.3 mm, placed back within 0.1 mm) and **50/50 `fixed_joint`** (grip error max 0.1 mm), plus 50/50 `follow` on the dog bed; **0 tensor-view errors**, `fixed_joint` never disabled; attach op ≤ 31 ms, detach ≤ 29 ms (`follow`) / ≤ 119 ms (`fixed_joint`). During the cycles render p99 rose from about 10 to about 20 ms and the worst 1 s RTF window was 0.813 | `p1a/alarm/attach_*.json`, `p1a/attach_follow.json`, log stats lines |
+| P1.3 carry under SONIC | attach (snapped from 8.6-8.7 m away), walk 0.35 m/s for 4 s: `follow` walked 1.58 m, `fixed_joint` 1.64 m; the object stayed at the grip point (0.2 / 0.1 mm), no fall; detach placed it back | `stack/carry_*/carry.json` |
+| P1.4 frames | head and ego_view PNGs (raw and with P1 detections) at 4 stands; a 55 s recording while walking to the kitchen counter: `ego.mp4` (the 5565 head stream, 1642 frames), `ego_view.mp4` (817 frames; it ran at 15 Hz because the RTF run had left its `hz` at 15, see §5.4), `topdown.mp4` | `p1a/frames/`, `p1a/head.png`, `p1a/ego_view.png`, `recording/` |
+| P1.5 link poses | torso, palms and `cam:*` served; with the torso held upright the head camera was at 1.336 m, 15.8-16.0° down; ego_view at 1.119 m, 35.8° down (band height: pelvis 0.766 m) | `detections/detections_check.json`, `p1a/frames/frames.json` |
+| P1.6 detections vs gt-geometric | 50 views (20 surface stands, yaw ±25°): exact per-view agreement on objects **66 % (33/50)**; object decisions 91 agree, 8 P1-only, 9 world-only (Jaccard 0.84); landmarks 80 % per view. **Exit (≥ 90 %): not met.** In the 5 disagreeing overlays inspected (views 4, 8, 9, 14, 19) the rendered image supports P1 each time (objects hidden behind a rack or out of frame that gt-geometric counted, and a phone and a vase in plain view that it missed). Op time 15-35 ms, first call 95 ms | `detections/` (overlays `view_00..19.png`) |
+| P1.6 cost under SONIC | head + ego_view `detections` at 1 Hz for 20 s: 25 ms per call (first 99 ms), RTF p10 0.977, min 0.716, no fall | `stack/scanload/scanload.json` |
+| P1.7 reset | `reset_scene` 12.7-23.6 ms in P1, every prop back within 0.6 mm; with SONIC standing: deploy alive, no fall. With `robot` (teleport to spawn, band on) then body `stand`: **standing again 8.1 s after the reset call**, then walked 1.51 m. A 180° teleport: standing after 6.7 s, but the body ended 14° off the commanded yaw (−75.7° vs −90°); walked 1.51 m, no fall. **Exit (< 30 s with the deploy alive): met** | `p1a/reset.json`, `stack/reset_*/` |
+| P1.8 furniture top render | cached at start-up; 35 prims hidden (34 props + the robot) | `p1a/topdown_procthor-train-38_furniture.png` |
+| P1.9 health | `sim.health` `level: ok` at RTF 1.0; `robot_fell` / `object_fell` tested on the fake only (no fall happened live) | `stack/smoke/smoke.json`, `sim_isaac/tests` |
+
+### 13.2 RTF per camera configuration, SONIC in the loop
+
+`rtf/rtf_cameras.json` (`sim_isaac/tools/rtf_cameras.py`): the cameras switched at run time in one P1 process; per
+configuration 20 s standing + 40 s walking (walk 0.4 m/s 4 s, two 90° turns, back), 2 interleaved rounds. RTF =
+gt.pose `rtf` (1 s window) sampled at 50 Hz.
+
+| Config | Render | Stand p10 | Stand mean | Walk p10 | Walk mean | Walk min | Render ms mean |
+|---|---|---|---|---|---|---|---|
+| none | 0 Hz | 0.9998 | 1.000 | 0.9998 | 1.000 | 0.997 | - |
+| head 30 Hz | 30 Hz | 0.9975 | 1.0005 | 0.9971 | 0.9977 | 0.860 | 8.6-9.0 |
+| head 30 + ego_view 30 Hz | 30 Hz | 0.9928 | 1.0008 | 0.9925 | 0.9967 | 0.846 | 11.3-11.6 |
+| head 15 + ego_view 15 Hz | 15 Hz | 0.9925 | 0.9975 | 0.9933 | 0.9991 | 0.845 | 11.7-12.3 |
+
+(p10 and min are the worst of the two rounds; means are averaged.) **Target p10 ≥ 0.98 with head on: met, also
+with ego_view.** The second 640x480 product adds about 2.7 ms per render. No fall in any phase; leg targets
+changed at 49.5-50 Hz throughout. Render hitches (Kit, m1.md §1.10) still fire the lowstate heartbeat 1-4 times
+per walking phase with any camera on (0 with none).
+
+The M1 drive test on this P1 (head on 5565, ego_view available, objects and health publishing): **all_pass True**
+(E2 stand 60 s, drift 0.9 mm; turn 90° error 0.93°; walk 3.68 m; strafe 1.70 m; stop 1.07 s; go_to 3 rooms; E4 all
+checks); gt.pose RTF mean 0.998, p05 0.995, min 0.823 (`drive/metrics.json`).
+
+### 13.3 Not done / open
+
+- P1.6's 90 % agreement bar is not met; the inspected differences are gt-geometric's approximations. Replacing
+  gt-geometric with `detections` where they differ is world's R.3 decision.
+- `robot_fell` and `object_fell` were not triggered live (no fall happened); they are covered on the fake.
+- No live test of `reset_scene` variants other than `default` (none exist yet).
+- After a teleport with a large yaw change the body ends off the commanded yaw (14° measured once): the body owner's
+  re-stand should re-align SONIC's facing (`groot_arms_design.md` §3.2 [u]).
