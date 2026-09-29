@@ -220,6 +220,12 @@ def stats(v: list) -> dict:
             "min": None if not vv else round(min(vv), 3)}
 
 
+def _fence_epoch(st: dict) -> int:
+    """The highest epoch the body has seen (halt, resume, any fenced op): body.status fences (m1.md §3.11)."""
+    f = (st or {}).get("fences") or {}
+    return max([0] + [int(f[k]) for k in ("halt_epoch", "epoch_seen", "resume_epoch") if isinstance(f.get(k), int)])
+
+
 class HaltTest:
     def __init__(self, a):
         off = a.port_offset if a.port_offset is not None else port_offset_from_env()
@@ -233,7 +239,12 @@ class HaltTest:
         self.bc.add_topic_listener(lambda t, m: self.topics.append((time.monotonic(), t, m)))
         self.events = []
         self.bc.add_listener(lambda ev: self.events.append((time.monotonic(), ev)))
-        self.epoch = int(a.epoch0)
+        # the body keeps one epoch space for every client (m1.md §3.11): on a stack with a runtime (P5) attached, a
+        # time-based epoch0 can sit below the runtime's halts, and every halt/resume of this test would be stale
+        st = self.bc.status()
+        self.epoch = max(int(a.epoch0), _fence_epoch(st) + 10)
+        # the same for generations: a runtime's leases raise the body's generation floor (stale_command why generation)
+        self.generation = max(1, int(((st or {}).get("fences") or {}).get("generation_floor") or 1))
         self.trials: list[dict] = []
         os.makedirs(a.out, exist_ok=True)
 
@@ -452,8 +463,8 @@ class HaltTest:
         for i in range(n):
             sid = f"halt-test-chunk-{i}-{int(time.time() * 1000) % 10 ** 8}"
             ce = self.epoch
-            base = {"stream": sid, "session_id": sid, "execution_id": sid, "generation": 1, "control_epoch": ce,
-                    "mode": "chunk"}
+            base = {"stream": sid, "session_id": sid, "execution_id": sid, "generation": self.generation,
+                    "control_epoch": ce, "mode": "chunk"}
             q0 = self.bc_ref_mj17()
             closure = self.a.hand_closure
             t_start = time.monotonic()

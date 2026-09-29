@@ -600,6 +600,24 @@ def _rtf(R):
 
 
 # ================================================================================================= pick + carry
+def scene_live(R: Runner) -> dict:
+    """P1's scene (get_scene_info: load-time boxes) with every dynamic object's LIVE box (get_objects): an earlier run
+    (a GR00T staging, a pick, a push) may have moved it since the load."""
+    scene = R.p1.call("get_scene_info")
+    live = {o["id"]: o for o in (R.p1.try_call("get_objects", dynamic_only=True) or {}).get("objects") or []}
+    moved = {}
+    for o in scene.get("objects") or []:
+        lo = live.get(o.get("id"))
+        if lo and lo.get("aabb"):
+            c0 = np.mean(np.asarray(o["aabb"], float), axis=0)
+            c1 = np.mean(np.asarray(lo["aabb"], float), axis=0)
+            if float(np.linalg.norm(c1 - c0)) > 0.02:
+                moved[o["id"]] = _r(float(np.linalg.norm(c1 - c0)), 3)
+            o["aabb"], o["held_by"] = lo["aabb"], lo.get("held_by")
+    scene["_moved_since_load"] = moved
+    return scene
+
+
 def find_object(scene: dict, oid: str | None):
     objs = scene.get("objects") or []
     by_id = {o.get("id"): o for o in objs}
@@ -624,13 +642,22 @@ def support_of(obj, objs):
     return best
 
 
-def stance_for(obj, sup, gap: float, lateral: float, side: str):
-    """Stand `gap` from the support edge nearest to the object, facing it, the object `lateral` to the arm's side."""
+# --faces: the robot's facing at the stance -> the support AABB side it stands at (that side's outward normal)
+FACE_NORMAL = {"+x": (-1.0, 0.0), "-x": (1.0, 0.0), "+y": (0.0, -1.0), "-y": (0.0, 1.0)}
+
+
+def stance_for(obj, sup, gap: float, lateral: float, side: str, face: str | None = None):
+    """Stand `gap` from the support edge nearest to the object, facing it, the object `lateral` to the arm's side.
+    `face` ('+x', '-x', '+y', '-y': the robot's facing) picks the edge instead: an L-shaped counter's AABB puts the
+    nearest edge on the wall side (H40 CounterTop|6|1: every object on its east leg is nearest the wall)."""
     (x0, y0, _), (x1, y1, _) = sup["aabb"]
     (ox0, oy0, _), (ox1, oy1, _) = obj["aabb"]
     cx, cy = (ox0 + ox1) / 2, (oy0 + oy1) / 2
     edges = [(cx - x0, (-1.0, 0.0)), (x1 - cx, (1.0, 0.0)), (cy - y0, (0.0, -1.0)), (y1 - cy, (0.0, 1.0))]
-    d, n = min(edges, key=lambda e: e[0])
+    if face and face != "auto":
+        d, n = next(e for e in edges if e[1] == FACE_NORMAL[face])
+    else:
+        d, n = min(edges, key=lambda e: e[0])
     f = np.array([-n[0], -n[1]])                      # facing: towards the support
     left = np.array([-f[1], f[0]])
     sgn = -1.0 if side == "right" else 1.0
@@ -662,17 +689,18 @@ def palm_err_tool(R: Runner, t0, t1, side, goal_w):
 
 def pick_test(R: Runner) -> dict:
     a = R.a
-    scene = R.p1.call("get_scene_info")
+    scene = scene_live(R)
     obj, objs = find_object(scene, a.object)
     sup = support_of(obj, objs)
     if sup is None:
         raise RuntimeError(f"no support found for {obj['id']}")
     (ox0, oy0, oz0), (ox1, oy1, oz1) = obj["aabb"]
     grasp_w = [(ox0 + ox1) / 2, (oy0 + oy1) / 2, oz1 + a.grasp_above]
-    S = {"object": obj["id"], "support": sup["id"], "grasp_w": _r(grasp_w)}
+    S = {"object": obj["id"], "support": sup["id"], "grasp_w": _r(grasp_w), "object_aabb": _r(obj["aabb"]),
+         "moved_since_load": scene.get("_moved_since_load")}
     print(f"[arm_wave] pick {obj['id']} on {sup['id']}", flush=True)
     # go_to (A*-safe), raise the hand over the support first with --rise-gap, then `approach` (body B.6) in
-    _stance_at(R, obj, sup, grasp_w, S)
+    _stance_at(R, obj, sup, grasp_w, S, (a.faces or "auto").split(",")[0].strip())
     g = R.mon.last_gt()
     S["pose_at_stance"] = _r([g[1], g[2], math.degrees(g[4])], 3)
     ext = {}
@@ -702,6 +730,25 @@ def pick_test(R: Runner) -> dict:
     S["grasp_palm_err_w_m_body"] = [((tr["grasp"].get("terminal") or {}).get("palm_err_w_m")) for tr in trials]
     S["grasp_palm_err_b_m_body"] = [((tr["grasp"].get("terminal") or {}).get("palm_err_b_m")) for tr in trials]
     S["ik_err_m"] = [((tr["grasp"].get("plan") or {}).get("ik_err_m")) for tr in trials]
+    if a.attach != "none":
+        # P1.3 attach (STEPPING STONE: the object follows the palm; a Dex3 grasp is not reliable yet), with the hand
+        # at the last grasp, gated like sonic_arm_script's: the palm (FK of the measured joints on the GT pelvis)
+        # within 0.10 m of the grasp point, else no attach (P1 would snap an object from anywhere to the hand)
+        with R.mon.lock:
+            d = R.mon.dbg[-1] if R.mon.dbg else None
+        g = R.mon.last_gt()
+        gap = None if d is None or g is None else float(np.linalg.norm(palm_world(d[1], g, a.arm) - grasp_w))
+        last_ok = bool(trials) and (trials[-1]["grasp"].get("terminal") or {}).get("state") == "succeeded"
+        if last_ok and gap is not None and gap < 0.10:
+            try:
+                rep = R.p1.call("attach", id=obj["id"], arm=a.arm, mode=a.attach)
+            except Exception as e:  # noqa: BLE001  (P1Error: the op's code and message)
+                rep = {"error": repr(e)}
+        else:
+            rep = {"error": "not attached: " + ("the last grasp did not succeed" if not last_ok
+                                                else f"palm {gap} m from the grasp point (gate 0.10 m)")}
+        S["attach"] = {k: rep.get(k) for k in ("ok", "held_by", "mode", "snapped", "dist_m", "error")}
+        S["attach"].update({"label": "STEPPING STONE", "palm_to_grasp_point_m": _r(gap, 3)})
     # carry: lift, tuck, CarryLock, turn, 2 m walk
     lift = script(R, {"phase": "lift", "arm": a.arm, "lift_m": 0.06})
     # step back from the support with the lifted arm held (CarryLock), then tuck: lowering the hand next to the
@@ -716,8 +763,15 @@ def pick_test(R: Runner) -> dict:
     hold_pose = ((st.get("arm") or {}).get("hold") or {}).get("pose_mj17")
     t_w0 = time.monotonic()
     g0 = R.mon.last_gt()
-    ht = R.bc.turn_to(wrap(g0[4] + math.pi), timeout=40)
-    hw = R.bc.walk(vx=a.walk_v, duration_s=a.walk_s)
+    if a.carry_to:
+        # an A* go_to with the arm held (the override rides on every planner message): a blind straight walk from the
+        # support can run into furniture (H40 dresser: an obstacle 1.4 m straight behind the stance)
+        cx, cy = (float(v) for v in a.carry_to.split(","))
+        ht = R.bc.go_to(cx, cy, timeout_s=120)
+        hw = ht
+    else:
+        ht = R.bc.turn_to(wrap(g0[4] + math.pi), timeout=40)
+        hw = R.bc.walk(vx=a.walk_v, duration_s=a.walk_s)
     t_w1 = time.monotonic()
     g1 = R.mon.last_gt()
     drift = []
@@ -731,7 +785,12 @@ def pick_test(R: Runner) -> dict:
                 want_n[wj] = got_n[wj]
             pw, pg = K.points(want_n)[f"{a.arm}_palm"], K.points(got_n)[f"{a.arm}_palm"]
             drift.append(float(np.linalg.norm(pw - pg)))
-    S["carry_walk"] = {"turn": {"state": ht.state, "yaw_err_deg": (ht.result or {}).get("yaw_err_deg")},
+    with R.mon.lock:
+        gts = [g for g in R.mon.gt if t_w0 <= g[0] <= t_w1]
+    path_m = sum(math.hypot(b[1] - q[1], b[2] - q[2]) for q, b in zip(gts, gts[1:]))
+    S["carry_walk"] = {"mode": "go_to " + a.carry_to if a.carry_to else "turn 180 + walk",
+                       "gt_path_m": _r(path_m, 3),
+                       "turn": {"state": ht.state, "yaw_err_deg": (ht.result or {}).get("yaw_err_deg")},
                        "walk": {"state": hw.state, "walked_m": (hw.result or {}).get("walked_m"),
                                 "displacement_m": (hw.result or {}).get("displacement_m")},
                        "gt_displacement_m": _r(math.hypot(g1[1] - g0[1], g1[2] - g0[2]), 3),
@@ -740,10 +799,28 @@ def pick_test(R: Runner) -> dict:
                                         "p90": _pct(drift, 90), "max": _r(max(drift) if drift else None),
                                         "n": len(drift)},
                        "carry_after": (R.bc.status().get("arm") or {}).get("carry")}
+    if a.attach != "none" and S["attach"].get("held_by"):
+        # did the object come along? P1's live box vs the palm (FK of the measured joints on the GT pelvis)
+        o = next((x for x in (R.p1.try_call("get_objects", ids=[obj["id"]]) or {}).get("objects") or []), None)
+        with R.mon.lock:
+            d = R.mon.dbg[-1] if R.mon.dbg else None
+        g = R.mon.last_gt()
+        if o is not None and d is not None and g is not None:
+            c = np.mean(np.asarray(o["aabb"], float), axis=0)
+            S["carry_walk"]["object_after"] = {
+                "held_by": o.get("held_by"), "centre_w": _r(c, 3),
+                "centre_to_palm_m": _r(float(np.linalg.norm(c - palm_world(d[1], g, a.arm))), 3),
+                "height_above_floor_m": _r(float(c[2]), 3),
+                "in_hand": o.get("held_by") == a.arm and float(np.linalg.norm(c - palm_world(d[1], g, a.arm))) < 0.15}
     S["lift"], S["carry"] = lift.get("terminal"), carry.get("terminal")
     rel = script(R, {"phase": "release", "arm": a.arm})
     ret = script(R, {"phase": "retract", "arm": a.arm})
     S["release"], S["retract"] = (rel.get("terminal") or {}).get("state"), (ret.get("terminal") or {}).get("state")
+    if a.attach != "none" and S["attach"].get("held_by"):
+        # put the object back where it stood (detach with a pose): the next test and the house start as they were
+        (x0, y0, z0), (x1, y1, z1) = obj["aabb"]
+        rep = R.p1.try_call("detach", id=obj["id"], pose=[(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2])
+        S["detach_put_back"] = {k: (rep or {}).get(k) for k in ("ok", "pos", "error", "code")}
     S["trials"] = trials
     S["falls_total"] = R.mon.falls(R.t_start, time.monotonic())
     S["rtf"] = _rtf(R)
@@ -791,11 +868,11 @@ def _err_b(R: Runner, t0, t1, side, goal_w) -> list:
     return out
 
 
-def _stance_at(R: Runner, obj, sup, grasp_w, S: dict) -> None:
+def _stance_at(R: Runner, obj, sup, grasp_w, S: dict, face: str | None = None) -> None:
     a = R.a
     gap = a.rise_gap if a.rise_gap else a.gap
-    sx, sy, syaw, d_edge = stance_for(obj, sup, gap, a.lateral, a.arm)
-    S["edge_dist_m"], S["stance"] = _r(d_edge), _r([sx, sy, math.degrees(syaw)], 3)
+    sx, sy, syaw, d_edge = stance_for(obj, sup, gap, a.lateral, a.arm, face)
+    S["edge_dist_m"], S["stance"], S["face"] = _r(d_edge), _r([sx, sy, math.degrees(syaw)], 3), face or "auto"
     h = R.bc.go_to(sx, sy, yaw=syaw, timeout_s=120)
     S["go_to"] = {"state": h.state, "reason": h.reason, "pos_err": (h.result or {}).get("pos_err")}
     time.sleep(1.0)
@@ -866,7 +943,7 @@ def _one_grasp(R: Runner, grasp_w, extra: dict) -> dict:
     return tr
 
 
-def grasp_at(R: Runner, scene: dict, oid: str) -> dict:
+def grasp_at(R: Runner, scene: dict, oid: str, face: str | None = None) -> dict:
     a = R.a
     obj, objs = find_object(scene, oid)
     sup = support_of(obj, objs)
@@ -878,7 +955,7 @@ def grasp_at(R: Runner, scene: dict, oid: str) -> dict:
     if sup is None:
         S["error"] = "no support"
         return S
-    _stance_at(R, obj, sup, grasp_w, S)
+    _stance_at(R, obj, sup, grasp_w, S, face)
     extra = {"approach": a.approach, "preshape": a.preshape}
     if a.above_m is not None:
         extra["above_m"] = a.above_m
@@ -923,7 +1000,7 @@ def grasp_at(R: Runner, scene: dict, oid: str) -> dict:
 
 def grasp_test(R: Runner) -> dict:
     a = R.a
-    scene = R.p1.call("get_scene_info")
+    scene = scene_live(R)
     if a.list or not a.objects:
         cands = grasp_candidates(scene, a)
         print(json.dumps(cands, indent=1), flush=True)
@@ -937,10 +1014,13 @@ def grasp_test(R: Runner) -> dict:
         ids = ids[:a.n_objects]
     else:
         ids = a.objects.split(",")
+    faces = [f.strip() for f in (a.faces or "").split(",") if f.strip()]
+    faces += ["auto"] * (len(ids) - len(faces))
     S = {"variant": {k: getattr(a, k) for k in ("approach", "preshape", "reach", "lateral", "gap", "grasp_above",
                                                   "closure", "settle", "above_m", "arm", "clear", "rise_gap",
                                                   "raise_above")},
-         "objects": [grasp_at(R, scene, oid) for oid in ids]}
+         "moved_since_load": scene.get("_moved_since_load"),
+         "objects": [grasp_at(R, scene, oid, face) for oid, face in zip(ids, faces)]}
     errs = [x for o in S["objects"] for x in o.pop("_errs", [])]
     per = [tr["tool_palm_err_w_m"]["p90"] for o in S["objects"] for tr in o.get("trials", [])
            if tr.get("tool_palm_err_w_m")]
@@ -1033,6 +1113,11 @@ def main(argv=None) -> int:
     ap.add_argument("--settle", type=float, default=2.0)
     ap.add_argument("--walk-v", type=float, default=0.3)
     ap.add_argument("--walk-s", type=float, default=7.0)
+    ap.add_argument("--attach", default="none", choices=["none", "fixed_joint", "follow"],
+                    help="pick: P1.3 attach (STEPPING STONE) after the last grasp; checked after the carry walk, then "
+                    "the object is put back where it stood")
+    ap.add_argument("--carry-to", default=None, help="pick: x,y: the carry walk is a go_to there (A*) instead of a "
+                    "180 deg turn and a blind --walk-s walk")
     ap.add_argument("--yaw-deg", type=float, nargs="+", default=[-35.0, 0.0, 35.0])
     ap.add_argument("--at-counter", action="store_true")
     # grasp (B-D4: accuracy over objects / surfaces)
@@ -1041,6 +1126,8 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true", help="grasp: only list the candidate objects")
     ap.add_argument("--max-edge", type=float, default=0.16, help="grasp: object centre at most this from the edge")
     ap.add_argument("--approach", default="front", choices=["front", "above"])
+    ap.add_argument("--faces", default=None, help="grasp/pick: per object (comma list, aligned with --objects), the "
+                    "robot's facing at the stance: auto (the support edge nearest the object) | +x | -x | +y | -y")
     ap.add_argument("--preshape", type=float, default=0.0)
     ap.add_argument("--above-m", type=float, default=None)
     ap.add_argument("--closure", type=float, default=0.6)
