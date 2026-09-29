@@ -18,7 +18,7 @@ Tags as in `docs/groot_arms_design.md`: **[v]** read in code or files (path:line
 | Server | stock `gr00t/eval/run_gr00t_server.py` of Isaac-GR00T @ `4b1dca9d` (Arena's static_apple pin), env `/work/arena/gr00t_n17/.venv` (py 3.10.21, torch 2.7.1+cu128, transformers 4.57.3, flash-attn 2.7.4.post1), reused from the Arena spike, nothing reinstalled |
 | Where | **dev box** `ludo-g1-arena`, `127.0.0.1:5550` only, tmux `groot-server`, logs `/work/logs/groot/` (OD3). The main box reaches it in wave 2 through `scripts/groot_link.sh` |
 | Runtime client | `groot/` (py3.11, numpy + pyzmq + msgpack; never imports `gr00t`): `PolicyClient`, `build_observation`, `to_arm_chunk` / `ArmChunk`, `joint_order` |
-| Numbers | §6 (filled from the wave-1 run) |
+| Numbers (§6) | dev-box local `get_action` p50/p95 144/148 ms (640x480); first call 974 ms; VRAM 6.5-6.7 GB; open-loop MSE vs recorded demos 5-17x below a hold-state baseline, and wiring faults 2.4-11x worse; 0 of 105,280 targets outside the URDF limits; laptop via SSH tunnel p50 741 ms |
 
 ## 1. Running it
 
@@ -191,7 +191,7 @@ must match that camera.
 | `get_modality_config` | → `{video, state, action, language}` as plain dicts on our side |
 | `reset` | `data = {"options": null}` → `{}` |
 | Errors | any exception, including a failed strict observation check (`gr00t_policy.py:208-369`), replies `{"error": str}` (:159-164); the client raises `PolicyError`, the socket stays usable |
-| Payload | request ≈ 0.92 MB (the raw 640x480x3 frame dominates), reply ≈ 2 KB (§6.3) |
+| Payload | request 922,862 bytes (the raw 640x480x3 frame dominates), reply 6,792 bytes (§6.4) |
 
 **Timeouts.** A REQ socket that sent a request and got no reply is wedged: the next `send` fails. Upstream's client
 recreates the socket on `zmq.Again` (:227-235). `groot.policy_client.PolicyClient` does the same on every timeout or
@@ -288,8 +288,109 @@ options plus `from="127.0.0.1"`, a loopback tunnel, then removed): §6.6.
 
 ## 6. Measurements (wave 1, dev box)
 
-(filled in from the run; see `outputs/m2b_wave1/groot/`)
+Run `wave1-20260929T064355Z` (dev box, stack lock held, no other GPU job: `pre_state.txt` shows 0 MiB used before
+the start), artifacts in `outputs/m2b_wave1/groot/wave1-20260929T064355Z/` (box copy `/work/groot/eval/`). Every
+number below is from that run unless another run is named.
+
+### 6.1 Server [m]
+
+| | |
+|---|---|
+| Start to first `ping` | 18.2 s (`groot_server.sh start`; one start, page-cache state not controlled) |
+| Bind | `127.0.0.1:5550` only (`ss -ltn`, checked by the script) |
+| VRAM | 6522 MiB after load, 6652 MiB after the first `get_action`, 6680 MiB after 377 calls (`nvidia-smi` per pid) |
+| First `get_action` | 974 ms (one call, synthetic 640x480 frame, right after start; the Arena spike measured 3.8 s on its first call, `docs/arena_vs_sonic.md` §2.5) |
+| Live contract tests | `pytest -m box tests/groot/test_groot_live.py`: 3 passed (modality config = the Arena G1 schema with ABSOLUTE actions; action shapes (1, 40, D) f32; a float64 state is rejected by the strict server and the client stays usable) |
+| Failed first attempt | with `HF_HUB_OFFLINE=1` the server died at start: transformers 4.57.3 calls the Hub API for `nvidia/Cosmos-Reason2-2B` (`tokenization_utils_base.py:2432`, `is_base_mistral`) although every file is cached. The script now defaults to online (`HF_TOKEN` from the profile); log in `/work/groot/eval/failed-offline-20260929T064322Z/` |
+
+### 6.2 Open loop vs the recorded demos [m]
+
+Episodes 0-9 of `nvidia/Arena-G1-Static-PickNPlace-Task` (154-198 rows each, 50 Hz), one query every 20 rows (94
+queries per variant), each compared with the recorded `action` rows t..t+39 (`python -m groot.open_loop`,
+`open_loop/open_loop.json`; plots `open_loop/open_loop_ep00N.png`). Every observation went through the runtime path:
+LeRobot 43 → body q 29 (MuJoCo) + Dex3 hands → `build_observation` → `PolicyClient` → `to_arm_chunk`. These are the
+checkpoint's **training** episodes (its card names the dataset), so this checks plumbing, not skill.
+
+MSE in rad² (nmse = in the model's normalized units, (q99 − q01)/2 = 1; the right hand's band is degenerate):
+
+| Variant | left_arm | right_arm | left_hand | left_arm nmse | right_arm nmse | left_hand nmse |
+|---|---|---|---|---|---|---|
+| **main** (Arena prompt, correct orders) | **0.0100** | **0.0014** | **0.0170** | 0.031 | 0.016 | 0.104 |
+| prompt_dataset (tasks.jsonl sentence) | 0.0078 | 0.0008 | 0.0215 | 0.024 | 0.008 | 0.131 |
+| baseline_hold (no model: hold the current state) | 0.0527 | 0.0243 | 0.1718 | 0.183 | 0.344 | 1.038 |
+| neg_swap_arms (left/right arm states swapped) | 0.0242 | 0.0149 | 0.0480 | 0.080 | 0.180 | 0.293 |
+| neg_hand_order (hands not reordered from Dex3) | 0.0165 | 0.0020 | 0.0477 | 0.052 | 0.021 | 0.291 |
+
+- The model beats the do-nothing baseline by 5x (left arm), 17x (right arm) and 10x (left hand) in MSE, on every
+  one of the 10 episodes (per-episode table in `open_loop.json`).
+- Both wiring faults make it clearly worse (swapped arms: 2.4x left arm, 11x right arm; a missed Dex3 reorder: 2.8x
+  left hand), so the correct orders are the ones that fit the checkpoint. `right_hand` predictions are exactly 0
+  (the degenerate band, §2.5), `waist` exactly 0, `navigate_command` within [-0.075, 0] and `base_height_command`
+  within [0.720, 0.815] (`dropped_ranges`): all dropped by `to_arm_chunk`.
+- MAE (main): left arm 0.056 rad, right arm 0.018 rad, left hand 0.021 rad.
+- Prompt: see §6.2.1.
+
+### 6.2.1 Which instruction (repeat run)
+
+(filled from the repeat run)
+
+### 6.3 Mapping to SONIC and clamping [m]
+
+- `to_arm_chunk` on every main-variant chunk (94 × 40 rows × 28 executed values = 105,280 targets); the run asserts
+  that the SONIC upper body carries exactly GR00T's arm values by name and that the hands round-trip through Dex3.
+- **Clamped fraction vs the URDF limits: 0 of 105,280 (0.0), at margin 0 and at the body's 0.02 rad**, limits read
+  from `/work/worldline-g1/assets/g1/g1_sonic_dex3.urdf` on the box (the URDF P1 simulates; `groot.urdf.load_limits`).
+  This is structural, not luck: outputs are clipped to the checkpoint's [q01, q99] band (§2.5), which lies inside
+  the limits.
+- **Within-chunk jitter.** 8 of the 94 chunks (9 %) contain a left-arm step larger than 0.12 rad per 20 ms (the body
+  `arm` op's 6 rad/s slew limit); the largest is 0.605 rad; 1.3 % of all (step, joint) values exceed it. The plots
+  show these as high-frequency bursts around the grasp (e.g. episode 2, 1.6-2.4 s). The recorded teleop actions
+  themselves step up to 0.10-0.22 rad per row. Expect the body's slew limiter to engage on such chunks (B.8 reports
+  `slew_frac`); a low-pass or a cross-fade over more ticks is the knob if it disturbs SONIC.
+
+### 6.4 Latency [m]
+
+| Where | ping p50 / p95 | get_action p50 / p95 (max) | n | Source |
+|---|---|---|---|---|
+| dev box, local (640x480 frame from ep 0, row 60) | 0.08 / 0.11 ms | **144.2 / 148.2 ms** (149.0) | 100 | `bench_local.json` |
+| dev box, during the open loop | – | 144.4 / 148.7 ms (154.1) | 94 | `open_loop.json` |
+| laptop → dev box through `00_infra/tunnel.sh` (SSH over the internet) | 188.7 / 193.3 ms | 741 / 2528 ms (3620) | 20 | `bench_laptop_tunnel.json` |
+
+Request 922,862 bytes (the raw frame), reply 6,792 bytes. The laptop sample is dominated by uploading 0.92 MB per
+call over the laptop's uplink; it is not a model of the main→dev link (same cloud region, wave 2 measures it, §5
+step 7). No call failed or timed out in any run (client stats: 0 timeouts, 0 socket resets).
+
+### 6.5 Joint orders vs P3's `body/joint_map.py` [m]
+
+`test_orders_agree_with_body_joint_map` passed on the dev box against its `/work/worldline-g1/body/joint_map.py`
+(md5 `6c96c403…`, identical to the main checkout's file at the time) and on the laptop against the main checkout's
+committed file (`GROOT_JOINT_MAP_FILE=…/worldline-g1/body/joint_map.py`, after commit `97b76fe`). MuJoCo order,
+SONIC wire order, mj17, Dex3 order per hand, stand pose and the 43 URDF limits all agree; no disagreement was found.
+The one semantic difference is intended: `joint_map.DEX3_CLOSED` is the deploy's fist (`hand_closure`), while this
+checkpoint's closed hand is Arena's pose (index -0.6/-1.2, middle -0.6/-1.2, thumb_1 0.7, thumb_2 0.7). GR00T's hand
+targets are used as they come; nothing should substitute `hand_closure` for them.
+
+### 6.6 Link restrictions (`groot_link.sh selftest`, dev box) [m]
+
+```
+PASS  forward 127.0.0.1:15550 -> 127.0.0.1:5550 answers ping
+PASS  forward to 127.0.0.1:22 refused (sshd: administratively prohibited: open failed)
+PASS  exec request gets the forced command ('groot-link: port-forward only')
+PASS  pty refused
+PASS  selftest key removed
+```
+
+The main box was not touched in wave 1; the main→dev tunnel itself is untested (§7).
 
 ## 7. Open items
 
-(filled in from the run)
+1. **Wave 2 (OD3):** the main→dev tunnel, its latency with the 0.92 MB request, and the SONIC timing gate with the
+   runtime's GR00T client running on the main box (§5). autossh presence on the main box unchecked.
+2. **Camera (OD1):** the checkpoint saw Arena's head camera only. Open-loop numbers above use Arena's own frames;
+   P1's `ego_view` must match that mount and FOV or the visual prior is lost.
+3. **Jitter:** 9 % of chunks carry steps above the body's slew limit (§6.3); decide in G2 whether to smooth.
+4. **Stochastic chunks:** the flow-matching head samples noise (4 steps), so two calls on one observation differ;
+   the runtime must not assume repeatability (§6.2.1 gives the size).
+5. **Licence (OD2):** card vs LICENCE file (§2.8).
+6. `pyproject.toml` `testpaths` does not list `tests/groot` (shared file; request filed); run it explicitly:
+   `.venv-rt/bin/python -m pytest tests/groot` (the `box` tests need `-m box` and a server).

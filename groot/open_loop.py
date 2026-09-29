@@ -50,12 +50,9 @@ def gt_keys(ep: Episode, t: int, horizon: int) -> dict[str, np.ndarray]:
 
 
 def norm_half_range(stats: dict) -> dict[str, np.ndarray]:
-    """(q99 - q01) / 2 per action key: 1.0 in these units = the full [-1, 1] normalized range / 2."""
-    out = {}
-    for k, v in stats.items():
-        hr = (np.asarray(v["q99"], dtype=np.float64) - np.asarray(v["q01"], dtype=np.float64)) / 2.0
-        out[k] = np.maximum(hr, 1e-8)
-    return out
+    """(q99 - q01) / 2 per action key, i.e. errors in the model's normalized [-1, 1] units (nmse)."""
+    return {k: (np.asarray(v["q99"], dtype=np.float64) - np.asarray(v["q01"], dtype=np.float64)) / 2.0
+            for k, v in stats.items()}
 
 
 class Acc:
@@ -65,6 +62,7 @@ class Acc:
         self.se: dict[str, float] = {}
         self.ae: dict[str, float] = {}
         self.nse: dict[str, float] = {}
+        self.nn: dict[str, int] = {}
         self.n: dict[str, int] = {}
         self.first10_se: dict[str, float] = {}
         self.first10_n: dict[str, int] = {}
@@ -78,8 +76,11 @@ class Acc:
         f = d[:10]
         self.first10_se[key] = self.first10_se.get(key, 0.0) + float((f ** 2).sum())
         self.first10_n[key] = self.first10_n.get(key, 0) + f.size
-        if half_range is not None:
-            self.nse[key] = self.nse.get(key, 0.0) + float(((d / half_range) ** 2).sum())
+        if half_range is not None:           # dims with a degenerate band (q01 == q99, e.g. right_hand) are skipped
+            ok = half_range > 1e-6
+            if ok.any():
+                self.nse[key] = self.nse.get(key, 0.0) + float(((d[:, ok] / half_range[ok]) ** 2).sum())
+                self.nn[key] = self.nn.get(key, 0) + int(d[:, ok].size)
 
     def summary(self) -> dict:
         out = {}
@@ -88,7 +89,7 @@ class Acc:
             out[k] = {"mse": self.se[k] / n, "mae": self.ae[k] / n, "values": self.n[k],
                       "mse_first10": self.first10_se[k] / max(self.first10_n[k], 1)}
             if k in self.nse:
-                out[k]["nmse"] = self.nse[k] / n
+                out[k]["nmse"] = self.nse[k] / max(self.nn[k], 1)
         return out
 
 

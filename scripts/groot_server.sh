@@ -12,7 +12,9 @@
 # Env: GROOT_DIR   Isaac-GR00T checkout with its .venv (default /work/arena/gr00t_n17 = 4b1dca9d, the pin of Arena's
 #                  static_apple workflow; the Arena spike served this checkpoint from it)
 #      GROOT_CLIENT_PY  python with numpy + pyzmq + msgpack for ping/warm (default: /work/groot/venv, else the repo .venv)
-#      HF_HUB_OFFLINE   default 1 (the checkpoint dir and nvidia/Cosmos-Reason2-2B are cached in $HF_HOME)
+#      HF_HUB_OFFLINE   default 0: with 1 the start fails (transformers 4.57.3 asks the Hub API whether
+#                       nvidia/Cosmos-Reason2-2B is a Mistral tokenizer, tokenization_utils_base.py:2432, even
+#                       though every file is cached in $HF_HOME); HF_TOKEN comes from /etc/profile.d/ludo.sh
 # Logs: /work/logs/groot/server-<port>.log; state: /work/logs/groot/server-<port>.json.
 # Never run this under `bash -x`: /etc/profile.d/ludo.sh sources the API keys (docs/devbox.md §6.1).
 set -eo pipefail
@@ -91,11 +93,11 @@ start() {
   done
   mkdir -p "$LOG_DIR"
   {
-    echo "===== $(date -u +%FT%TZ) start port=$PORT gpu=$GPU ckpt=$CKPT groot=$sha offline=${HF_HUB_OFFLINE:-1}"
+    echo "===== $(date -u +%FT%TZ) start port=$PORT gpu=$GPU ckpt=$CKPT groot=$sha offline=${HF_HUB_OFFLINE:-0}"
   } >> "$LOG"
   local t0; t0=$(date +%s.%N)
   tmux new-session -d -s "$SESSION" "cd '$GROOT_DIR' && export CUDA_VISIBLE_DEVICES='$GPU' HF_HOME='$HF_HOME' \
-HF_HUB_OFFLINE='${HF_HUB_OFFLINE:-1}' NO_ALBUMENTATIONS_UPDATE=1 PYTHONUNBUFFERED=1 && \
+HF_HUB_OFFLINE='${HF_HUB_OFFLINE:-0}' NO_ALBUMENTATIONS_UPDATE=1 PYTHONUNBUFFERED=1 && \
 .venv/bin/python gr00t/eval/run_gr00t_server.py --model-path '$CKPT' --embodiment-tag NEW_EMBODIMENT \
 --device cuda --host 127.0.0.1 --port $PORT 2>&1 | tee -a '$LOG'"
   log "tmux $SESSION started; waiting up to ${WAIT}s for ping on $ENDPOINT (log $LOG)"
@@ -116,7 +118,8 @@ HF_HUB_OFFLINE='${HF_HUB_OFFLINE:-1}' NO_ALBUMENTATIONS_UPDATE=1 PYTHONUNBUFFERE
   if [[ "$WARM" == 1 ]]; then
     local py; py="$(client_py)"
     warm_json="$(cd "$REPO" && "$py" -m groot.bench --endpoint "$ENDPOINT" --first-call --n 0 --pings 0 --warmup 0 \
-                 --timeout 5 2>/dev/null | "$py" -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get("first_call_ms")))')"
+                 --timeout 5 2>/dev/null | "$py" -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get("first_call_ms")))' \
+                 || echo null)"
     log "first get_action (warm-up): ${warm_json} ms; VRAM now $(vram_mib "$pid") MiB"
   fi
   local vram_warm=""
