@@ -289,8 +289,11 @@ class Runtime:
             # Only a change to what the robot believes (an object seen somewhere new)
             # is worth a model call; poses and distances change on every frame.
             # Action completion already wakes the planner, so only wake when idle.
+            # Once the task is finished (every utterance answered, no own goal, no open
+            # question from the robot) passive perception does not wake it either: user
+            # input, safety/capability events and execution results still do.
             if (self.belief.rev != rev and self.task.utterances and not self.actions
-                    and not self._thinking):
+                    and not self._thinking and self._belief_wake_wanted()):
                 self._wake("perception changed belief")
             if self.belief.rev != self._memory_rev:     # an observation, a result or the camera taught us something
                 self._memory_rev = self.belief.rev
@@ -1417,6 +1420,19 @@ class Runtime:
         work = [e for e in self.history if e.generation == self.task.intent_version and e.source == "brain"
                 and e.tool_name in ("navigate", "manipulate", "check_reachability") and e.status != "rejected"]
         return bool(work) and work[-1].t_start > last_say and self.task.goal is not None
+
+    def _question_open(self) -> bool:
+        """The robot's last line was a question and nobody has spoken since."""
+        says = [e for e in self.history if e.tool_name == "speak" and e.status not in ("dropped", "rejected")
+                and e.source != "harness"]
+        if not says or not str(says[-1].args.get("text", "")).rstrip().endswith("?"):
+            return False
+        return not any(u.t_end >= says[-1].t_start for u in self.task.utterances)
+
+    def _belief_wake_wanted(self) -> bool:
+        """Whether a passive belief change while idle is worth a planner call: only while
+        something is still open (an unanswered request, an own goal, a question we asked)."""
+        return self._request_open() or self.persona.goal is not None or self._question_open()
 
     def _quiet_continue(self) -> bool:
         """Quiet rule (PLAN 5.1 step 5): after a no-change result, ask again only if a request is
