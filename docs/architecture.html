@@ -114,7 +114,7 @@ svg.bd { display: block; width: 100%; min-width: 820px; height: auto; color: var
   <h1>Worldline G1 Architecture</h1>
   <p class="lede">How GEAR-SONIC, Isaac Sim, the ProcTHOR house and our drive API fit together to make a simulated Unitree G1 walk through a home, and where Worldline and GR00T plug in next.</p>
   <div class="meta">
-    <span>Revision <b>r3</b></span>
+    <span>Revision <b>r4</b></span>
     <span>Updated <b>2026-09-28</b></span>
     <span>Milestone <b>M1 · SONIC G1 walking in a house</b></span>
     <span>Box <b>Brev ludo-g1-brev2 · 1× L40S</b></span>
@@ -318,7 +318,7 @@ flowchart TB
         <li>Kinematic planner (10 Hz) plus SONIC encoder/decoder policy (50 Hz)</li>
         <li>Runs on wall-clock time; exits if lowstate is absent for 500 ms</li>
       </ul>
-      <span class="pill warn">Stands, turns, strafes · forward walk falls</span>
+      <span class="pill ok">Walks on a quiet box · 3/3 reference runs</span>
     </article>
     <article class="proc" style="--c:var(--p3)">
       <h3>P3 · wl-body</h3>
@@ -436,6 +436,7 @@ sequenceDiagram
     <h2>Hard constraints</h2>
     <p class="note"><b>Real time.</b> SONIC runs on the wall clock, so Isaac must simulate at least as fast as real time (RTF ≥ 1). A heartbeat re-sends the last lowstate if a render stalls, because 500 ms without it ends the deploy.</p>
     <p class="note"><b>Never <code>command{stop}</code> for a user stop.</b> It collapses the robot and the deploy process exits; only a restart recovers.</p>
+    <p class="note"><b>Quiet CPU and GPU for the controller.</b> Walking falls traced to contention: with 4–8 other Isaac processes on the box, SONIC's control step p90 rose from 0.5 ms to 3–7 ms and leg targets arrived irregularly. The deploy gets pinned cores, and runs with degraded timing are marked invalid rather than failed.</p>
     <p class="note"><b>One sender to SONIC.</b> Port 5556 has a single binder (SonicMux). Navigation and, later, GR00T manipulation take turns through it.</p>
   </div>
 </section>
@@ -482,6 +483,7 @@ sequenceDiagram
 <section>
   <h2>Status log</h2>
   <div class="log">
+    <div class="entry"><time>2026-09-29</time><p><b>r4.</b> Walking diagnosis: SONIC walks in its MuJoCo reference on a quiet box (3/3 runs, all checks: 2.7 m forward at ~0.45 m/s, heading error 2–3°, no falls). Falls came from CPU/GPU contention by other agents' Isaac jobs, plus harness bugs (measuring across fall-reset teleports, commands from measured yaw, one 90° turn step). Fixed in the body layer: zero-movement commands go IDLE and turns step at most 30° from the commanded facing. Official NVIDIA G1 GR00T checkpoints (Arena, with navigation) found; an Arena spike runs on a second L40S box; Nav2 is being added as the navigation backend.</p></div>
     <div class="entry"><time>2026-09-28</time><p><b>r3.</b> Added Navigation and Models sections. SONIC reference run after the band hand-over fix: stand 15 s, strafe 1.1 m, turn in place and stop mid-walk pass with no falls; walking forward still falls after 0.4 m, heading drifts 22°, and the planner-timeout-to-IDLE check fails. An independent diagnosis is running.</p></div>
     <div class="entry"><time>2026-09-28</time><p><b>r2.</b> Added the block diagram. Clarified MuJoCo's role: NVIDIA's own SONIC simulator, used only as a test stand-in for Isaac so controller bugs and Isaac-bridge bugs can be told apart. It is not part of the M1 stack.</p></div>
     <div class="entry"><time>2026-09-28</time><p><b>r1.</b> Released SONIC checkpoint evaluated in Isaac Lab on the L40S: 8 G1s, success 1.0, 3.9 GB VRAM. Deploy built with TensorRT 10.13; in its MuJoCo reference it starts control at 50 Hz and stands 15 s, but walking tests fall (moving at 1.7 m/s, heading-frame mismatch). Isaac bridge publishes lowstate at 200 Hz with RTF 0.97–1.0 in an empty scene. ProcTHOR houses 15/38/59 and iTHOR FloorPlan10 load with occupancy and room labels. Drive API written and tested on fakes. Integration not started.</p></div>
