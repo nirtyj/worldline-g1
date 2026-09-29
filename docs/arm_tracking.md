@@ -289,3 +289,151 @@ Unit/integration tests: `body/tests/test_joint_map.py`, `test_g1_kin.py`, `test_
 - `20260929-053804-servo/`, `20260929-054623-servo-grasp/`: servo + lead, same files; videos with the **chase**
   camera (`composite.mp4`, `contact_sheet.png`; P1 VizCams set to `low` for the run and restored to `off`).
 - `20260929-055110-servo4/`: ki 4 comparison (no video).
+
+---
+
+## 8. Body wave (2026-09-29, owner body-arm): G0 defects, halt latch, chunk mode, arm_script + CarryLock, scan
+
+Status: **built and run live** on `ludo-g1-brev2` (procthor-train-38, P1 RTF 10 s 0.99-1.00, unmodified deploy),
+final body code = commit `c044754` (md5 of `body/arm.py` on the box = laptop). 0 falls in every run of this section.
+Code: `body/arm.py` (ArmChannel), `body/arm_script.py`, `body/scan.py`, `body/carry.py`, `body/g1_kin.py` (analytic
+palm Jacobian), `tools/arm_wave_test.py` (live chunk / pick / scan), `tools/arm_track_test.py` (`--servo-model`,
+`--servo-extra`). Tests: `body/tests/test_arm_channel.py`, `test_arm_script.py` (tick by tick on a SONIC-like plant,
+`arm_sim.py`), `test_arm.py` (ZMQ + fakes). Contract: `docs/contracts/m1.md` §3.9 v0.6. Evidence:
+`outputs/body_wave/<run>/` (laptop and box).
+
+### 8.1 G0 defects
+
+| Defect (G0 verifier) | Fix | Evidence |
+|---|---|---|
+| D1 `stop {arms: true}` does not stick while the owner streams | The stopped stream is rejected `arm_stopped` during and after the blend until `restart: true` or a new stream id; a chunk session ends at once (`canceled`, ended_by `stop`) and its messages are `stale_session` | `test_arm.py` (the owner streams 0.5 s after the stop: every message `arm_stopped`, nothing reaches the deploy), `test_arm_channel.py` |
+| D2 a halt never touches the arms | `ArmChannel.latch(epoch)` (below, §8.3) | live 6/6, §8.3 |
+| A watchdog-ended session reports `succeeded` | `failed`, reason `client_silent`, ended_by `watchdog` (chunk sessions into `hold_on_end`) | tests; body-core publishes `body.fault{policy_lost}` on it |
+| Slew limit ≈ 2× `max_vel` (tick() also ran on every message with dt floored at 0.02 s) | Only the 50 Hz tick advances the limiter; a message only sets the target | `test_arm.py`: streaming at 100 Hz, the far side moves at 1.2-2.5 rad/s for `max_vel` 2 (the old code advanced the limiter on every message too: at 100 Hz messages that is 150 steps/s); tick-level test: every step ≤ `max_vel`·dt at 150 messages/s |
+| Servo adds 4.5-13.5 % overshoot | Diagnosed, partly reduced, §8.2 | 6 live runs |
+
+### 8.2 Servo "overshoot": what it is, and before/after
+
+`arm_track_test --phases static,steps --lead 0.15` (6 steps of ±0.3 rad on R elbow, R shoulder pitch, L elbow, 2.5 s
+each; 6 static poses), same box and house, one variant per run. "G0 overshoot" = the verifier's metric (max over the
+2.5 s hold); "transient" = max in the first 0.8 s; "late std" = std of the joint over 1.0-2.5 s after the step, % of
+the step; palm = worst palm error per static pose (mm).
+
+| Run | Servo | G0 overshoot mean / max | Transient mean / max | Late std | Final error max | Static palm (6 poses) |
+|---|---|---|---|---|---|---|
+| `20260929-083704-servo-raw` | off | 1.3 / 4.0 % | 0.6 / 1.9 % | 0.7 % | 0.087 rad | 30, 19, 21, 52, 84, 19 |
+| `20260929-075526-servo-delay` | G0 (`delay`, ki 2) | 7.6 / 11.2 % | 3.5 / 8.0 % | 5.1 % | 0.024 | 15, 7, 8, 28, 36, 4 |
+| `20260929-075628-servo-gated` | **`gated`, ki 2 (default)** | 6.5 / 12.5 % | **2.1 / 7.8 %** | 5.4 % | 0.043 | 15, 5, 7, 27, 38, 4 |
+| `20260929-083759-servo-ki1` | `gated`, ki 1 | 3.1 / 13.8 % | 0.0 / 0.0 % | 5.7 % | 0.076 | 11, 4, 7, 14, 38, 7 |
+| `20260929-083905-servo-db01` | `gated`, ki 2, error deadband 0.01 rad | 7.3 / 12.2 % | 1.6 / 9.4 % | 5.6 % | 0.012 | 10, 7, 11, 15, 52, 7 |
+
+- The G0 "overshoot" is mostly **not** a step overshoot: it is a slow wander of the held joint (late std 5-6 % of
+  the step, ~0.015-0.017 rad) that every servo variant shows and the raw arm does not (0.7 %). A static-hold
+  diagnostic (`outputs/body_wave/servo_diag.py`, R elbow 0.3 rad below SONIC's reference, 10 s): with the servo
+  the arm joints wander with std up to 0.020-0.025 rad around a mean error of 0.0003-0.0008 rad; without it they
+  are steady (std ≤ 0.0034) but the elbow sits **0.267 rad** off target. A hysteresis freeze of the correction
+  (stop integrating once converged) made it worse (std 0.043-0.057 rad), so the wander is SONIC's arm being less
+  steady at poses it does not reach on its own, which the active servo partly damps; it is not integrator windup.
+  The freeze and deadband options were removed again.
+- What the `gated` model (FOPDT reference, dead time 0.09 s + tau 0.085 s, integration weighted by
+  exp(−|dy_ref/dt| / 0.3 rad/s)) buys: the transient overshoot drops from 3.5 to 2.1 % mean (tick-level sim: 8.1 →
+  0.5 %), static accuracy unchanged (palms within ±2 mm of the G0 servo pose by pose). ki 1 removes the transient
+  entirely but converges slower (final error up to 0.076 rad after 2.5 s). Default: `gated`, ki 2; `delay` stays
+  selectable (`servo_model`).
+- The servo correction now carries over a take-over (the new session starts from the pre-correction reference; the
+  old code counted it twice) and measured/latched holds preload it (`corr = sent − measured`), so a halt does not
+  step the wire (the first live chunk run stepped the wrist pitch and elbow by 0.13-0.19 rad at the slew limit).
+
+### 8.3 B.8 chunk mode, cancel and halt (G2-style)
+
+`arm_wave_test chunk` emulates `groot_arms`: 10 sessions (alternating arms), each a start message (open hands,
+`lead_s` 0.15, `hold_on_end` measured) and then every 0.4 s an "inference": t0 = receive time of the newest g1_debug,
+150 ms of simulated inference, a 40-row chunk (50 Hz, SONIC wire order) of a smooth synthetic reach (IK keyframe out
+of the measured start pose, a Hann-windowed 0.5 Hz sway, hand closing to 0.6, back) with a per-chunk random offset
+(σ 0.015 rad) for GR00T's chunk-to-chunk disagreement. 4 normal ends (`stand`, `target` taken over by the next
+session, `measured`), 3 cancels (end `measured` mid-sway), 3 halts on the body's halt lane (PUSH 5612, then
+`resume` and `end` on the latched pose). After each cancel/halt ack, 3 in-flight chunks carrying +0.4 rad on the
+moving elbow.
+
+| Final run `20260929-084352-final-chunk` | Result |
+|---|---|
+| Sessions / falls | 10/10 opened, 0 falls (GT), RTF 10 s 1.00 |
+| Chunks | 98 sent, 98 applied, 0 dropped; age at the body (t0 → reply) p50 155 ms, p95 163, max 168 |
+| Joint step per planner message (wire, 14 arm joints) | chunk-to-chunk boundaries (0-120 ms after 88 chunk replies) max **0.032 rad**, p99 0.030; elsewhere in the sessions max 0.030, p99 0.027; the synthetic trajectory's own max step 0.029 (the 5-tick cross-fade adds ≤ 0.003 rad) |
+| First chunk of a session | max 0.056 rad (the cross-fade from the held reference to the first row, i.e. the servo residual of the pose it takes over) |
+| Measured (g1_debug, 20 ms samples) | max 0.086 rad within 0.3 s after a boundary (p99 0.047), 0.061 elsewhere (p99 0.040) |
+| Clamp / slew / stall | clamped_frac 0, slew_frac 0, stall 0 |
+| Cancel | 3/3: ack 1.1-1.3 ms; the terminal counters show exactly the 7 chunks accepted before the ack applied; 9/9 late chunks rejected `stale_session`; the wire froze at the ack (all 14 arm joints within 0.013 rad over the next 50 ms, against ~0.03 rad per 20 ms before it) |
+| Halt | 3/3: body.halted RTT 0.64-0.78 ms (lane), `ArmChannel.latch` 0.18-0.30 ms, arms latched on the measured pose, hands at the measured q (closure at the halt vs 1 s later within 0.02: never opened); 9/9 late chunks rejected `halted`; the arm op ended `canceled`, ended_by `halt`, hold `measured`; after a halt or cancel the moving elbow carries on 0.13-0.24 rad (SONIC's lag + the 0.15 s lead the wire was ahead) and the servo brings it back towards the halt point within ~1 s (arm drift after 1 s: 0.045-0.069 rad) |
+
+Earlier runs, same day: `20260929-075823-chunk` (before the correction preload and with trajectories starting from
+SONIC's reference: the wire hit the slew limit at halts/cancels and at session starts), `20260929-080301-chunk`
+(same results as the final run).
+
+### 8.4 B.7 arm_script + CarryLock: a pick toward a real object, then a 2 m carry walk
+
+Object: `RemoteControl|surface|2|30` on the bedroom dresser (`Dresser|2|1`, top 0.98 m, 0.127 m from the front
+edge). Grasp point = its top centre + 3 cm (a hovering top grasp; no physical grasp: P1's attach arrives with wave 1).
+`go_to` to 0.26 m from the edge (A*-safe), `approach` (body B.6) until the grasp point is ~0.34 m ahead of the pelvis
+and 0.20 m right; 3 × (pregrasp, grasp (hand to 0.6), pregrasp again); then pregrasp, grasp, lift 6 cm, `approach` 0.25
+m back with the lifted arm held (CarryLock), `carry` tuck, `turn_to` 180°, `walk` 0.3 m/s × 7 s, release, retract.
+Palm error = FK of the measured arm (g1_debug) on the GT pelvis pose vs the grasp point, 50 Hz, last 1 s of each
+grasp's settle, measured by the tool itself and by the body.
+
+| Run | Grasp palm error to the grasp point (tool, 150 samples) | Per grasp p90 | Pelvis shift during a grasp | Carry walk (GT) | Palm drift while walking (vs the held pose) |
+|---|---|---|---|---|---|
+| `20260929-083319-pick` | median 1.8, **p90 2.1**, max 2.2 cm | 1.1, 2.2, 2.1 cm | 2.1-3.4 cm | 2.72 m, 0 falls | RMS 2.2, p90 2.9, max 4.6 cm |
+| `20260929-084511-final-pick` | median 2.0, **p90 3.9**, max 4.2 cm | 1.9, 2.2, 4.2 cm | 3.5-4.7 cm | 2.36 m, 0 falls | **RMS 1.1, p90 1.6, max 3.5 cm**; CarryLock palm error 0.4 cm at the end |
+
+- 5 of 6 grasps meet p90 < 3 cm; the sixth (4.2 cm) followed the largest pelvis shift (4.7 cm): the re-solved goal
+  sat 0.37 m ahead and the extended arm sagged ~3 cm (G0 §3.4: "the palm ends 2-4 cm low"). The 3 cm bar is met by
+  one run and missed by the other; a closer stance (grasp point ≤ 0.32 m ahead) is the obvious next step.
+- What it took (each found live): the IK had to lock wrist pitch and yaw (SONIC barely tracks them); the pregrasp
+  rises before it reaches (run `080443`: the first pregrasp hit the dresser front, 18 cm error) and the tuck goes
+  back before down (runs `080443`, `082958`: the fist stopped on the dresser edge 15 cm high); A* keeps 0.25 m from
+  furniture so the last 5-10 cm need `approach` (run `080443`: all grasps `ik_unreachable` at 0.43-0.52 m); SONIC's
+  pelvis steps back 2-5 cm and yaws 1-3° while the arm reaches, so a goal solved once missed by 4.5-8.7 cm (run
+  `082958`, pelvis-frame tracking 0.7-2 cm) and the settle now re-solves the world goal at 10 Hz.
+- CarryLock = a `target` hold whose session closed a hand on purpose (`carry_arm`); the deploy-default fist filled in
+  for the other hand does not count (run `080443` reported `engaged` with an open right hand before this fix).
+
+### 8.5 B.5 waist scan
+
+`scan {yaw_deg [-35, 0, 35], move 0.8 s, hold 0.8 s}`: waist yaw only, roll/pitch SONIC's, waist-yaw servo (ki 5).
+
+| Final run `20260929-084744-final-scan` | Achieved yaw per hold (deg) | Max yaw error | Waist pitch (not commanded) | Arm joint deviation | Base shift | Falls |
+|---|---|---|---|---|---|---|
+| Standing, free arms (SONIC's reference, no arm servo) | −34.1, −0.9, +34.3 | 0.9° | 0.3-0.6° | 0.56 rad | 5 mm | 0 |
+| Standing, arms held by the servo | −31.8, −1.1, +30.9 | 4.1° | 0.2-0.8° | 0.59 rad | 7 mm | 0 |
+| At the dresser, free arms | −34.3, −0.7, +34.1 | 0.9° | 0.4-0.5° | 0.56 rad | 3 mm | 0 |
+
+**Only the waist is commanded, but not only the waist moves.** Under a waist-yaw override SONIC's policy also turns
+both shoulder yaws (+0.7-0.8 rad per rad of waist yaw, r 0.98) and the wrist rolls (+0.4-0.6), and moves the shoulder
+pitches ±0.23 (fit on `20260929-080648-scan`), whatever the arms are sent: SONIC's own reference (0.56-0.65 rad),
+a servo hold (0.59-0.62 rad), or a feed-forward cancelling the fitted coupling (0.63 rad, and less waist yaw; the
+preset was dropped). The palms move 6-10 cm in the torso frame. The first run (`080648`) held the free arms at SONIC's
+reference *with* the servo and dragged them 0.58 rad; free arms now stay on SONIC's live reference with no arm servo.
+Consequence: no waist scan while carrying (CarryLock), or a smaller yaw.
+
+### 8.6 Deviations from `docs/contracts/arm_chunk.md` v0.1 (for the integrator)
+
+1. `lead_s` defaults to 0.15 (G0 condition 2), not 0.0; an explicit value wins (`groot_arms` sends 0.0 today).
+2. A watchdog-ended session is `failed` (reason `client_silent`), not `succeeded`.
+3. Rows are interpolated linearly at the continuous time index (the reported `k` is rounded).
+4. `slew_frac` counts slew-limited **arm** values over ticks × 28 (hands are never slew-limited by the body).
+5. `stop {arms: true}` ends a chunk session at once (`canceled`, ended_by `stop`) and blends back; its later
+   messages are `stale_session`.
+6. The halt latch holds the **measured** hands (the body-core/body-arm interface), not their last target.
+7. Additive: `arm.progress` and terminal data carry `max_step_rad`; the terminal data also `slew_frac_total`,
+   `cross_fades`, `lead_s`, `chunk_seq`, `kind`, the fence fields.
+
+### 8.7 Reproduce
+
+```bash
+# box, M1 stack up, body on this code (scripts/m1_restart_body.sh); take the stack lock first
+.venv/bin/python -m tools.arm_wave_test chunk --sessions 10 --cancels 3 --halts 3 --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-chunk
+.venv/bin/python -m tools.arm_wave_test pick --trials 3 --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-pick
+.venv/bin/python -m tools.arm_wave_test scan --at-counter --scan-hold-variants --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-scan
+.venv/bin/python -m tools.arm_track_test --lead 0.15 --servo-model gated --phases static,steps --no-plots --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-servo
+python -m tools.arm_wave_test chunk --fake --sessions 3 --cancels 1 --halts 1 --out /tmp/aw     # plumbing on the fakes
+```
