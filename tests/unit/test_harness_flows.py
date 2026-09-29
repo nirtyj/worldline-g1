@@ -340,3 +340,64 @@ async def test_a_fall_is_a_safety_event_that_pauses_and_says_so_once():
     assert robot.halts and "I've lost my balance; I'm stopping until I'm steady." in robot.said
     assert "policy server down" in (rt._note or "") or any(r["type"] == "capability_changed" for r in rt.tracer.rows)
     assert not robot.estops                                  # a fall never sends command{stop} (invariant 1)
+
+
+class SlowScanRobot(FakeRobot):
+    """A scan that ignores cancel and only a halt ends (SONIC's INTERIM in-place turns in the dev-box rehearsal,
+    docs/bringup.md §7 item 1); a body latch that a halt sets and only resume() clears (G1Robot's HaltGate)."""
+
+    def __init__(self, clock, scan_s: float = 40.0, **kw):
+        super().__init__(clock, **kw)
+        self.scan_s = scan_s
+        self.latched = False
+        self.halted_navs = 0
+
+    def halt(self):
+        self.latched = True
+        return super().halt()
+
+    def resume(self, control_epoch):
+        self.latched = False
+        super().resume(control_epoch)
+
+    async def _navigate(self, ex, h):
+        if self.latched:
+            self.halted_navs += 1
+            from api.results import finish
+            return finish(ex, "failed", {"reason": "halted", "location": ex.args.get("location")},
+                          t_end=self.clock.now(), observation_id=self.observation_id())
+        return await super()._navigate(ex, h)
+
+    async def _observe(self, ex, h):
+        if ex.args.get("mode") != "scan":
+            return await super()._observe(ex, h)
+        epoch, end = self.halt_epoch, self.clock.now() + self.scan_s
+        while self.clock.now() < end and self.halt_epoch == epoch:
+            await self.clock.sleep(0.05)
+        from api.results import finish
+        data = self._look("scan")
+        return finish(ex, "succeeded", data, t_end=self.clock.now(), observation_id=data["observation_id"])
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_halt_after_an_ignored_cancel_is_released_so_the_robot_can_move_again():
+    calls = [ToolCall("navigate", {"location": "bedroom_dresser_1a"}),
+             ToolCall("navigate", {"location": "kitchen_counter_1a"})]
+    brain = ScriptBrain(calls, kinds={"go look at the dresser": "request"})
+    clock = SimClock(SPEED)
+    robot = SlowScanRobot(clock)
+    user = FakeUser(clock)
+    rt = Runtime(robot, user, brain, clock)
+    user.say("go look at the dresser")
+    try:
+        await run_until(rt, lambda: sum(e.tool_name == "navigate" and e.finished for e in rt.history) >= 2,
+                        wall_s=20, what="second navigate done")
+    finally:
+        await stop(rt)
+    scan = next(e for e in rt.history if e.tool_name == "observe" and e.action == "scan")
+    assert scan.result.status == "timed_out" and scan.result.data.get("halted_by_runtime") is True
+    assert "ignored cancel; halted" in scan.result.data["detail"] and robot.halts
+    assert rows(rt, "runtime_halt_released", execution_id=scan.execution_id)
+    assert robot.resumes and not rt.task.paused
+    navs = [e for e in rt.history if e.tool_name == "navigate"]
+    assert navs[1].status == "succeeded" and robot.halted_navs == 0

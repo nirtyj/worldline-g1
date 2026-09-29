@@ -233,7 +233,10 @@ class ObservationService:
             cur = self.world.robot_pose().yaw
             if abs(coords.ang_diff(target, cur)) > math.radians(c.turn_tol_deg):
                 op = await self.body.turn_to(target, tol_deg=c.turn_tol_deg)
-                res = await op.result()
+                res = await self._await_turn(op, handle, epoch)
+                if (handle is not None and handle.cancel_requested) or self.gate.halted_since(epoch):
+                    info["scan_interrupted"] = "cancel" if handle is not None and handle.cancel_requested else "halt"
+                    break
                 if res.get("state") != "succeeded":
                     info.setdefault("scan_turn_failures", []).append(
                         {"yaw_deg": dy, "state": res.get("state"), "reason": (res.get("data") or {}).get("reason")})
@@ -252,6 +255,24 @@ class ObservationService:
         if not rows:
             return None, None, info
         return rows, views, info
+
+    async def _await_turn(self, op: Any, handle: ResultHandle | None, epoch: int, grace_s: float = 1.5) -> dict:
+        """A scan turn that stops at once on cancel or halt: the in-flight body op is cancelled (body stop: planner
+        IDLE, never command{stop}), so a cancelled scan ends within the harness's grace instead of running on until
+        the runtime halts the body (docs/bringup.md §7 item 1)."""
+        while not getattr(op, "done", True):
+            if (handle is not None and handle.cancel_requested) or self.gate.halted_since(epoch):
+                if not self.gate.halted_since(epoch):
+                    try:
+                        op.cancel("cancel")
+                    except Exception:  # noqa: BLE001
+                        pass
+                try:
+                    return await self.clock.wait_for(op.result(), grace_s)
+                except asyncio.TimeoutError:
+                    return {"state": "failed", "data": {"reason": "no terminal event after stop"}}
+            await self.clock.sleep(0.05)
+        return await op.result()
 
     def start(self, execution: Execution) -> ResultHandle:
         """The internal `observe` tool (and `look` with WL_LOOK_TOOL=1)."""

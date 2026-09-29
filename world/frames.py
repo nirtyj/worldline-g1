@@ -99,6 +99,9 @@ META_KEYS = ("camera", "seq", "render_seq", "t_sim", "t_capture", "t_capture_mon
 
 
 class IsaacFrames:
+    # "ego" is Worldline's name for what System 1 sees (THOR's ego camera) = the head camera. GR00T's camera is
+    # "ego_view" (P1 5566, docs/contracts/p1_m2b.md §5.1), which this frame source never serves: groot_arms reads it
+    # itself (services/executors/groot_arms.py ZmqSensors) and the page shows it in its own pane (ui/server.py)
     NAMES = {"head": "head", "ego": "head", "chase": "chase", "top": "top"}
     MAX_STALE_S = 2.0
 

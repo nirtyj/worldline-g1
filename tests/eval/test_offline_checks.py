@@ -25,7 +25,7 @@ def f1_trace(order: str = "normal") -> list[dict]:
         row(0, type="classified", kind="request", directive={"source": "system1"}),
         row(1, type="result", tool="navigate", execution_id="nav-000001", data={"executor": "lite"},
             executor="lite", summary="arrived (lite, fallback)"),
-        row(2, type="result", tool="observe", action="scan", execution_id="obs-000002"),
+        row(2, type="result", tool="observe", action="scan", execution_id="obs-000002", data={"mode": "scan"}),
         row(3, type="result", tool="check_reachability", execution_id="rch-000003",
             data={"object_id": "alarm_clock_1", "reachable": False, "reason": "needs_reposition"}),
         row(3, type="result", tool="check_reachability", execution_id="rch-000033",
@@ -124,3 +124,27 @@ def test_late_results_must_be_marked_on_their_row():
     trace[0]["late"] = True
     checks = {c["check"]: c for c in ep.contract_checks(trace)}
     assert checks["late results are marked late on their result row"]["ok"]
+
+
+def test_a_scan_that_fell_back_to_a_glance_is_not_an_arrival_scan():
+    """ops' dev-box rehearsal (docs/bringup.md §7): a scan whose first turn failed returns data.mode "glance"."""
+    trace = f1_trace()
+    assert steps_ok(trace)["arrival scan"]
+    trace[2] = dict(trace[2], data={"mode": "glance", "scan_fallback": "glance"})
+    assert not steps_ok(trace)["arrival scan"]
+
+
+def test_the_referee_envelope_is_the_runtime_row_shape():
+    """The referee's envelope (owner ui) is exactly the harness's result-row shape (owner world/runtime)."""
+    from api.results import RESULT_ROW_FIELDS, RESULT_ROW_KINDS
+    assert set(ep.ENVELOPE_KEYS) | {"kind"} == set(RESULT_ROW_FIELDS)
+    assert tuple(ep.ROW_KINDS) == tuple(RESULT_ROW_KINDS) and set(ep.KIND_OF.values()) <= set(RESULT_ROW_KINDS)
+
+
+def test_a_capability_rejected_pick_is_not_asked_to_name_an_executor():
+    """ops' rehearsal 6.2: manipulate(pick) rejected at CAPABILITY (no executor ran) failed the naming check."""
+    trace = f1_trace()
+    trace.append(row(20, type="result", tool="manipulate", execution_id="man-000020", status="rejected",
+                     kind="rejection", data={"stage": "capability", "reason": "policy_unavailable"}))
+    checks = {c["check"]: c for c in ep.contract_checks(trace)}
+    assert checks["every manipulate result names its executor and skill"]["ok"]

@@ -809,7 +809,9 @@ class Runtime:
                              t_end=round(self.clock.now(), 3), observation_id=self._obs_id())
             else:
                 e.status, e.t_start = "running", round(self.clock.now(), 3)
-                timeout = SENSE_TIMEOUT if e.action == "scan" else GLANCE_TIMEOUT
+                # a scan's budget is the robot's (G1Robot: 30 s): SONIC's INTERIM in-place scan takes 12.7-15.1 s,
+                # so the old fixed 12 s timed every arrival scan out on the box (docs/bringup.md §7 item 1)
+                timeout = max(SENSE_TIMEOUT, self._timeout(e)) if e.action == "scan" else GLANCE_TIMEOUT
                 res = await run_execution(self.robot, self.clock, e, timeout, on_handle=self._binder(h),
                                           profile=self.profile)
         self._finish(h, e, res)
@@ -1249,8 +1251,26 @@ class Runtime:
             self._note = (f"goal check: '{text}' can't be checked ({res.why}). Tell the user where {oid} really is "
                           f"({where}) instead of claiming the goal.")
 
+    def _release_runtime_halt(self, e: Execution) -> None:
+        """run_execution halted the body because `e` ignored its cancel (agent/skills.py). That halt is the runtime's
+        own, not the user's stop: once `e` has ended, clear the latch, or every later body command fails `halted`
+        (docs/bringup.md §7 item 1: 11-13 navigates in a row). A user stop keeps it (task.paused)."""
+        if self.task.paused:
+            return
+        fn = getattr(self.robot, "resume", None)
+        if callable(fn):
+            try:
+                fn(self.task.control_epoch)
+            except Exception as ex:                      # never let a resume crash the runtime
+                self.tracer.log("resume_error", error=repr(ex))
+                return
+        self.tracer.log("runtime_halt_released", execution_id=e.execution_id, tool=e.tool_name,
+                        epoch=self.task.control_epoch)
+
     def _finish(self, h: ActionHandle, e: Execution, res: ToolResult) -> None:
         now = self.clock.now()
+        if (res.data or {}).get("halted_by_runtime"):
+            self._release_runtime_halt(e)
         late = h.created_for < self.task.intent_version
         if late:
             res = dataclasses.replace(res, late=True)    # rule 1: recorded, but not progress for the new request

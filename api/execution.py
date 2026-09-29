@@ -62,7 +62,7 @@ class Execution:
     resources: frozenset[str] = frozenset()
     status: ExecStatus = "queued"
     data: dict[str, Any] = field(default_factory=dict)
-    executor: str | None = None                # sonic_walk | kinematic_nav | groot_sonic | sonic_arm_script | ...
+    executor: str | None = None                # sonic_walk | kinematic_nav | groot_arms | sonic_arm_script | ...
     t_created: float = 0.0
     t_started: float | None = None
     t_ended: float | None = None

@@ -102,7 +102,9 @@ def f1_steps(user_keypoint: str, user_surface: str) -> list[tuple[str, Callable[
          and (r.get("directive") or {}).get("source") == "system1"),
         ("navigate to a stand (executor named, labelled)",
          lambda r: r.get("type") == "result" and _is("navigate", status="succeeded", executor=labelled)(r)),
-        ("arrival scan", lambda r: r.get("type") == "result" and _is("observe", status="succeeded", action="scan")(r)),
+        # a real scan: data.mode "scan" (a scan whose first turn failed falls back to a glance, data.mode "glance")
+        ("arrival scan", lambda r: r.get("type") == "result" and _is("observe", status="succeeded", action="scan",
+                                                                     mode="scan")(r)),
         ("check_reachability sees the alarm clock",
          lambda r: r.get("type") == "result" and _is("check_reachability", status="succeeded",
                                                       object_id="alarm_clock_1")(r)),
@@ -211,7 +213,9 @@ def contract_checks(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
             by_eid.setdefault(str(r["execution_id"]), []).append(r)
     bad_env = [(r.get("execution_id") or r.get("tool"), p) for r in res if (p := envelope_problems(r))]
     upper = [r.get("execution_id") for r in res if str(r.get("status")) != str(r.get("status")).lower()]
-    manip = [r for r in res if r.get("tool") == "manipulate"]
+    # a rejection never ran an executor (CAPABILITY: "policy unavailable: ..."); its own check is the kind check
+    manip = [r for r in res if r.get("tool") == "manipulate" and r.get("kind") != "rejection"
+             and r.get("status") != "rejected"]
     # speak, recall and rejections are ToolResults too: each gets a `result` row with a `kind`
     wanted = [("speak", r.get("execution_id")) for r in trace if r.get("type") == "say_queued"]
     wanted += [("recall", r.get("execution_id")) for r in trace if r.get("type") == "recall"]

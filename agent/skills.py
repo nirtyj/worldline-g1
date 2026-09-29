@@ -79,12 +79,17 @@ async def run_execution(robot: Any, clock: Any, execution: Execution, timeout: f
     except asyncio.TimeoutError:
         robot.halt()
         why = f"{execution.tool_name} ignored cancel; halted"
+        halted = True
         try:
             res = await clock.wait_for(handle.result(), AFTER_HALT_S)
         except asyncio.TimeoutError:
-            return finish(execution, "failed", {"reason": "internal_error", "detail": why + "; no result"},
+            return finish(execution, "failed", {"reason": "internal_error", "detail": why + "; no result",
+                                                "halted_by_runtime": True},
                           t_end=round(clock.now(), 3), observation_id=_observation_id(robot))
-    data = {**res.data, "reason": "timeout", "detail": why}
+    else:
+        halted = False
+    # halted_by_runtime: this halt is the runtime's own (not a user stop); the harness releases it (_finish)
+    data = {**res.data, "reason": "timeout", "detail": why, **({"halted_by_runtime": True} if halted else {})}
     return dataclasses.replace(res, status="timed_out", data=data,
                                summary=summarize(execution.tool_name, "timed_out", data,
                                                  action=execution.action, args=execution.args))
