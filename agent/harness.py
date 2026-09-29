@@ -832,8 +832,8 @@ class Runtime:
                              t_end=round(self.clock.now(), 3), observation_id=self._obs_id())
             else:
                 e.status, e.t_start = "running", round(self.clock.now(), 3)
-                # a scan's budget is the robot's (G1Robot: 30 s): SONIC's INTERIM in-place scan takes 12.7-15.1 s,
-                # so the old fixed 12 s timed every arrival scan out on the box (docs/bringup.md §7 item 1)
+                # a scan's budget is the robot's (G1Robot: 30 s): the waist scan takes ~6.5 s, the in-place
+                # fallback 12.7-15.1 s, so the old fixed 12 s timed every arrival scan out (docs/bringup.md §7 item 1)
                 timeout = max(SENSE_TIMEOUT, self._timeout(e)) if e.action == "scan" else GLANCE_TIMEOUT
                 res = await run_execution(self.robot, self.clock, e, timeout, on_handle=self._binder(h),
                                           profile=self.profile)

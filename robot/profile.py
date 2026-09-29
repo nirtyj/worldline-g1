@@ -4,8 +4,8 @@ api.types.PROFILES (RobotProfile); `stepping_stones` is filled from what this pr
 
     lite      LiteWorld + LiteBody                         executors: lite
     bringup   Isaac GT + wl-body (SONIC until M2.2's kinematic backend) + kinematic_attach
-    sonic     Isaac GT + wl-body SONIC walking + (sonic_arm_script | kinematic_attach)
-    full      + groot_sonic (stub until M4)
+    sonic     Isaac GT + wl-body SONIC walking, waist scan, approach + (sonic_arm_script | kinematic_attach)
+    full      + groot_arms (experimental), policy groot_then_script
     real_g1   parity skeleton (not buildable in M2a)
 """
 
