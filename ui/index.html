@@ -268,7 +268,10 @@
   .camtabs button:disabled { opacity: .35; cursor: default; }
   .nocam { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font: 600 13px var(--mono); z-index: 1; text-align: center; padding: 20px; }
   .obj-glyph circle { stroke: #0b111b; stroke-width: 1.5; }
-  .obj-glyph text { font: 600 9px var(--mono); fill: #f3e9b8; paint-order: stroke; stroke: #0b111b; stroke-width: 3px; }
+  .obj-glyph.held circle { stroke: #ffffff; stroke-width: 2; }
+  /* item names on the overhead: light mono text on a dark halo, readable on the occupancy image and the render */
+  .obj-label { font: 600 10px var(--mono); fill: #f3e9b8; paint-order: stroke; stroke: #0b111bd9; stroke-width: 3px; stroke-linejoin: round; }
+  .obj-label .more { fill: #b7c3d6; }
   .callsnote { color: var(--muted); font: 12px var(--sans); padding: 0 14px 6px; }
   .callsnote code { font-family: var(--mono); color: var(--text); }
 
@@ -531,7 +534,8 @@
           <label title="Keep the robot in the middle"><input type="checkbox" id="chk-follow"> follow</label>
           <label title="The sim's occupancy grid: obstacles (light), floor too close for the robot centre (brown), free floor (blue)"><input type="checkbox" id="chk-occ" checked> occupancy</label>
           <label title="The sim's top-down render (5602), when a top camera publishes one"><input type="checkbox" id="chk-render" checked> render</label>
-          <label title="Every object where the simulator has it (ground truth)"><input type="checkbox" id="chk-objs" checked> objects</label>
+          <label title="Every object where the simulator has it (ground truth): a dot coloured by type; held ones at the robot's hands"><input type="checkbox" id="chk-objs" checked> objects</label>
+          <label title="Object names next to their dots: at most one per 0.25 m, where it covers no other name; hover a dot for the rest"><input type="checkbox" id="chk-labels" checked> labels</label>
           <label title="Dashed rings where the runtime believes an object is. Red: it isn't there."><input type="checkbox" id="chk-belief" checked> belief rings</label>
         </span>
       </div>
@@ -608,7 +612,7 @@
               chatByUid: {}, lastRobotMsg: {}, showBelief: true, ws: null,
               calls: {}, traceAll: [], callsCleared: 0, callsLog: null, follow: false, tab: "feed", openCall: null,
               layout: null, space: "world", rtab: "now", hud: { label: null, noticed: null },
-              cam: "head", cams: {}, showOcc: true, showRender: true, showObjs: true, scans: [], locs: null };
+              cam: "head", cams: {}, showOcc: true, showRender: true, showObjs: true, showLabels: true, mapScale: 1, scans: [], locs: null };
   // STEPPING STONE executors (PLAN 12.2): amber badges everywhere they appear
   const FALLBACK = () => new Set((S.config && S.config.stepping_stones) || ["kinematic_nav", "kinematic_attach", "sonic_arm_script"]);
   const isOk = (st) => ["succeeded", "SUCCEEDED"].includes(st);
@@ -703,6 +707,7 @@
             </g>
           </g>
           <g id="robot-label-g">
+            <g id="held-objs"></g>
             <g id="robot-label-marker">
               <rect x="20" y="-13" width="55" height="26" rx="6" fill="#0d1d35e8" stroke="var(--runtime)" stroke-width="1.5"/>
               <text class="presence-label" x="47.5" y="4" text-anchor="middle" fill="#d6e7ff">Robot</text>
@@ -724,7 +729,7 @@
   const TYPE_COLOR = (t) => `hsl(${[...String(t)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7)} 60% 62%)`;
   function drawDynamic() {
     const st = S.state; if (!st || !S.layout) return;
-    const tr = st.truth, rt = st.runtime;
+    const tr = st.truth;
     const [u, v] = uv(tr.robot.x, tr.robot.z);
     $("robot-g").setAttribute("transform", `translate(${u} ${v}) rotate(${tr.robot.yaw})`);
     $("robot-label-g").setAttribute("transform", `translate(${u} ${v})`);
@@ -734,17 +739,114 @@
     const hb = $("holding");
     hb.hidden = !held;
     if (held) hb.textContent = `holding ${held[1].holding} (${held[0]} hand)`;
-    // every object where the simulator has it: a dot per object, coloured by type, id on hover
-    let objs = "";
-    if (S.showObjs) {
-      for (const [id, o] of Object.entries(tr.objects || {})) {
-        if (o.x == null || o.z == null || String(o.where || "").startsWith("hand")) continue;
-        const [ou, ov] = uv(o.x, o.z);
-        objs += `<g class="obj-glyph" transform="translate(${ou} ${ov})"><circle r="3.2" fill="${TYPE_COLOR(o.type)}"/>
-          <title>${esc(id)} (${esc(o.label || o.type)}) on ${esc(o.where || "?")}${o.y != null ? " · " + o.y + " m high" : ""}${o.visible ? " · visible now" : ""}\nsim ground truth</title></g>`;
-      }
+    drawObjects();
+  }
+  // ---- objects on the overhead (sim ground truth, from world/ via the session state)
+  // A dot per object coloured by type and its name beside it, in screen px (1 local unit = 1 px, like the robot
+  // marker), so zooming changes the spacing, not the glyphs. Labels: at most one per 0.25 m cell (smaller once a
+  // cell is wider than 48 px; the others are named in its tooltip and counted as "+N"), right/left/above/below the
+  // dot (then the diagonals) where it covers no other label, dot, room or spot name or the robot, else left out (the
+  // dot and its tooltip stay); bigger clusters are labelled first. Held objects ride with the robot marker, at its hands.
+  const OBJ_R = 5, LABEL_CELL_M = 0.25, LABEL_CELL_PX = 48, LABEL_CH = 6.1, LABEL_MAX = 18;
+  const shortName = (n) => (n.length > LABEL_MAX ? n.slice(0, LABEL_MAX - 1) + "…" : n);
+  const LABEL_AT = [[OBJ_R + 3, 3.5, "start"], [-(OBJ_R + 3), 3.5, "end"], [0, -(OBJ_R + 4), "middle"], [0, OBJ_R + 12, "middle"],
+                    [OBJ_R + 2, -(OBJ_R + 2), "start"], [OBJ_R + 2, OBJ_R + 10, "start"], [-(OBJ_R + 2), -(OBJ_R + 2), "end"], [-(OBJ_R + 2), OBJ_R + 10, "end"]];
+  const overlaps = (r, list) => list.some((q) => r[0] < q[2] && q[0] < r[2] && r[1] < q[3] && q[1] < r[3]);
+  const f2 = (n) => Math.round(n * 100) / 100;
+  function objTip(id, o) {
+    const w = String(o.where || "");
+    return `${id} (${o.label || o.type})${w.startsWith("hand") ? ` in the ${w.slice(5) || "?"} hand` : ` on ${w || "?"}`}` +
+      `${o.y != null ? " · " + o.y + " m high" : ""}${o.visible ? " · visible now" : ""}`;
+  }
+  // Room names and spot names/dots drawn by drawStatic (overhead units): object labels keep off them.
+  function staticLabelRects() {
+    const lay = S.layout;
+    if (lay.__labelRects) return lay.__labelRects;
+    const out = [];
+    for (const r of Object.values(lay.rooms || {})) {          // .room-label: 13 px bold, .12em tracking, centred
+      const [u, v] = uv(r.x, r.z), w = String(r.label || "").length * 9.6;
+      out.push([u - w / 2, v - 11, u + w / 2, v + 3]);
     }
-    $("dyn-objs").innerHTML = objs;
+    for (const [name, k] of Object.entries(lay.keypoints || {})) {   // 10.5 px bold mono at (u + 7, v + 4)
+      const [u, v] = uv(k.x, k.z);
+      out.push([u - 6, v - 6, u + 6, v + 6]);
+      if (!(lay.human && lay.human.keypoint === name)) out.push([u + 6, v - 6, u + 8 + name.length * 6.4, v + 6]);
+    }
+    return (lay.__labelRects = out);
+  }
+  let objTimer = null, objLast = 0;
+  function scheduleObjs() {                        // zoom and resize: one redraw per 120 ms at most
+    if (objTimer) return;
+    objTimer = setTimeout(() => { objTimer = null; drawObjects(); }, Math.max(0, 120 - (performance.now() - objLast)));
+  }
+  function drawObjects() {
+    objLast = performance.now();
+    const st = S.state, g = $("dyn-objs"), hg = $("held-objs"), gg = $("dyn-ghosts");
+    if (!g || !hg || !gg) return;
+    if (!st || !S.layout) { setHTML(g, ""); setHTML(hg, ""); setHTML(gg, ""); return; }
+    const tr = st.truth, rt = st.runtime, s = S.mapScale || 1, sc = f2(s * 1000) / 1000;
+    let dots = "", labels = "", held = "";
+    if (S.showObjs) {
+      const objs = tr.objects || {}, inHand = {};
+      for (const [arm, a] of Object.entries(tr.arms || {})) if (a && a.holding && objs[a.holding]) inHand[a.holding] = arm;
+      const pts = [], hands = [];
+      for (const [id, o] of Object.entries(objs)) {
+        const w = String(o.where || "");
+        if (w.startsWith("hand") || inHand[id]) { hands.push([id, o, w.startsWith("hand") ? w.slice(5) : inHand[id]]); continue; }
+        if (o.x == null || o.z == null) continue;
+        const [u, v] = uv(o.x, o.z);
+        pts.push({ id, o, u, v, x: u / s, y: v / s });
+      }
+      pts.sort((a, b) => (b.o.visible ? 1 : 0) - (a.o.visible ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      // one label per 0.25 m cell; zoomed in far enough that a cell is wider than LABEL_CELL_PX, per LABEL_CELL_PX
+      const t = S.layout.topdown, pxPerM = t.h / (2 * t.size) / s, cell = Math.min(LABEL_CELL_M, LABEL_CELL_PX / pxPerM);
+      const cells = new Map();
+      for (const q of pts) {
+        const k = `${Math.floor(q.o.x / cell)},${Math.floor(q.o.z / cell)}`;
+        const c = cells.get(k); if (c) c.push(q); else cells.set(k, [q]);
+      }
+      const taken = pts.map((q) => [q.x - OBJ_R - 1, q.y - OBJ_R - 1, q.x + OBJ_R + 1, q.y + OBJ_R + 1]);
+      const [ru, rv] = uv(tr.robot.x, tr.robot.z);
+      taken.push([ru / s - 24, rv / s - 24, ru / s + 76, rv / s + 24]);     // the robot marker and its "Robot" tag
+      hands.sort((a, b) => (a[2] < b[2] ? -1 : 1)).forEach(([id], i) => {    // the held names under the robot
+        const w = (shortName(id).length + 12) * LABEL_CH / 2;
+        taken.push([ru / s - w, rv / s + 29 + 12 * i, ru / s + w, rv / s + 40 + 12 * i]);
+      });
+      for (const r of staticLabelRects()) taken.push([r[0] / s, r[1] / s, r[2] / s, r[3] / s]);   // room and spot names
+      const groups = [...cells.values()];
+      groups.sort((a, b) => (b[0].o.visible ? 1 : 0) - (a[0].o.visible ? 1 : 0) || b.length - a.length);   // stable: then by id
+      for (const group of groups) {
+        const [q, ...rest] = group;
+        const tip = `${objTip(q.id, q.o)}${rest.length ? `\nalso here: ${rest.map((o) => o.id).join(", ")}` : ""}\nsim ground truth`;
+        for (const o of group) {
+          dots += `<g class="obj-glyph" transform="translate(${f2(o.u)} ${f2(o.v)}) scale(${sc})"><circle r="${OBJ_R}" fill="${TYPE_COLOR(o.o.type)}"/>` +
+            `<title>${esc(o === q ? tip : objTip(o.id, o.o) + "\nsim ground truth")}</title></g>`;
+        }
+        if (!S.showLabels) continue;
+        const name = shortName(q.id), more = rest.length ? ` +${rest.length}` : "", w = (name.length + more.length) * LABEL_CH;
+        for (const [dx, dy, anchor] of LABEL_AT) {
+          const x0 = q.x + dx - (anchor === "start" ? 0 : anchor === "end" ? w : w / 2);
+          const r = [x0 - 1, q.y + dy - 9, x0 + w + 1, q.y + dy + 2];
+          if (overlaps(r, taken)) continue;
+          taken.push(r);
+          labels += `<g transform="translate(${f2(q.u)} ${f2(q.v)}) scale(${sc})"><text class="obj-label" x="${dx}" y="${dy}" text-anchor="${anchor}">` +
+            `${esc(name)}${more ? `<tspan class="more">${more}</tspan>` : ""}<title>${esc(tip)}</title></text></g>`;
+          break;
+        }
+      }
+      // held: at the hand in the robot's frame (forward = up at yaw 0, right = +x), rotated by its yaw; names below it
+      const yaw = (tr.robot.yaw || 0) * Math.PI / 180, cs = Math.cos(yaw), sn = Math.sin(yaw);
+      hands.forEach(([id, o, arm], i) => {
+        const lx = arm === "left" ? -14 : 14, ly = -4;
+        const hx = (lx * cs - ly * sn) * s, hy = (lx * sn + ly * cs) * s;
+        const tip = `${objTip(id, o)}\nsim ground truth`;
+        held += `<g class="obj-glyph held" transform="translate(${f2(hx)} ${f2(hy)}) scale(${sc})"><circle r="${OBJ_R}" fill="${TYPE_COLOR(o.type)}"/><title>${esc(tip)}</title></g>`;
+        if (S.showLabels) held += `<g transform="scale(${sc})"><text class="obj-label" x="0" y="${38 + 12 * i}" text-anchor="middle">${esc(shortName(id))}<tspan class="more"> (${esc(arm || "?")} hand)</tspan><title>${esc(tip)}</title></text></g>`;
+      });
+    }
+    setHTML(g, dots + labels);
+    setHTML(hg, held);
+    // belief rings, in screen px too: dashed where the runtime believes an object is; red where it is not
     let ghosts = "";
     if (S.showBelief && rt && rt.belief && rt.belief.objects) {
       const perSurface = {};
@@ -758,10 +860,10 @@
         const [gu, gv] = uv(x, z);
         const dash = b.verified ? "4 3" : "2 3";
         const wrong = !t || t.where !== w;
-        ghosts += `<circle cx="${gu}" cy="${gv}" r="8" fill="none" stroke="${wrong ? "var(--bad)" : "var(--runtime)"}" stroke-width="2" stroke-dasharray="${dash}"><title>belief: ${esc(id)} on ${esc(w)} (${b.verified ? "seen" : esc(b.source)})${wrong ? " — not there" : ""}</title></circle>`;
+        ghosts += `<g transform="translate(${f2(gu)} ${f2(gv)}) scale(${sc})"><circle r="9" fill="none" stroke="${wrong ? "var(--bad)" : "var(--runtime)"}" stroke-width="2" stroke-dasharray="${dash}"><title>belief: ${esc(id)} on ${esc(w)} (${b.verified ? "seen" : esc(b.source)})${wrong ? " — not there" : ""}</title></circle></g>`;
       }
     }
-    $("dyn-ghosts").innerHTML = ghosts;
+    setHTML(gg, ghosts);
   }
   // Camera panes: head (5565, what System 1 sees), chase and top (5602, sim viz), ego (GR00T).
   function setCamera(which, b64, meta) {
@@ -1606,6 +1708,7 @@
       const marker = $(id);
       if (marker) marker.setAttribute("transform", `scale(${scale})`);
     }
+    if (Math.abs(scale - S.mapScale) > 0.01 * scale) { S.mapScale = scale; if (S.state) scheduleObjs(); }
   }
   function toSvg(cx, cy) { const svg = $("map"), pt = svg.createSVGPoint(); pt.x = cx; pt.y = cy; return pt.matrixTransform(svg.getScreenCTM().inverse()); }
   function zoomAt(x, y, f) {
@@ -1701,10 +1804,11 @@
   $("camtabs").addEventListener("click", (e) => { const b = e.target.closest("[data-cam]"); if (b && !b.disabled) { S.cam = b.dataset.cam; showCam(); remember("cam", S.cam); } });
   $("chk-occ").addEventListener("change", (e) => { S.showOcc = e.target.checked; const i = $("occ-img"); if (i) i.setAttribute("display", S.showOcc ? "inline" : "none"); });
   $("chk-render").addEventListener("change", (e) => { S.showRender = e.target.checked; const i = $("top-img"); if (i) i.setAttribute("display", S.showRender ? "inline" : "none"); });
-  $("chk-objs").addEventListener("change", (e) => { S.showObjs = e.target.checked; drawDynamic(); });
+  $("chk-objs").addEventListener("change", (e) => { S.showObjs = e.target.checked; drawObjects(); });
+  $("chk-labels").addEventListener("change", (e) => { S.showLabels = e.target.checked; drawObjects(); });
   $("sel-scene").addEventListener("change", () => { if (S.meta) renderWorldCard($("sel-scene").value); });
   window.addEventListener("resize", refit);
-  $("chk-belief").addEventListener("change", (e) => { S.showBelief = e.target.checked; drawDynamic(); });
+  $("chk-belief").addEventListener("change", (e) => { S.showBelief = e.target.checked; drawObjects(); });
   $("z-in").addEventListener("click", () => zoomCenter(0.7));
   $("z-out").addEventListener("click", () => zoomCenter(1 / 0.7));
   $("z-fit").addEventListener("click", () => { S.follow = false; $("chk-follow").checked = false; fitHouse(); });

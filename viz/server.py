@@ -5,8 +5,14 @@
     # laptop:  00_infra/tunnel.sh 8765   then open http://localhost:8765
 
 Sources (docs/contracts/m1.md): head camera SUB 5565 (gear_sonic msgpack), extra frames SUB 5602 (VizCams
-frame.chase/top/overview, P1's own --tp-camera frame.tp shown as the chase pane, or any frame.<name>), gt.pose SUB 5601, P1 REP 5600 (get_scene_info, get_occupancy,
+frame.chase/top/overview, P1's own --tp-camera frame.tp shown as the chase pane, or any frame.<name>), gt.pose and
+gt.objects SUB 5601, P1 REP 5600 (get_scene_info, get_occupancy,
 render_topdown, get_stats, viz_level), body DEALER -> ROUTER 5610 and SUB 5611 (body.event, body.state).
+
+Items (the sim's loose props, docs/contracts/p1_m2b.md §3): seeded from get_scene_info (its dynamic, non-articulated
+objects at their load pose), then kept live from gt.objects (10 Hz, dynamic + held objects). The pages get ONE
+compact full list {"type": "objects", "rev", "src", "t_sim", "objects": [{id, name, x, y, z, held_by}]} on connect
+and then at most ITEMS_HZ (2 Hz), only when something moved by >= 1 cm or changed hands; /api/state carries it too.
 
 Browser transport: ONE WebSocket (/ws) carries every pane as binary JPEG messages
     [uint32 BE header length][JSON header {"s": stream, "seq", "t_sim", "t_wall", "w", "h", "extent"?, "robot"?}][JPEG]
@@ -20,7 +26,7 @@ A single WebSocket avoids the browsers' 6-connections-per-host limit that severa
 Also served (handy for curl, other UIs, and the future Worldline ui/server.py):
     GET /stream/<name>.mjpg   multipart/x-mixed-replace MJPEG (?fps=N caps the rate)
     GET /frame/<name>.jpg     latest frame of a stream
-    GET /api/state            JSON: pose, body state, stream rates, scene, recorder
+    GET /api/state            JSON: pose, body state, stream rates, scene, recorder, items (the full list)
     POST /api/cmd             {"op": "walk", "args": {...}} -> body reply
     POST /api/record          {"action": "start"|"stop"}
     GET /occupancy.png, /topdown.png, /recordings/<run>/<file>
@@ -60,7 +66,8 @@ from aiohttp import WSMsgType, web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from viz.common import (  # noqa: E402
-    decode_head, dumps, ep, frame_from_msg, occupancy_rgba, pose_summary, ports, same_frame, split_msg, swap_rb_jpeg,
+    decode_head, dumps, ep, frame_from_msg, is_dynamic_prop, item_summary, occupancy_rgba, pose_summary, ports,
+    same_frame, split_msg, swap_rb_jpeg,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -68,6 +75,7 @@ REPO = HERE.parent
 REC_ROOT = REPO / "outputs" / "recordings"
 MAX_INFLIGHT = 4   # unacked frames per stream per client; >= fps x RTT (tunnel RTT ~170 ms -> 4 allows ~23 fps)
 TEL_HZ = 10.0
+ITEMS_HZ = 2.0            # items (gt.objects) -> pages: at most this often, and only on a change
 UI_OPS = {"stand", "walk", "go_to", "turn_to", "stop", "status", "ping", "clear_fault", "velocity"}
 DRIVE_TICK_S = 0.1        # velocity mode: server -> body stream rate (box-local, no tunnel jitter)
 DRIVE_DEADMAN_S = 0.6     # no page heartbeat (5 Hz) for this long -> end the drive
@@ -159,6 +167,12 @@ class Hub:
         self.topdown_meta: dict | None = None
         self.p1_stats: dict | None = None
         self.p1_ok = False
+        self.items: dict[str, dict] = {}          # id -> item_summary (module docstring: Items)
+        self.items_rev = 0                        # bumped on every change the pages have to see
+        self.items_t = 0.0                        # wall time of the last gt.objects
+        self.items_t_sim: float | None = None
+        self.items_rx: deque = deque(maxlen=30)
+        self._items_msg: tuple[int, dict] | None = None
         self.dealer = None
         self.pending: dict[str, tuple[asyncio.Future, Client | None]] = {}
         self.rec_proc: asyncio.subprocess.Process | None = None
@@ -263,6 +277,9 @@ class Hub:
         while True:
             frames = await s.recv_multipart()
             topic, msg = split_msg(frames)
+            if topic == "gt.objects" and isinstance(msg, dict):
+                self.on_objects(msg)
+                continue
             if topic != "gt.pose" or not isinstance(msg, dict):
                 continue
             p = pose_summary(msg)
@@ -275,6 +292,73 @@ class Hub:
             if bp:
                 if not self.traj or (bp[0] - self.traj[-1][0]) ** 2 + (bp[1] - self.traj[-1][1]) ** 2 > 0.03 ** 2:
                     self.traj.append((round(bp[0], 3), round(bp[1], 3)))
+
+    # ------------------------------------------------------------------------------------------ items
+    def on_objects(self, msg: dict) -> bool:
+        """One gt.objects message: update the items; True when one moved by >= 1 cm, appeared or changed hands."""
+        now = time.time()
+        changed = not self.items_t                # the first one: the pages' source changes to live poses
+        self.items_t, self.items_t_sim = now, msg.get("t_sim")
+        self.items_rx.append(now)
+        fz = float((self.scene or {}).get("floor_z") or 0.0)
+        for o in msg.get("objects") or []:
+            it = item_summary(o, fz)
+            if it is not None and self.items.get(it["id"]) != it:
+                self.items[it["id"]] = it
+                changed = True
+        if changed:
+            self.items_rev += 1
+        return changed
+
+    def seed_items(self, info: dict) -> None:
+        """get_scene_info: the house's props at their load pose (live gt.objects values win). A new house drops the
+        old one's items; a scene that lists no props (the viz test flat, an empty scene) keeps what gt.objects gave."""
+        fz = float(info.get("floor_z") or 0.0)
+        seeded = {}
+        for o in info.get("objects") or []:
+            if is_dynamic_prop(o):
+                it = item_summary(o, fz)
+                if it is not None:
+                    seeded[it["id"]] = it
+        if not seeded:
+            return
+        live = {k: v for k, v in self.items.items() if k in seeded} if self.items_t else {}
+        new = {**seeded, **live}
+        if new != self.items:
+            self.items = new
+            self.items_rev += 1
+
+    def items_source(self) -> str | None:
+        if self.items_t:
+            return "gt.objects"
+        return "get_scene_info" if self.items else None
+
+    def items_msg(self) -> dict:
+        """The compact full list the pages draw (cached per revision)."""
+        if self._items_msg is None or self._items_msg[0] != self.items_rev:
+            self._items_msg = (self.items_rev, {
+                "type": "objects", "rev": self.items_rev, "src": self.items_source(), "t_sim": self.items_t_sim,
+                "objects": [self.items[k] for k in sorted(self.items)]})
+        return self._items_msg[1]
+
+    def items_rate(self) -> float | None:
+        rx = self.items_rx
+        if len(rx) < 3 or rx[-1] <= rx[0]:
+            return None
+        return round((len(rx) - 1) / (rx[-1] - rx[0]), 1)
+
+    async def items_loop(self) -> None:
+        """Forward item changes to the pages: at most ITEMS_HZ, one compact full list, only after a change."""
+        sent = self.items_rev
+        while True:
+            await asyncio.sleep(1.0 / ITEMS_HZ)
+            if self.items_rev == sent:
+                continue
+            sent = self.items_rev
+            msg = self.items_msg()
+            for c in self.clients:
+                c.outbox.append(msg)
+                c.wake.set()
 
     async def body_evt_loop(self) -> None:
         s = self._sub(self.p["body_evt"], [b""])
@@ -462,6 +546,7 @@ class Hub:
         if info and info.get("ok", True):
             self.scene = {k: info.get(k) for k in ("house_id", "floor_z", "bounds", "rooms", "spawn")}
             self.scene["n_objects"] = len(info.get("objects") or [])
+            self.seed_items(info)
         occ = await self.p1("get_occupancy", timeout=30.0)
         if occ and occ.get("ok", True) and occ.get("path") and os.path.exists(occ["path"]):
             try:
@@ -591,6 +676,8 @@ class Hub:
             "streams": {n: {"fps": s.fps(), "age_s": round(now - s.last_rx, 2) if s.last_rx else None,
                             "seq": s.seq, "snapshot": bool(s.hdr.get("snapshot"))} for n, s in self.streams.items()},
             "rec": self.rec_status,
+            "items": {"n": len(self.items), "rev": self.items_rev, "src": self.items_source(),
+                      "hz": self.items_rate(), "age_s": round(now - self.items_t, 2) if self.items_t else None},
         }
 
 
@@ -607,6 +694,8 @@ def make_app(hub: Hub) -> web.Application:
         c = Client(ws)
         hub.clients.add(c)
         c.outbox.append(hub.hello())
+        if hub.items:
+            c.outbox.append(hub.items_msg())
         sender = asyncio.create_task(client_sender(hub, c))
         try:
             async for msg in ws:
@@ -677,7 +766,9 @@ def make_app(hub: Hub) -> web.Application:
         return web.Response(body=st.jpeg, content_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
     async def api_state(_req):
-        return web.json_response({**hub.telemetry(), "hello": hub.hello(),
+        tel = hub.telemetry()
+        items = {**tel["items"], "objects": hub.items_msg()["objects"]}
+        return web.json_response({**tel, "items": items, "hello": hub.hello(),
                                    "body_events": list(hub.body_events)[-10:], "rec_last": hub.rec_last,
                                    "drive": {"velocity_ok": hub.velocity_ok, "mode_arg": hub.args.drive,
                                              "sessions": [{"client": cl.id, "active": cl.drive.active,
@@ -785,7 +876,7 @@ async def main_async(args: argparse.Namespace) -> None:
                      body_ctl=args.body_ctl, body_evt=args.body_evt, http=args.http)
     hub = Hub(args, port_map)
     for fn in (hub.head_loop, hub.head_convert_loop, hub.frames_loop, hub.gt_loop, hub.body_evt_loop,
-               hub.dealer_loop, hub.p1_stats_loop, hub.rec_status_loop, hub.drive_loop):
+               hub.dealer_loop, hub.p1_stats_loop, hub.rec_status_loop, hub.drive_loop, hub.items_loop):
         hub.tasks.append(asyncio.create_task(fn(), name=fn.__name__))
     app = make_app(hub)
     runner = web.AppRunner(app, access_log=None)

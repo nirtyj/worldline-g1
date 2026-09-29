@@ -152,6 +152,7 @@
         <button id="t-occ" class="on" title="occupancy grid from P1 get_occupancy">occ</button>
         <button id="t-traj" class="on" title="trajectory from gt.pose">traj</button>
         <button id="t-rooms" class="on" title="room outlines from get_scene_info">rooms</button>
+        <button id="t-items" class="on" title="items: the sim's loose objects (gt.objects; load poses until it arrives), coloured by type; held ones at the robot's hands. One name per 0.25 m where it fits; hover a dot for all">items</button>
         <button id="t-clear" title="clear the trajectory">clear</button>
       </div>
     </div>
@@ -167,7 +168,8 @@
     ws: null, hello: null, tel: null, traj: [], target: null, keys: new Set(), lastDrive: null, driveTimer: null,
     hbTimer: null, drive: { mode: null, sent: 0 },
     top: { img: null, extent: null, w: 0, h: 0 }, topdown: null, occ: null,
-    show: { occ: true, traj: true, rooms: true }, fps: {}, counts: {}, recording: false, reqN: 0,
+    show: { occ: true, traj: true, rooms: true, items: true }, fps: {}, counts: {}, recording: false, reqN: 0,
+    items: [], itemsSrc: null, itemPts: [],
   };
   window.__viz = S;  // for automated checks
 
@@ -289,6 +291,7 @@
       ctx.beginPath(); ctx.arc(u, v, 9, 0, 2 * Math.PI); ctx.moveTo(u - 13, v); ctx.lineTo(u + 13, v); ctx.moveTo(u, v - 13); ctx.lineTo(u, v + 13); ctx.stroke();
     }
     const p = S.tel && S.tel.pose;
+    const held = drawItems(p, s);
     if (p && p.base_pos) {
       const [u, v] = w2c(p.base_pos[0], p.base_pos[1]);
       const yaw = p.yaw || 0, L = Math.max(12, Math.min(26, 0.5 * s));
@@ -300,9 +303,106 @@
       ctx.lineTo(u + .5 * L * Math.cos(yaw - 2.5), v - .5 * L * Math.sin(yaw - 2.5));
       ctx.closePath(); ctx.fill(); ctx.stroke();
     }
+    drawHeld(held, p, s);
     $("cap-top").textContent = (S.top.img ? `${(S.fps.top ? S.fps.top.v : 0).toFixed(1)} fps` : (S.topdown ? "P1 render_topdown" : "")) +
       `  ${(ext[2] - ext[0]).toFixed(1)}×${(ext[3] - ext[1]).toFixed(1)} m`;
   }
+  // ---- items: a dot per loose object (colour by type), its name beside it. Labels: at most one per 0.25 m cell
+  // (smaller once a cell is wider than 48 px; the others are listed in the hover tip and counted as "+N"), placed
+  // right/left/above/below (then diagonally) where they cover no other label, dot or the robot, else left out; bigger
+  // clusters first. Held items are drawn at the robot's hands. Glyphs are in screen px, whatever the pane's size.
+  const ITEM_R = 4.5, ITEM_CELL_M = 0.25, ITEM_CELL_PX = 48, ITEM_FONT = "600 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+  const ITEM_LABEL_MAX = 18;
+  const typeOf = (name) => String(name || "").replace(/_\d+$/, "");
+  const TYPE_COLOR = (t) => `hsl(${[...String(t)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7)} 60% 62%)`;
+  const shortName = (n) => (n.length > ITEM_LABEL_MAX ? n.slice(0, ITEM_LABEL_MAX - 1) + "…" : n);
+  const textW = new Map();
+  function labelWidth(t) { let w = textW.get(t); if (w == null) { w = ctx.measureText(t).width; textW.set(t, w); } return w; }
+  const overlaps = (r, list) => list.some((q) => r[0] < q[2] && q[0] < r[2] && r[1] < q[3] && q[1] < r[3]);
+  function itemTip(it) {
+    return `${it.name}${it.name !== it.id ? " (" + it.id + ")" : ""}${it.held_by ? " · in the " + it.held_by + " hand" : ""}` +
+      ` · x ${Number(it.x).toFixed(2)} y ${Number(it.y).toFixed(2)} · ${Number(it.z).toFixed(2)} m up`;
+  }
+  function itemDot(u, v, it, heldRing) {
+    ctx.beginPath(); ctx.arc(u, v, ITEM_R, 0, 2 * Math.PI);
+    ctx.fillStyle = TYPE_COLOR(typeOf(it.name)); ctx.fill();
+    ctx.lineWidth = heldRing ? 2 : 1.5; ctx.strokeStyle = heldRing ? "#ffffff" : "#000"; ctx.stroke();
+  }
+  function itemLabel(text, x, y, align) {
+    ctx.textAlign = align; ctx.lineWidth = 3; ctx.lineJoin = "round"; ctx.strokeStyle = "rgba(0,0,0,.85)";
+    ctx.strokeText(text, x, y); ctx.fillStyle = "#f4efd8"; ctx.fillText(text, x, y);
+  }
+  function drawItems(p, s) {
+    S.itemPts = [];
+    if (!S.show.items || !S.items.length) return [];
+    const pts = [], held = [];
+    for (const it of S.items) {
+      if (it.held_by && p && p.base_pos) { held.push(it); continue; }
+      if (it.x == null || it.y == null) continue;
+      const [u, v] = w2c(it.x, it.y);
+      pts.push({ it, u, v });
+    }
+    pts.sort((a, b) => (a.it.name < b.it.name ? -1 : a.it.name > b.it.name ? 1 : 0));
+    const cell = Math.min(ITEM_CELL_M, ITEM_CELL_PX / s), cells = new Map();   // s: px per m
+    for (const q of pts) {
+      const k = `${Math.floor(q.it.x / cell)},${Math.floor(q.it.y / cell)}`;
+      const c = cells.get(k); if (c) c.push(q); else cells.set(k, [q]);
+    }
+    const taken = pts.map((q) => [q.u - ITEM_R - 1, q.v - ITEM_R - 1, q.u + ITEM_R + 1, q.v + ITEM_R + 1]);
+    if (p && p.base_pos) {                                  // keep labels off the robot arrow
+      const [ru, rv] = w2c(p.base_pos[0], p.base_pos[1]), L = Math.max(12, Math.min(26, 0.5 * s));
+      taken.push([ru - L, rv - L, ru + L, rv + L]);
+    }
+    for (const q of pts) itemDot(q.u, q.v, q.it, false);
+    ctx.font = ITEM_FONT; ctx.textBaseline = "alphabetic";
+    if (p && p.base_pos) {                                  // the held names under the robot (drawHeld)
+      const [ru, rv] = w2c(p.base_pos[0], p.base_pos[1]), L = Math.max(12, Math.min(26, 0.5 * s));
+      held.forEach((it, i) => {
+        const w = labelWidth(`${shortName(it.name)} (${it.held_by[0].toUpperCase()})`) / 2, y = rv + L + 12 + 12 * i;
+        taken.push([ru - w - 1, y - 9, ru + w + 1, y + 2]);
+      });
+    }
+    const groups = [...cells.values()].sort((a, b) => b.length - a.length);   // bigger clusters first, then by name
+    for (const group of groups) {
+      const [q, ...rest] = group;
+      const text = shortName(q.it.name) + (rest.length ? ` +${rest.length}` : "");
+      const w = labelWidth(text), g = ITEM_R + 3, d = ITEM_R + 2;
+      for (const [dx, dy, align] of [[g, 3.5, "left"], [-g, 3.5, "right"], [0, -(ITEM_R + 4), "center"], [0, ITEM_R + 12, "center"],
+                                     [d, -d, "left"], [d, ITEM_R + 10, "left"], [-d, -d, "right"], [-d, ITEM_R + 10, "right"]]) {
+        const x0 = align === "left" ? q.u + dx : align === "right" ? q.u + dx - w : q.u + dx - w / 2;
+        const r = [x0 - 1, q.v + dy - 9, x0 + w + 1, q.v + dy + 2];
+        if (overlaps(r, taken)) continue;
+        taken.push(r); itemLabel(text, q.u + dx, q.v + dy, align);
+        break;
+      }
+      const also = rest.length ? `\n  also here: ${rest.map((o) => o.it.name).join(", ")}` : "";
+      S.itemPts.push({ u: q.u, v: q.v, tip: itemTip(q.it) + also });
+      for (const o of rest) S.itemPts.push({ u: o.u, v: o.v, tip: itemTip(o.it) });
+    }
+    ctx.textAlign = "left";
+    return held;
+  }
+  // Held items: at the hand (0.22 m to the robot's left or right, at least 10 px), names under the robot.
+  function drawHeld(held, p, s) {
+    if (!held.length || !p || !p.base_pos) return;
+    const [ru, rv] = w2c(p.base_pos[0], p.base_pos[1]), yaw = p.yaw || 0;
+    const d = Math.max(10, 0.22 * s), L = Math.max(12, Math.min(26, 0.5 * s));
+    ctx.font = ITEM_FONT; ctx.textBaseline = "alphabetic";
+    held.forEach((it, i) => {
+      const side = it.held_by === "left" ? 1 : -1;          // canvas left of heading: (-sin yaw, -cos yaw)
+      const u = ru - side * d * Math.sin(yaw), v = rv - side * d * Math.cos(yaw);
+      itemDot(u, v, it, true);
+      itemLabel(`${shortName(it.name)} (${it.held_by[0].toUpperCase()})`, ru, rv + L + 12 + 12 * i, "center");
+      S.itemPts.push({ u, v, tip: itemTip(it) });
+    });
+    ctx.textAlign = "left";
+  }
+  canvas.addEventListener("mousemove", (ev) => {
+    const r = canvas.getBoundingClientRect(), u = ev.clientX - r.left, v = ev.clientY - r.top;
+    const near = S.itemPts.filter((q) => (q.u - u) ** 2 + (q.v - v) ** 2 <= 81);
+    const tip = near.map((q) => q.tip).join("\n");
+    if (canvas.title !== tip) canvas.title = tip;
+  });
   new ResizeObserver(drawMap).observe(canvas);
   canvas.addEventListener("click", (ev) => {
     if (!view) return;
@@ -318,7 +418,7 @@
     }
     drawMap();
   });
-  for (const [id, key] of [["t-occ", "occ"], ["t-traj", "traj"], ["t-rooms", "rooms"]]) {
+  for (const [id, key] of [["t-occ", "occ"], ["t-traj", "traj"], ["t-rooms", "rooms"], ["t-items", "items"]]) {
     $(id).onclick = () => { S.show[key] = !S.show[key]; $(id).classList.toggle("on", S.show[key]); drawMap(); };
   }
   $("t-clear").onclick = () => { S.traj = []; S.target = null; send({ type: "clear_traj" }); drawMap(); };
@@ -340,6 +440,12 @@
     pills.push(pill("gt.pose", pa == null ? "" : pa < 1 ? "ok" : "bad", `gt.pose ${t.pose_hz ? t.pose_hz.toFixed(0) + "Hz" : "–"}`));
     pills.push(pill("body", !b ? "" : b.age_s < 2 ? (b.fault ? "bad" : "ok") : "bad", `body ${b ? (b.fault ? "FAULT " + b.fault : (b.op || "idle")) : "–"}`));
     pills.push(pill("P1 REP", t.p1_ok ? "ok" : "", `P1 ${t.p1 && t.p1.rtf_1s != null ? "rtf " + fmt(t.p1.rtf_1s) : t.p1_ok ? "ok" : "–"}`));
+    const it = t.items;
+    if (it && it.n) {
+      const live = it.src === "gt.objects";
+      pills.push(pill(live ? "gt.objects: live item poses" : "get_scene_info: load poses (no gt.objects yet)",
+        live ? (it.age_s < 1.5 ? "ok" : "bad") : "", `items ${it.n} ${live ? (it.hz ? it.hz.toFixed(0) + "Hz" : "–") : "load pose"}`));
+    }
     $("pills").innerHTML = pills.join("");
     const fc = (p && p.foot_contact) || {};
     const cells = [
@@ -458,6 +564,7 @@
         if (m.topdown && m.topdown.extent) loadImg(m.topdown.url, (im) => { S.topdown = { img: im, extent: m.topdown.extent }; drawMap(); });
         drawMap(); break;
       case "tel": S.tel = m; renderTel(); break;
+      case "objects": S.items = m.objects || []; S.itemsSrc = m.src; drawMap(); break;
       case "reply":
         if (m.op === "walk" && m.ok) break;
         log(`← ${m.op}: ${m.ok ? "ok" : "FAILED"} ${m.state || ""} ${m.error || ""}${m.op === "status" && m.data ? " " + JSON.stringify(m.data).slice(0, 300) : ""}`, m.ok ? "e-ok" : "e-bad");

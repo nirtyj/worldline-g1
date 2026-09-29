@@ -337,3 +337,34 @@ def pose_summary(p: dict | None) -> dict | None:
     if p.get("note"):
         out["note"] = p["note"]
     return out
+
+
+def is_dynamic_prop(o: Any) -> bool:
+    """A get_scene_info object the sim can move (docs/contracts/p1_m2b.md §3.1: a rigid body that is neither static
+    nor articulated). These are the viewer's items; furniture keeps its load pose and is not drawn as one."""
+    return isinstance(o, dict) and bool(o.get("body_path")) and not o.get("is_static") and not o.get("articulated")
+
+
+def item_summary(o: Any, floor_z: float = 0.0) -> dict | None:
+    """One P1 object record (gt.objects, get_objects or get_scene_info, docs/contracts/p1_m2b.md §3) as the viewer's
+    compact item {id, name, x, y, z, held_by}: x, y the world AABB centre (`pos` when there is no box), z the box
+    bottom above the floor, all rounded to 1 cm so physics jitter is not a change."""
+    if not isinstance(o, dict) or o.get("id") is None:
+        return None
+    box, pos = o.get("aabb"), o.get("pos")
+    try:
+        if box and len(box) == 2 and len(box[0]) >= 3 and len(box[1]) >= 3:
+            lo, hi = box
+            x, y, z = (float(lo[0]) + float(hi[0])) / 2, (float(lo[1]) + float(hi[1])) / 2, float(lo[2])
+        elif pos and len(pos) >= 2:
+            x, y = float(pos[0]), float(pos[1])
+            z = float(pos[2]) if len(pos) > 2 else float(floor_z)
+        else:
+            return None
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) for v in (x, y, z)):
+        return None
+    held = o.get("held_by")
+    return {"id": str(o["id"]), "name": str(o.get("name") or o["id"]), "x": round(x, 2), "y": round(y, 2),
+            "z": round(z - float(floor_z or 0.0), 2), "held_by": held if held in ("left", "right") else None}

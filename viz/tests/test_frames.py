@@ -1,7 +1,7 @@
 """viz tests without Isaac: frame formats (P1 frame.tp aliasing + R/B swap, VizCams pass-through, head decode, snapshot
 re-send dedupe), the recorder (telemetry panel fits its tile, top.mp4 size, go_to target from body events), the P1
 hook's argument guard, and viz/server.py end to end (HTTP frames, server-spawned recorder ports, held-key driving
-against viz/tests/fake_body.py in both body modes).
+against viz/tests/fake_body.py in both body modes, items from a fake P1's get_scene_info and gt.objects).
 
     cd /work/worldline-g1 && viz/.venv/bin/python viz/tests/test_frames.py      # plain runner, prints ok per test
     cd /work/worldline-g1 && viz/.venv/bin/python -m pytest -q viz/tests         # same tests (box.sh setup installs pytest)
@@ -492,6 +492,172 @@ def test_server_drive_walk_fallback():
     assert walks[0]["args"] == {"vx": 0.4, "vy": 0.0, "yaw_rate": 0.0, "duration_s": 10.0}
     assert walks[1]["args"]["vy"] == 0.25
     assert ops[-1] == "stop" and ops.count("velocity") == 1
+
+
+# ------------------------------------------------------------------------------------------------ items (gt.objects)
+def test_item_summary():
+    """P1 object records -> the viewer's compact items: AABB centre, height above the floor, 1 cm rounding."""
+    from viz.common import is_dynamic_prop, item_summary
+
+    rec = {"id": "Vase|3", "name": "vase_3", "pos": [9, 9, 9], "aabb": [[1.0, 2.0, 0.85], [1.2, 2.3, 1.1]],
+           "held_by": None, "dynamic": True, "quat_wxyz": [1, 0, 0, 0]}
+    assert item_summary(rec, floor_z=0.1) == {"id": "Vase|3", "name": "vase_3", "x": 1.1, "y": 2.15, "z": 0.75,
+                                              "held_by": None}
+    assert item_summary({"id": "m", "pos": [0.5, -1.0, 0.2], "held_by": "left"}) == {
+        "id": "m", "name": "m", "x": 0.5, "y": -1.0, "z": 0.2, "held_by": "left"}
+    assert item_summary({"id": "x", "held_by": "left"}) is None and item_summary({"name": "no id"}) is None
+    assert item_summary({"id": "bad", "pos": [float("nan"), 0, 0]}) is None
+    assert item_summary({"id": "odd", "pos": [0, 0], "held_by": "tail"})["held_by"] is None
+    assert is_dynamic_prop({"body_path": "/W/v", "is_static": False, "articulated": False})
+    assert not is_dynamic_prop({"body_path": "/W/f", "is_static": True})
+    assert not is_dynamic_prop({"body_path": "/W/d", "is_static": False, "articulated": True})
+    assert not is_dynamic_prop({"id": "flat_table"})                      # the viz test flat: furniture only
+
+
+def _fake_p1_scene(port: int, stop: threading.Event, floor_z: float = 0.1) -> threading.Thread:
+    """P1 REP stand-in: get_scene_info with two loose props and one piece of furniture; every other op fails."""
+    rep = zmq.Context.instance().socket(zmq.REP)
+    rep.setsockopt(zmq.LINGER, 0)
+    rep.bind(f"tcp://127.0.0.1:{port}")
+    objects = [
+        {"id": "Vase|3", "name": "vase_3", "category": "Vase", "pos": [1.1, 2.15, floor_z + 0.75],
+         "aabb": [[1.0, 2.0, floor_z + 0.75], [1.2, 2.3, floor_z + 1.0]], "is_static": False, "articulated": False,
+         "body_path": "/World/House/Vase_3"},
+        {"id": "Mug|1", "name": "mug_1", "category": "Mug", "pos": [3.0, 1.0, floor_z + 0.8],
+         "aabb": [[2.95, 0.95, floor_z + 0.8], [3.05, 1.05, floor_z + 0.9]], "is_static": False,
+         "articulated": False, "body_path": "/World/House/Mug_1"},
+        {"id": "Table|1", "name": "dining_table_1", "category": "DiningTable", "pos": [1.0, 2.0, floor_z],
+         "aabb": [[0.5, 1.5, floor_z], [1.5, 2.5, floor_z + 0.75]], "is_static": True, "articulated": False,
+         "body_path": None},
+    ]
+
+    def run():
+        try:
+            while not stop.is_set():
+                if rep.poll(50):
+                    req = json.loads(rep.recv())
+                    if req.get("op") == "get_scene_info":
+                        rep.send_string(json.dumps({"ok": True, "house_id": "fake", "floor_z": floor_z,
+                                                    "bounds": [0, 0, 6, 4], "rooms": [], "objects": objects}))
+                    else:
+                        rep.send_string(json.dumps({"ok": False, "error": "fake"}))
+        finally:
+            rep.close(0)
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return th
+
+
+def _gt_objects(seq: int, vase_xy: tuple[float, float], floor_z: float = 0.1, mug_held: bool = True) -> list[bytes]:
+    """P1 gt.objects (p1_m2b.md §3.2): the dynamic and held objects, full records."""
+    vx, vy = vase_xy
+    objs = [{"id": "Vase|3", "name": "vase_3", "pos": [vx, vy, floor_z + 0.75], "quat_wxyz": [1, 0, 0, 0],
+             "aabb": [[vx - 0.1, vy - 0.15, floor_z + 0.75], [vx + 0.1, vy + 0.15, floor_z + 1.0]],
+             "held_by": None, "dynamic": True, "source": "sim", "lin_vel": [0, 0, 0], "moving": False},
+            {"id": "Mug|1", "name": "mug_1", "pos": [2.0, 1.5, floor_z + 1.0], "quat_wxyz": [1, 0, 0, 0],
+             "aabb": [[1.95, 1.45, floor_z + 0.95], [2.05, 1.55, floor_z + 1.05]],
+             "held_by": "left" if mug_held else None, "dynamic": True, "source": "sim", "lin_vel": [0, 0, 0],
+             "moving": False}]
+    body = {"seq": seq, "t_sim": round(seq * 0.1, 2), "t_wall": time.time(), "objects": objs}
+    return [b"gt.objects", msgpack.packb(body, use_bin_type=True)]
+
+
+def _gt_pose(seq: int) -> list[bytes]:
+    body = {"seq": seq, "t_sim": round(seq * 0.02, 3), "t_wall": time.time(), "base_pos": [2.0, 1.6, 0.78],
+            "base_quat_wxyz": [1, 0, 0, 0], "yaw": 0.0, "pelvis_z": 0.78, "fallen": False}
+    return [b"gt.pose", msgpack.packb(body, use_bin_type=True)]
+
+
+async def _collect_objects(url: str, script) -> list[tuple[float, dict]]:
+    """Connect a page, run `script(t0)` (a coroutine publishing on the fake P1), return every 'objects' message."""
+    import aiohttp
+
+    got: list[tuple[float, dict]] = []
+    async with aiohttp.ClientSession() as sess:
+        async with sess.ws_connect(url) as ws:
+            async def drain():
+                async for m in ws:
+                    if m.type == aiohttp.WSMsgType.TEXT:
+                        d = json.loads(m.data)
+                        if d.get("type") == "objects":
+                            got.append((time.monotonic(), d))
+            dr = asyncio.create_task(drain())
+            await script()
+            await asyncio.sleep(1.0)
+            dr.cancel()
+    return got
+
+
+def test_server_forwards_objects():
+    """viz/server.py items: seeded from get_scene_info (loose props only, load poses), sent on connect; gt.objects at
+    20 Hz with a prop moving every tick reaches the page as compact full lists at <= 2 Hz; sub-cm jitter sends
+    nothing; held_by and heights above the floor survive; /api/state and the telemetry carry the items."""
+    gt, gt_rep, http = _free_port(), _free_port(), _free_port()
+    others = {k: _free_port() for k in ("head", "frames", "body-ctl", "body-evt")}
+    stop = threading.Event()
+    th = _fake_p1_scene(gt_rep, stop)
+    pub = zmq.Context.instance().socket(zmq.PUB)
+    pub.setsockopt(zmq.LINGER, 0)
+    pub.bind(f"tcp://127.0.0.1:{gt}")
+    srv = _start_server(["--http", str(http), "--gt", str(gt), "--gt-rep", str(gt_rep), "--rec-out",
+                         "/tmp/viz_test_rec"] + sum(([f"--{k}", str(v)] for k, v in others.items()), []))
+    base = f"http://127.0.0.1:{http}"
+    try:
+        _wait_http(base + "/api/state")
+        t_end = time.time() + 15
+        while time.time() < t_end and _http_json(base + "/api/state")["items"]["n"] < 2:
+            time.sleep(0.1)
+        st = _http_json(base + "/api/state")
+        assert st["items"]["src"] == "get_scene_info" and st["items"]["n"] == 2, st["items"]
+        seeded = {o["name"]: o for o in st["items"]["objects"]}
+        assert set(seeded) == {"vase_3", "mug_1"}                        # the table is furniture, not an item
+        assert seeded["vase_3"] == {"id": "Vase|3", "name": "vase_3", "x": 1.1, "y": 2.15, "z": 0.75,
+                                    "held_by": None}
+
+        phases: dict[str, float] = {}
+
+        async def script():
+            await asyncio.sleep(0.5)
+            phases["move"] = time.monotonic()
+            for k in range(40):                                    # 2 s at 20 Hz, +2 cm per tick
+                pub.send_multipart(_gt_objects(k, (1.1 + 0.02 * k, 2.15)))
+                pub.send_multipart(_gt_pose(k))
+                await asyncio.sleep(0.05)
+            phases["jitter"] = time.monotonic()
+            for k in range(40, 70):                                # 1.5 s of sub-cm jitter at the final pose
+                pub.send_multipart(_gt_objects(k, (1.1 + 0.02 * 39 + (0.002 if k % 2 else -0.002), 2.15)))
+                await asyncio.sleep(0.05)
+            phases["end"] = time.monotonic()
+
+        got = asyncio.run(_collect_objects(f"ws://127.0.0.1:{http}/ws", script))
+        assert got, "no objects message"
+        first = got[0][1]
+        assert first["src"] == "get_scene_info" and [o["name"] for o in first["objects"]] == ["mug_1", "vase_3"], \
+            first                                                    # on connect, sorted by id ("Mug|1" < "Vase|3")
+        live = [(t, m) for t, m in got if m["src"] == "gt.objects"]
+        assert live, [m["src"] for _, m in got]
+        # throttle: <= 2 Hz while the prop moved on every one of 40 ticks
+        in_move = [t for t, _ in live if t <= phases["jitter"] + 0.6]
+        assert len(in_move) <= 2.0 * (phases["jitter"] + 0.6 - phases["move"]) + 1, len(in_move)
+        gaps = [b - a for a, b in zip(in_move, in_move[1:])]
+        assert all(g >= 0.35 for g in gaps), gaps
+        # jitter under 1 cm is no change: nothing sent once the final pose is out
+        assert not [t for t, _ in live if t > phases["jitter"] + 0.6], [round(t - phases["jitter"], 2) for t, _ in live]
+        last = {o["name"]: o for o in live[-1][1]["objects"]}
+        assert last["vase_3"]["x"] == round(1.1 + 0.02 * 39, 2) and last["vase_3"]["z"] == 0.75, last["vase_3"]
+        assert last["mug_1"]["held_by"] == "left" and last["mug_1"]["z"] == 0.95, last["mug_1"]
+        assert set(last["vase_3"]) == {"id", "name", "x", "y", "z", "held_by"}
+        st = _http_json(base + "/api/state")
+        assert st["items"]["src"] == "gt.objects" and st["items"]["n"] == 2 and st["items"]["age_s"] is not None
+        assert {o["name"]: o for o in st["items"]["objects"]} == last
+        assert st["pose"]["base_pos"][:2] == [2.0, 1.6]
+    finally:
+        srv.terminate()
+        srv.wait(10)
+        stop.set()
+        th.join(2)
+        pub.close(0)
 
 
 if __name__ == "__main__":
