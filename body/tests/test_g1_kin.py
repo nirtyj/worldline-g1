@@ -48,3 +48,20 @@ def test_chain_matches_main_urdf():
             assert j.get("type") == "fixed", name
         else:
             assert [float(v) for v in a.get("xyz").split()] == pytest.approx(list(axis)), name
+
+
+def test_hand_points_follow_the_dex3_chain():
+    """g1_kin.hand_points: the palm slab is +-4.4 cm thick along the palm z axis, the open fingers reach 17.6 cm along
+    x, the right thumb sits on +y (the left one on -y), and closing the fingers curls them towards the thumb."""
+    from body import joint_map as jm
+
+    q = K.named_from_mj17(jm.DEFAULT_ANGLES[12:29])
+    for side, sy in (("right", 1.0), ("left", -1.0)):
+        P = K.arm_frames(side, q)["palm"]
+        loc = (K.hand_points(side, q) - P[:3, 3]) @ P[:3, :3]          # back into the palm frame
+        assert loc[:, 2].min() == pytest.approx(-0.044, abs=1e-6) and loc[:, 2].max() == pytest.approx(0.044, abs=1e-6)
+        assert loc[:, 0].max() == pytest.approx(0.0777 + 0.0458 + 0.052, abs=1e-6)
+        assert (loc[:, 1].max() if sy > 0 else -loc[:, 1].min()) > 0.1                  # the thumb
+        closed = (K.hand_points(side, q, jm.DEX3_CLOSED[side]) - P[:3, 3]) @ P[:3, :3]
+        tips_open, tips_closed = loc[48:, :], closed[48:, :]                              # the index_1 box
+        assert sy * (tips_closed[:, 1].mean() - tips_open[:, 1].mean()) > 0.03

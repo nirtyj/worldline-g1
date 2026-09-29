@@ -111,6 +111,8 @@ class BodyConfig:
                                         # palm errors from 17-75 mm to 2-23 mm; ki 4 was no better and tilted more
     arm_servo_delay_s: float = 0.15     # error vs the target this long ago (SONIC's lag), so the loop ignores lag
     arm_servo_max: float = 0.4          # |correction| per joint [rad]
+    arm_ik_worker: str = "process"      # arm_script IK: "process" (a spawn-context worker, body/ik_worker.py) | "inline"
+    gil_switch_s: float = 0.001         # sys.setswitchinterval in body.service main (CPython default 0.005)
     # M2b body wave (docs/contracts/m1.md §3.10-§3.14)
     deploy_lost_s: float = 1.0          # g1_debug older than this while in control -> fault deploy_lost (PLAN §6.6 says
                                         # 300 ms; 1.0 s = the existing deploy_stale watchdog, so a loaded box's jitter

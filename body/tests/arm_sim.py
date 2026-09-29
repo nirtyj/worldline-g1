@@ -64,9 +64,11 @@ class Plant:
     the joints follow SONIC's reference. Hands: first order, 0.1 s. `yaw_gain` scales the waist-yaw response (G0:
     ~0.78)."""
 
-    def __init__(self, mux: Mux, dep: Deploy, dead_s: float = 0.09, tau_s: float = 0.085, yaw_gain: float = 1.0):
+    def __init__(self, mux: Mux, dep: Deploy, dead_s: float = 0.09, tau_s: float = 0.085, yaw_gain: float = 1.0,
+                 hand_gain: float = 1.0):
         self.mux, self.dep = mux, dep
         self.dead_s, self.tau_s, self.yaw_gain = dead_s, tau_s, yaw_gain
+        self.hand_gain = hand_gain              # < 1: a closed hand stops short of its target (an object in it)
         self.bias = [0.0] * 17
         self.buf: collections.deque = collections.deque()
 
@@ -91,12 +93,12 @@ class Plant:
             h = hands[idx] if hands is not None and hands[idx] is not None else jm.DEX3_CLOSED[side]
             hq = self.dep.latest[f"{side}_hand_q"]
             for j in range(7):
-                hq[j] += (h[j] - hq[j]) * b
+                hq[j] += (self.hand_gain * h[j] - hq[j]) * b
         self.dep.t_latest = t
 
 
 class Rig:
-    def __init__(self, cfg: dict | None = None, pose=None, plant_kw: dict | None = None):
+    def __init__(self, cfg: dict | None = None, pose=None, plant_kw: dict | None = None, ik=None):
         self.clock = Clock()
         self.mux = Mux()
         self.mux.clock = self.clock
@@ -106,7 +108,7 @@ class Rig:
         self.records: dict = {}
         self.pose = pose
         self.ch = ArmChannel(SimpleNamespace(**(cfg or {})), self.mux, self.dep, self._emit, log=lambda *_: None,
-                             record=self._record, pose=lambda: self.pose, clock=self.clock)
+                             record=self._record, pose=lambda: self.pose, clock=self.clock, ik=ik)
 
     def _emit(self, op_id, state, data):
         self.events.append({"id": op_id, "state": state, "data": data, "t": self.clock()})

@@ -205,7 +205,7 @@ class VelocityMotion(Motion):
         wd = _f(self.args, "watchdog_s", getattr(self.cfg, "vel_watchdog_s", 0.3), 0.05, 2.0)
         self.vel = VelocityCommander(self.cfg, self.ctx.mux, self.id, watchdog_s=wd)
         if not self.vel.update(self.args):
-            raise MotionError("stale_command", {"t_wall": self.args.get("t_wall")})
+            raise MotionError("stale_command", {"why": "t_wall", "t_wall": self.args.get("t_wall"), "watchdog_s": wd})
         self.phase = "stream"
         self.ended_by: str | None = None
         self.settle: Settle | None = None
@@ -220,7 +220,7 @@ class VelocityMotion(Motion):
         ok = self.vel.update(args)
         if ok and self.phase == "stopping" and self.ended_by == "watchdog":
             self.phase, self.ended_by, self.settle = "stream", None, None   # stream resumed before the op ended
-        return {"accepted": ok}
+        return {"accepted": ok, **({} if ok else {"dropped": "stale_command", "why": "t_wall"})}
 
     def _end(self, why: str, now: float) -> None:
         self.ended_by = why
@@ -267,7 +267,7 @@ def route_velocity(svc, args: dict) -> dict | None:
         if m is not None and m.id == str(gid) and hasattr(m, "on_velocity"):
             ok = m.on_velocity(args)
             return {"ok": bool(ok), "state": "done" if ok else "rejected",
-                    **({} if ok else {"error": "stale_command"})}
+                    **({} if ok else {"error": "stale_command", "data": {"why": "t_wall", "t_wall": args.get("t_wall")}})}
         return {"ok": False, "state": "rejected", "error": "stale_goal",
                 "data": {"active": None if m is None else m.id}}
     stream = args.get("stream")

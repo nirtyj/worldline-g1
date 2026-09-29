@@ -7,9 +7,9 @@ Ops served here (BodyService routes them; the handlers all take `(op_id, args, c
     arm_script   handle_arm_script()  B.7 scripted pregrasp/grasp/lift/carry/lower/release/retract (body/arm_script.py)
     scan         handle_scan()        B.5 waist-yaw scan (body/scan.py)
 and the halt-lane interface (B.1, called by BodyService's halt lane):
-    latch(epoch, reason) -> {latched, t_mono, pose_source, ...}   freeze arms + hands at the MEASURED pose, < 5 ms
-    unlatch(epoch)                                                resume: keep holding until a new owner takes over
-    state() -> {mode: off|stream|chunk|hold|blend|latched|script, owner, session_id, op_id, ...}
+    latch(epoch, reason) -> {latched, arms: held|free, owner, ...}  lock-free: freeze the wire, queue the latch
+    unlatch(epoch)                                                  resume: the arms as the halt found them
+    state() -> {mode: off|stream|chunk|hold|blend|latched|script, arms: held|free, owner, session_id, op_id, ...}
 
 Owner decision 2026-09-29 (recommendation (b), docs/arena_vs_sonic.md §4.2): GR00T drives the arms and hands by
 joint targets; SONIC stays the only body controller and keeps the legs and balance. The targets ride on every
@@ -62,13 +62,17 @@ blend-back; `hold_on_end: target|measured` holds instead); watchdog (client sile
 -> canceled (ended_by `halt`); preempt / take-over -> canceled; fall -> failed (ended_by `fault`); a script that
 ran to the end -> succeeded.
 
-Halt latch (B.1, G0 defect D2): `latch(epoch)` ends the active session (canceled, ended_by halt, hold measured),
-freezes the wire at once at the pose being sent (no new chunk row after the ack), then holds the MEASURED upper
-body (g1_debug body_q through joint_map) and the MEASURED hands (never opened, never closed to a fist), with the
-servo keeping the arm where it is. While latched every `arm` message is rejected `halted`; any message whose
-control_epoch <= halt_epoch is rejected `halted` for good. `unlatch(epoch)` keeps the hold; a new owner with
-control_epoch > halt_epoch takes it over, or `end` / `release` / `stop {arms}` blends it back to SONIC. latch() does
-no I/O: its terminal event is queued and published by the next tick (or `flush()`).
+Halt latch (B.1; G0 defect D2; wave-2 fixes B-D1..B-D3): `latch(epoch)` runs on the halt lane's thread and never
+takes the arm lock (only a wire lock held for microseconds): it sets the latch flag, freezes the override on the wire
+at the pose being sent (no chunk row / script step after the ack) and queues the rest for the next tick (<= 20 ms),
+which acts on who owns the arms: a session moving them ends (canceled, ended_by halt) into a `latched` hold = the
+MEASURED arm pose (servo preloaded: no step on the wire), the waist as the session sent it and the hands' last
+TARGET (never the measured q, never opened); a hold (CarryLock, a target / measured hold) stays exactly as it is; a
+blend back to SONIC pauses; SONIC's free arms stay free (no override is added). While latched every `arm` /
+`arm_script` / `scan` message is rejected `halted`; any message whose control_epoch <= halt_epoch is rejected `halted`
+for good. `unlatch(epoch)` gives the arms back as the halt found them (free stays free, the same hold, the blend
+continues); a `latched` hold stays until a new owner with control_epoch > halt_epoch takes it over, or `end` /
+`release` / `stop {arms}` blends it back to SONIC. latch() does no I/O: events are published by the next tick.
 
 Servo (default on, `servo_ki` 2.0; 0 turns it off): SONIC tracks the override with a pose-dependent steady-state
 error of 0.1-0.3 rad on some joints and ~150 ms of lag (docs/arm_tracking.md). The channel closes an integral loop
@@ -99,6 +103,7 @@ from typing import Any, Callable, Sequence
 
 from . import joint_map as jm
 from .carry import Hold, carry_info
+from .ik_worker import IKWorker
 
 N = jm.N_UPPER
 WAIST_IDX = (0, 1, 2)              # in UPPER_BODY_MUJOCO_JOINTS (mj17) order
@@ -331,6 +336,7 @@ class _Session:
         self.last_ref: list[float] | None = None         # the last pose before servo / slew (a "target" hold keeps it)
         self.last_hands: dict = {"left": None, "right": None}
         self.last_waist = "ref"
+        self.waist_now = "ref"                             # the waist mode of the last tick: ref | cmd | yaw
         self.carry_prev: str | None = None                # CarryLock arm of the hold this session took over
         self.max_step = 0.0                               # rad: the largest per-tick change of a sent arm value
         # target (v0.5)
@@ -366,12 +372,34 @@ class _Session:
                 "T": None if c is None else c.T, "stall_s": round(self.stall_s, 3)}
 
 
+class ScriptPending:
+    """An `arm_script` whose IK is in the worker. BodyService keeps the ROUTER envelope and calls poll() every loop
+    (and at most `timeout_s` later answers `ik_timeout`); poll() returns None until the reply is ready."""
+
+    timeout_s = 5.0
+
+    def __init__(self, ch: "ArmChannel", op_id: str, args: dict, fence: dict, prep: dict, fut, t0: float):
+        self.ch, self.op_id, self.args, self.fence, self.prep, self.fut, self.t0 = ch, op_id, args, fence, prep, fut, t0
+
+    def finish(self, can_start) -> dict:
+        return self.ch._finish_script(self, can_start)
+
+    def poll(self, can_start_fn: Callable[[], tuple]) -> dict | None:
+        if self.fut.done():
+            return self.finish(can_start_fn())
+        if self.ch.clock() - self.t0 > self.timeout_s:
+            self.fut.cancel()
+            return {"ok": False, "state": "rejected", "error": "ik_timeout",
+                    "data": {"waited_s": round(self.ch.clock() - self.t0, 2), "ik": self.ch.ik.snapshot()}}
+        return None
+
+
 class ArmChannel:
     """Owned by BodyService; handle*() run on the service thread for ops arm / arm_script / scan, tick() every
     control tick (50 Hz). latch()/unlatch()/state() may be called from any thread."""
 
     def __init__(self, cfg, mux, deploy, emit, log=print, record=None, pose: Callable | None = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, ik: IKWorker | None = None):
         self.cfg = cfg
         self.mux = mux
         self.deploy = deploy
@@ -382,6 +410,12 @@ class ArmChannel:
         self._pose_fn = pose            # () -> GT Pose (body.wire.Pose) or None; BodyService: pose_sub.latest
         self._pose_sub = None
         self._lock = threading.RLock()
+        # the wire lock: held only for a few microseconds, around every write of the override to the mux (with the
+        # `sent` / `hands_sent` / phase-off bookkeeping) and by latch(). latch() never takes self._lock, so a halt never
+        # waits for a handler or a tick (B-D1); the tick checks for a queued latch before it commits a pose.
+        self._wire_lock = threading.Lock()
+        self._latch_req: dict | None = None               # queued by latch() (lane), applied by the next tick
+        self.ik = ik if ik is not None else IKWorker("inline")
         self._pending: list[tuple[str, str, dict]] = []   # events queued until flush() on the service thread
         self._logq: list[str] = []
         self.sess: _Session | None = None
@@ -400,7 +434,8 @@ class ArmChannel:
         self.stats = {"messages": 0, "stale_dropped": 0, "watchdog_trips": 0, "resumed": 0, "clamped": 0,
                       "slew_limited_ticks": 0, "ticks": 0, "sessions": 0, "preemptions": 0, "rejected_busy": 0,
                       "takeovers": 0, "rejected_stopped": 0, "rejected_halted": 0, "stale_session": 0,
-                      "latches": 0, "chunks_applied": 0, "scripts": 0, "max_step_rad": 0.0}
+                      "latches": 0, "latches_applied": 0, "ticks_skipped_latch": 0, "chunks_applied": 0, "scripts": 0,
+                      "scripts_async": 0, "max_step_rad": 0.0}
         self._defaults()
         self._reset_servo()
 
@@ -541,7 +576,47 @@ class ArmChannel:
                                         "over only with control_epoch > halt_epoch, or ended with end/release"})
         return None
 
+    def _session_fence(self, stream: str, mode: str, fence: dict, args: dict) -> dict | None:
+        """The B.8 session fence (arm_chunk.md §4) on EVERY message that acts on a chunk session's stream: a chunk,
+        a keepalive, an `end` or a `release`, with or without `mode: "chunk"` (wave 2: `release: true` and an `end`
+        without the mode skipped it). Also on `release` / `end` of a hold that a chunk session left: they must come
+        from that session (a newer session's hold is not an older one's to release). Any other message of an ended
+        session is `stale_session`, so a message in flight when the runtime cancelled can never touch the arms."""
+        s = self.sess
+        sid, gen, ce = fence["session_id"], fence["generation"], fence["control_epoch"]
+        acts = mode == "chunk" or bool(args.get("end") or args.get("keepalive") or args.get("release"))
+        if s is not None and s.stream == stream and s.kind == "chunk":
+            if not acts:
+                return None                       # a v0.5 target message: mode_mismatch, below
+            if sid is None:
+                raise ArmError("bad_args", {"arg": "session_id", "error": "every message of a chunk session carries "
+                                                                          "session_id, generation, control_epoch"})
+            if sid != s.session_id or (gen is not None and gen < s.generation) or \
+                    (ce is not None and ce < s.control_epoch):
+                s.chunks["dropped"]["stale_session"] += 1
+                self.stats["stale_session"] += 1
+                return self._rej("stale_session", {"owner_session": s.session_id, "generation": s.generation,
+                                                   "control_epoch": s.control_epoch})
+            return None
+        if sid is None:
+            return None
+        h = self.hold
+        hf = h.fence if (h is not None and h.stream == stream and h.fence) else None
+        if hf and hf.get("session_id") is not None and (s is None or s.stream != stream):
+            if sid != hf["session_id"] or (gen is not None and hf.get("generation") is not None and
+                                           gen < hf["generation"]) or \
+                    (ce is not None and hf.get("control_epoch") is not None and ce < hf["control_epoch"]):
+                self.stats["stale_session"] += 1
+                return self._rej("stale_session", {"hold_session": hf["session_id"], "hold": h.kind})
+            if args.get("release") or args.get("end"):
+                return None                       # the session that left this hold releases it
+        if (s is None or s.stream != stream or s.session_id != sid) and sid in self.ended_sessions:
+            self.stats["stale_session"] += 1
+            return self._rej("stale_session", {"ended": True, "ended_by": self.ended_sessions[sid]})
+        return None
+
     def _handle(self, op_id: str, args: dict, can_start) -> dict:
+        self._apply_latch()
         now = self.clock()
         stream = str(args.get("stream") or op_id)
         mode = args.get("mode") or "target"
@@ -551,27 +626,21 @@ class ArmChannel:
         rej = self._halt_check(fence, args)
         if rej is not None:
             return rej
-        if args.get("release"):
-            return self._release(stream, args, now)
-        s = self.sess
-        own = s is not None and s.stream == stream
         if mode == "chunk":
             missing = [k for k in ("session_id", "generation", "control_epoch") if fence[k] is None]
             if missing:
                 raise ArmError("bad_args", {"arg": missing, "error": "chunk mode needs session_id, generation, "
                                                                      "control_epoch"})
+        rej = self._session_fence(stream, mode, fence, args)
+        if rej is not None:
+            return rej
+        if args.get("release"):
+            return self._release(stream, args, now)
+        s = self.sess
+        own = s is not None and s.stream == stream
+        if mode == "chunk":
             if own and s.kind != "chunk":
                 return self._rej("mode_mismatch", {"session_mode": s.kind})
-            if own and (fence["session_id"] != s.session_id or fence["generation"] < s.generation
-                        or fence["control_epoch"] < s.control_epoch):
-                s.chunks["dropped"]["stale_session"] += 1
-                self.stats["stale_session"] += 1
-                return self._rej("stale_session", {"owner_session": s.session_id, "generation": s.generation,
-                                                   "control_epoch": s.control_epoch})
-            if not own and fence["session_id"] in self.ended_sessions:
-                self.stats["stale_session"] += 1
-                return self._rej("stale_session", {"ended": True,
-                                                   "ended_by": self.ended_sessions[fence["session_id"]]})
         elif own and s.kind != "target" and not (args.get("end") or args.get("keepalive")):
             return self._rej("mode_mismatch", {"session_mode": s.kind})
         if stream in self.stopped:
@@ -614,7 +683,7 @@ class ArmChannel:
         wd = p.get("watchdog_s", s.watchdog_s if own else self._cfg("arm_watchdog_s", 0.3))
         if self._stale(args, wd):
             self.stats["stale_dropped"] += 1
-            return self._rej("stale_command", {"id": s.op_id if own else None, "t_wall": args.get("t_wall")})
+            return self._rej("stale_command", self._stale_data(s.op_id if own else None, args, wd))
         if not own:
             s = self._begin("target", op_id, stream, args, fence, now)
             s.watchdog_s = self._cfg("arm_watchdog_s", 0.3)
@@ -640,6 +709,16 @@ class ArmChannel:
             return time.time() - float(tw) > watchdog_s
         except (TypeError, ValueError):
             return False
+
+    @staticmethod
+    def _stale_data(op_id, args: dict, watchdog_s: float) -> dict:
+        """`stale_command` for a message older than the watchdog. `why: "t_wall"` tells it apart from the fences'
+        stale_command (why: control_epoch | generation | resume_epoch, body/fence.py)."""
+        try:
+            age = round(time.time() - float(args.get("t_wall")), 3)
+        except (TypeError, ValueError):
+            age = None
+        return {"why": "t_wall", "id": op_id, "t_wall": args.get("t_wall"), "age_s": age, "watchdog_s": watchdog_s}
 
     def _servo_args(self, args: dict, out: dict) -> None:
         for k, lo, hi in (("servo_ki", 0.0, 10.0), ("servo_ki_waist", 0.0, 10.0), ("servo_delay_s", 0.0, 0.5),
@@ -742,7 +821,7 @@ class ArmChannel:
         wd = p.get("watchdog_s", s.watchdog_s if own else 2.0)
         if self._stale(args, wd):
             self.stats["stale_dropped"] += 1
-            return self._rej("stale_command", {"id": s.op_id if own else None, "t_wall": args.get("t_wall")})
+            return self._rej("stale_command", self._stale_data(s.op_id if own else None, args, wd))
         new = not own
         if new:
             start_pose = self.continuity_pose()
@@ -881,22 +960,40 @@ class ArmChannel:
         if hold == "target":
             self.hold = Hold("target", list(s.last_ref if s.last_ref is not None else self.continuity_pose()),
                              dict(s.last_hands), s.last_waist, s.stream, s.op_id, f"{s.kind}_target", now,
-                             carry_arm=self._carry_arm(s))
+                             carry_arm=self._carry_arm(s), fence=s.fence())
             self.phase, self.blend = "hold", None
         elif hold == "measured":
             qm = self.measured_mj17()
             src = "g1_debug.body_q"
             if qm is None or self.deploy.age_s() > 0.1:
                 qm, src = self.continuity_pose(), "sent"
-            self.hold = Hold("measured", qm, dict(s.last_hands), "cmd", s.stream, s.op_id, src, now)
+            pose, wmode = self._hold_waist(qm, s)
+            self.hold = Hold("measured", pose, dict(s.last_hands), wmode, s.stream, s.op_id, src, now,
+                             fence=s.fence())
             self.phase, self.blend = "hold", None
-            self._preload(qm)
+            self._preload(pose)
         elif hold == "stand":
             self._start_blend(now, ended_by, blend_s=s.blend_s)
         elif hold == "drop":
             self._drop()
         if s.kind == "script":
             self.corr[YAW_IDX] = 0.0                    # a scan's waist-yaw correction never outlives it
+
+    def _hold_waist(self, arms: list[float], s: _Session | None) -> tuple[list[float], str]:
+        """A measured / latched hold's pose: `arms` for the arm joints, and the waist exactly as the session was
+        sending it (B-low: holding the MEASURED waist while the session sent SONIC's reference stepped the waist by
+        0.12-0.14 rad at every arm/chunk halt). `ref` stays SONIC's live reference, `cmd` / `yaw` keep the values on the
+        wire (servo correction included: the hold runs no waist servo)."""
+        pose = list(arms)
+        w = getattr(s, "waist_now", None) or (s.last_waist if s is not None else "ref")
+        sent = self.sent if self.sent is not None else pose
+        if w == "cmd":
+            pose[0:3] = sent[0:3]
+        elif w == "yaw":
+            pose[YAW_IDX] = sent[YAW_IDX]
+        else:
+            w = "ref"
+        return pose, w
 
     @staticmethod
     def _carry_arm(s: _Session) -> str | None:
@@ -948,10 +1045,11 @@ class ArmChannel:
         self._hist.clear()
 
     def _drop(self) -> None:
-        self.mux.clear_upper()
-        self.phase, self.hold, self.blend = "off", None, None
-        self.sent = None
-        self.hands_sent = {"left": None, "right": None}
+        with self._wire_lock:                    # atomic against latch()'s freeze: never an override left behind
+            self.mux.clear_upper()
+            self.phase, self.hold, self.blend = "off", None, None
+            self.sent = None
+            self.hands_sent = {"left": None, "right": None}
         self._reset_servo()
 
     # .. end / release ............................................................................................
@@ -964,6 +1062,9 @@ class ArmChannel:
         if s is not None and s.stream == stream:
             op = s.op_id
             if s.kind == "target" and hoe in (None, "stand"):
+                # the client ended it: `succeeded` once blended back, also when the end comes during the watchdog's
+                # hold or blend (B-low: that reported failed / client_silent although the client was there)
+                s.ended_by = "client"
                 if self.phase in ("active", "hold"):       # v0.5: blend back, the op ends succeeded afterwards
                     self._start_blend(now, "client", op_sess=s, blend_s=_num(args, "blend_s", 0.2, 10.0, s.blend_s))
                 return {"ok": True, "state": "done", "data": {"id": op, "arm": self._mode(), "hold": "stand"}}
@@ -993,6 +1094,7 @@ class ArmChannel:
         latch wins (resume first)."""
         try:
             with self._lock:
+                self._apply_latch()
                 now = self.clock()
                 if self.latched:
                     self._say(f"[arm] stop {{arms}} ignored: latched (halt epoch {self.halt_epoch})")
@@ -1018,6 +1120,7 @@ class ArmChannel:
         """Fall / shutdown: drop the override immediately (a halt epoch fence stays)."""
         try:
             with self._lock:
+                self._apply_latch()
                 if self.phase == "off" and self.sess is None:
                     return
                 self._say(f"[arm] abort ({reason}): override dropped")
@@ -1032,73 +1135,111 @@ class ArmChannel:
 
     # -- B.1 halt latch (called by the body's halt lane) ---------------------------------------------------------
     def latch(self, epoch: int, reason: str = "halt") -> dict:
-        """Freeze the arms at the MEASURED pose and the hands at their MEASURED q; reject control_epoch <= epoch.
-        No I/O: the canceled event of the active op is queued for the next tick / flush()."""
+        """The halt lane's call, from any thread. It NEVER takes the arm lock (B-D1: a handler or a tick holding it
+        must not delay a halt) and does no I/O: under the few-microsecond wire lock it sets the latch (every arm /
+        arm_script / scan message is `halted` from now on), re-sends the override being sent with velocity 0 (the
+        wire is frozen: the tick running right now cannot commit another pose) and queues the latch for the next tick
+        (<= 20 ms), which applies it under the arm lock (`_apply_latch`). What that does depends on who owns the arms
+        (B-D3): a session moving them -> the measured arm pose, the session's waist, the hands' last TARGET (B-D2);
+        a hold (CarryLock, a target / measured hold) -> kept exactly; a blend -> paused; SONIC's free arms -> left
+        free. Returns at once: {latched (arms held), arms: held|free, owner, pending, froze_wire, latch_ms, ...}."""
         t0 = time.perf_counter()
-        with self._lock:
-            now = self.clock()
-            epoch = int(epoch)
+        now = self.clock()
+        epoch = int(epoch)
+        with self._wire_lock:
             self.halt_epoch = epoch if self.halt_epoch is None else max(self.halt_epoch, epoch)
             self.stats["latches"] += 1
-            if self.latched and self.hold is not None and self.hold.kind == "latched":
-                self.hold.epoch = self.halt_epoch
-                return {"latched": True, "t_mono": now, "pose_source": self.hold.source, "epoch": self.halt_epoch,
-                        "already": True, "ended_op": None, "latch_ms": round((time.perf_counter() - t0) * 1e3, 3)}
+            again = self.latched
+            self.latched = True
+            if self._latch_req is not None:
+                self._latch_req["epoch"] = self.halt_epoch
+            elif not again:
+                self._latch_req = {"epoch": self.halt_epoch, "reason": reason, "t_mono": now}
+            s, phase = self.sess, self.phase
+            held = phase != "off"
+            froze = held and self.sent is not None
+            if froze:
+                fh = _fill_hands(self.hands_sent)
+                self.mux.set_upper(jm.wire_from_mj17(self.sent), [0.0] * N, fh["left"], fh["right"])
+        return {"latched": held, "arms": "held" if held else "free", "already": again,
+                "owner": None if s is None else s.stream, "op": None if s is None else s.op_id, "phase": phase,
+                "pending": not again, "froze_wire": froze, "t_mono": now, "epoch": self.halt_epoch,
+                "latch_ms": round((time.perf_counter() - t0) * 1e3, 3)}
+
+    def _apply_latch(self) -> None:
+        """Carry out a latch that the lane queued. Arm lock held (the tick, a handler, unlatch, end, abort)."""
+        with self._wire_lock:
+            req, self._latch_req = self._latch_req, None
+        if req is None:
+            return
+        now = self.clock()
+        s = self.sess
+        self.stats["latches_applied"] += 1
+        info = {"epoch": req["epoch"], "reason": req["reason"], "t_mono": req["t_mono"], "t_applied": now,
+                "apply_ms": round((now - req["t_mono"]) * 1e3, 2), "ended_op": None, "hold": None,
+                "pose_source": None, "hands_source": None}
+        if self.phase == "active" and s is not None:
+            # a session was moving the arms: stop where the arm IS (the measured pose, servo preloaded so the wire
+            # does not step), keep the waist as the session sent it and the hands' last TARGET (never the measured
+            # q: repeated halts must not ratchet a grip open, and nothing in the hand is dropped)
             qm = self.measured_mj17()
-            fresh = qm is not None and self.deploy.age_s() <= 0.1
-            if fresh:
+            if qm is not None and self.deploy.age_s() <= 0.1:
                 src = "g1_debug.body_q"
-            elif self.sent is not None:
+            else:
                 qm, src = self.continuity_pose(), "sent"
-            else:
-                qm, src = self.reference_mj17(), "reference"
-            mh = self.measured_hands() if fresh else {"left": None, "right": None}
-            hands = {s: (mh[s] if mh[s] is not None else self.hands_sent.get(s)) for s in SIDES}
-            if mh["left"] is not None and mh["right"] is not None:
-                hsrc = "g1_debug.hand_q"
-            elif any(hands.values()):
-                hsrc = "last_target"
-            else:
-                hsrc = "none"
-            s = self.sess
-            ended = None
-            if s is not None:
-                ended = s.op_id
-                self._end_session(s, "canceled", "halt", "none", reason=reason, label="measured")
-            if self.phase == "blend":             # a blend has no correction: freeze the pose it had reached
-                self._reset_servo()
+            pose, wmode = self._hold_waist(qm, s)
+            hands = {side: (None if self.hands_sent.get(side) is None else list(self.hands_sent[side]))
+                     for side in SIDES}
+            info.update(case="session", arms="held", ended_op=s.op_id, pose_source=src, waist=wmode,
+                        hands_source="last_target" if any(hands.values()) else "none (deploy default)")
+            self._end_session(s, "canceled", "halt", "none", reason=req["reason"], label="measured")
             self.blend = None
-            self.hold = Hold("latched", list(qm), hands, "cmd", None, ended, src, now, self.halt_epoch)
-            self.phase, self.latched = "hold", True
-            self._preload(qm)
-            # freeze the wire now at the pose being sent: no chunk row / script step after the ack; the ticks then
-            # settle on the measured pose (slew-limited)
-            if self.sent is None:
-                self.sent = list(qm)
-            if self.hands_sent.get("left") is None and self.hands_sent.get("right") is None \
-                    and (hands["left"] is not None or hands["right"] is not None):
-                self.hands_sent = dict(hands)
-            fh = _fill_hands(self.hands_sent)
-            self.mux.set_upper(jm.wire_from_mj17(self.sent), [0.0] * N, fh["left"], fh["right"])
-            self.latch_info = {"epoch": self.halt_epoch, "reason": reason, "t_mono": now, "pose_source": src,
-                               "hands_source": hsrc, "ended_op": ended}
-            self._say(f"[arm] LATCHED (halt epoch {self.halt_epoch}, {reason}): pose {src}, hands {hsrc}"
-                      f"{', ended ' + ended if ended else ''}")
-            return {"latched": True, "t_mono": now, "pose_source": src, "hands_source": hsrc,
-                    "epoch": self.halt_epoch, "ended_op": ended,
-                    "latch_ms": round((time.perf_counter() - t0) * 1e3, 3)}
+            self.hold = Hold("latched", pose, hands, wmode, None, info["ended_op"], src, now, req["epoch"])
+            self.phase = "hold"
+            self._preload(pose)
+        elif self.phase == "hold" and self.hold is not None:
+            h = self.hold
+            if s is not None:                      # a v0.5 op in its watchdog hold: the op ends, its pose stays
+                info["ended_op"] = s.op_id
+                h.kind, h.carry_arm, h.fence = "target", self._carry_arm(s), s.fence()
+                self._end_session(s, "canceled", "halt", "none", reason=req["reason"], label="target")
+                self.hold = h
+            info.update(case="hold", arms="held", hold=h.kind, carry=h.is_carry(), pose_source=f"hold:{h.source}",
+                        hands_source="hold")
+        elif self.phase == "blend" and self.blend is not None:
+            b = self.blend
+            b["paused_at"] = now                   # frozen where it is; resume continues it (the arms go free)
+            if s is not None and b.get("sess") is s:
+                info["ended_op"] = s.op_id
+                b["sess"] = None
+                self._end_session(s, "canceled", "halt", "none", reason=req["reason"], label="stand")
+                self.phase, self.blend = "blend", b
+            info.update(case="blend", arms="held", pose_source="blend (paused)", hands_source="blend (paused)")
+        else:
+            info.update(case="off", arms="free")   # SONIC's own arms: a halt leaves them free (B-D3)
+        self.latch_info = info
+        self._say(f"[arm] LATCHED (halt epoch {req['epoch']}, {req['reason']}): {info['case']}, arms {info['arms']}"
+                  f"{', ended ' + info['ended_op'] if info['ended_op'] else ''} ({info['apply_ms']} ms after the lane)")
 
     def unlatch(self, epoch: int) -> None:
-        """resume{epoch}: the latch opens but the latched pose is kept until a new owner (control_epoch > halt_epoch)
-        takes it over, or `end` / `release` / `stop {arms}` blends it back to SONIC."""
+        """resume{epoch}: open the latch and give the arms back exactly as the halt found them: free arms stay free,
+        a hold (CarryLock) is the same hold, a paused blend continues. A session the halt stopped is over: its latched
+        pose is kept until a new owner (control_epoch > halt_epoch) takes it over, or `end` / `release` / `stop {arms}`
+        blends it back to SONIC."""
         with self._lock:
+            self._apply_latch()
             if not self.latched:
                 return
             if self.halt_epoch is not None and int(epoch) < self.halt_epoch:
                 self._say(f"[arm] resume epoch {epoch} < halt epoch {self.halt_epoch}: ignored")
                 return
-            self.latched = False
-            self._say(f"[arm] unlatched (resume epoch {epoch}); holding the latched pose")
+            with self._wire_lock:
+                self.latched = False
+            b = self.blend
+            if b is not None and b.get("paused_at") is not None:
+                b["t0"] += self.clock() - b["paused_at"]
+                b["paused_at"] = None
+            self._say(f"[arm] unlatched (resume epoch {epoch}); arms {self._mode()}")
 
     def state(self) -> dict:
         with self._lock:
@@ -1106,56 +1247,113 @@ class ArmChannel:
             return {"mode": self._mode(), "owner": None if s is None else s.stream,
                     "session_id": None if s is None else s.session_id, "op_id": None if s is None else s.op_id,
                     "kind": None if s is None else s.kind, "latched": self.latched, "halt_epoch": self.halt_epoch,
-                    "hold": None if self.hold is None else self.hold.kind}
+                    "hold": None if self.hold is None else self.hold.kind,
+                    "arms": "free" if self.phase == "off" else "held"}
 
     def _mode(self) -> str:
-        if self.latched:
-            return "latched"
+        if self.latched and (self.phase != "off" or self._latch_req is not None):
+            return "latched"                      # arms held by the latch (free arms under a latch read "off")
         if self.phase == "active" and self.sess is not None:
             return KIND_MODE[self.sess.kind]
         return self.phase
 
     # -- scripts (arm_script / scan): the plan objects live in body/arm_script.py and body/scan.py ---------------
-    def handle_arm_script(self, op_id: str, args: dict, can_start: tuple[bool, str | None, dict]) -> dict:
+    def handle_arm_script(self, op_id: str, args: dict, can_start: tuple[bool, str | None, dict]):
+        """op `arm_script`. The IK runs in the IK worker (a separate process on the service, body/ik_worker.py), so
+        this returns a `ScriptPending` that BodyService polls every loop and answers when the solve is back (the reply
+        is the same as before: `accepted` with the plan, or a rejection); with an inline worker (tests) the solve is
+        done at once and the reply dict comes back directly."""
         from . import arm_script
 
-        return self._handle_script(op_id, "arm_script", args or {}, can_start, arm_script.build)
+        args = args or {}
+        try:
+            with self._lock:
+                self._apply_latch()
+                now = self.clock()
+                fence = self._fence_of(args)
+                rej = self._script_gate(op_id, "arm_script", args, fence, can_start)
+                if rej is not None:
+                    return rej
+                prep = arm_script.prepare(self, args, now)        # raises ArmError before any state change
+        finally:
+            self.flush()
+        fut = self.ik.submit(arm_script.solve, prep["job"])
+        pending = ScriptPending(self, op_id, args, fence, prep, fut, now)
+        if fut.done():
+            return pending.finish(can_start)
+        self.stats["scripts_async"] += 1
+        return pending
 
     def handle_scan(self, op_id: str, args: dict, can_start: tuple[bool, str | None, dict]) -> dict:
         from . import scan
 
-        return self._handle_script(op_id, "scan", args or {}, can_start, scan.build)
-
-    def _handle_script(self, op_id: str, op: str, args: dict, can_start, build) -> dict:
+        args = args or {}
         try:
             with self._lock:
+                self._apply_latch()
                 now = self.clock()
-                stream = str(args.get("stream") or op_id)
                 fence = self._fence_of(args)
-                rej = self._halt_check(fence, args)
+                rej = self._script_gate(op_id, "scan", args, fence, can_start)
                 if rej is not None:
                     return rej
-                ok, reason, info = can_start
-                if not ok:
-                    self.emit_reject(op_id, args, reason, info, op_name=op)
-                    return {"ok": False, "state": "rejected", "error": reason, "data": info}
-                s = self.sess
-                if self.phase == "active" and s is not None and not args.get("preempt"):
-                    self.stats["rejected_busy"] += 1
-                    return self._rej("arm_busy", {"owner": s.stream, "op": s.op_id, "kind": s.kind,
-                                                  "hint": "preempt: true takes over"})
-                plan = build(self, args, now)                    # raises ArmError before any state change
-                s = self._begin("script", op_id, stream, args, fence, now, op_name=op)
-                s.plan = plan
-                s.max_vel = _num(args, "max_vel", 0.5, 20.0, self.max_vel_default)
-                s.blend_s = _num(args, "blend_s", 0.2, 10.0, self.blend_s_default)
-                p: dict = {}
-                self._servo_args(args, p)
-                self._apply_servo_args(p)
-                s.hold_on_end = plan.hold_on_end
-                self.stats["scripts"] += 1
-                self._emit(op_id, "progress", {"kind": f"{op}.plan", **plan.brief()})
-                return {"ok": True, "state": "accepted", "data": {"id": op_id, "arm": self._mode(), **plan.brief()}}
+                plan = scan.build(self, args, now)                # raises ArmError before any state change
+                return self._start_script(op_id, "scan", args, fence, plan, now)
+        finally:
+            self.flush()
+
+    def _script_gate(self, op_id: str, op: str, args: dict, fence: dict, can_start) -> dict | None:
+        rej = self._halt_check(fence, args)
+        if rej is not None:
+            return rej
+        ok, reason, info = can_start
+        if not ok:
+            self.emit_reject(op_id, args, reason, info, op_name=op)
+            return {"ok": False, "state": "rejected", "error": reason, "data": info}
+        s = self.sess
+        if self.phase == "active" and s is not None and not args.get("preempt"):
+            self.stats["rejected_busy"] += 1
+            return self._rej("arm_busy", {"owner": s.stream, "op": s.op_id, "kind": s.kind,
+                                          "hint": "preempt: true takes over"})
+        return None
+
+    def _start_script(self, op_id: str, op: str, args: dict, fence: dict, plan, now: float) -> dict:
+        stream = str(args.get("stream") or op_id)
+        s = self._begin("script", op_id, stream, args, fence, now, op_name=op)
+        s.plan = plan
+        s.max_vel = _num(args, "max_vel", 0.5, 20.0, self.max_vel_default)
+        s.blend_s = _num(args, "blend_s", 0.2, 10.0, self.blend_s_default)
+        p: dict = {}
+        self._servo_args(args, p)
+        self._apply_servo_args(p)
+        s.hold_on_end = plan.hold_on_end
+        self.stats["scripts"] += 1
+        self._emit(op_id, "progress", {"kind": f"{op}.plan", **plan.brief()})
+        return {"ok": True, "state": "accepted", "data": {"id": op_id, "arm": self._mode(), **plan.brief()}}
+
+    def _finish_script(self, pend: "ScriptPending", can_start) -> dict:
+        """The IK is back: re-check the gate (a halt, a fault or another owner may have come meanwhile), then start
+        the session from the pose being sent now."""
+        from . import arm_script
+
+        try:
+            with self._lock:
+                self._apply_latch()
+                now = self.clock()
+                try:
+                    sol = pend.fut.result()
+                except Exception as e:  # noqa: BLE001 - a dead worker is an answer, not a crash
+                    self.ik.note_failure(e)
+                    return self._rej("ik_unavailable", {"error": repr(e), "ik": self.ik.snapshot()})
+                rej = self._script_gate(pend.op_id, "arm_script", pend.args, pend.fence, can_start)
+                if rej is not None:
+                    return rej
+                try:
+                    plan = arm_script.finish(self, pend.prep, sol)
+                except ArmError as e:
+                    return {"ok": False, "state": "rejected", "error": e.reason, "data": e.data}
+                rep = self._start_script(pend.op_id, "arm_script", pend.args, pend.fence, plan, now)
+                rep["data"]["ik_wait_ms"] = round((now - pend.t0) * 1e3, 1)
+                return rep
         finally:
             self.flush()
 
@@ -1168,6 +1366,7 @@ class ArmChannel:
             self.flush()
 
     def _tick(self, now: float) -> None:
+        self._apply_latch()
         if self.phase == "off":
             self.t_tick = None
             return
@@ -1207,7 +1406,8 @@ class ArmChannel:
         blending = self.phase == "blend"
         if blending:
             b = self.blend
-            a = _minjerk((now - b["t0"]) / b["dur"])
+            tb = b["paused_at"] if b.get("paused_at") is not None else now      # a halt pauses a blend
+            a = _minjerk((tb - b["t0"]) / b["dur"])
             des = [(1 - a) * f + a * r for f, r in zip(b["from"], ref)]
             hands = {}
             for side in SIDES:
@@ -1215,7 +1415,6 @@ class ArmChannel:
                 hands[side] = None if f is None else _lerp(f, jm.DEX3_CLOSED[side], a)
             waist_mode = "cmd"                       # the blend already ends on the reference waist
             if a >= 1.0:
-                self.mux.clear_upper()
                 op_sess = b.get("sess")
                 self._say(f"[arm] {op_sess.op_id if op_sess else '-'} blended back; override released")
                 if op_sess is not None and op_sess is self.sess:
@@ -1247,6 +1446,7 @@ class ArmChannel:
             if s is not None and self.phase == "active":
                 s.last_ref, s.last_hands, s.last_waist = list(des), dict(hands), \
                     ("cmd" if waist_mode == "cmd" else "ref")
+                s.waist_now = waist_mode
             self._hist.append((now, list(des)))
             self.ref_last = list(des)
             self._servo(now, dt, des, servo_idx)
@@ -1284,12 +1484,16 @@ class ArmChannel:
                 n_arm_lim = sum(1 for k in ARM_IDX if abs(out[k] - des[k]) > 1e-12)
                 s.win[1] += n_arm_lim
                 s.tot[1] += n_arm_lim
-        self.sent = out
-        self.hands_sent = {side: (list(hands[side]) if hands.get(side) is not None else None) for side in SIDES}
-        fh = _fill_hands(self.hands_sent)
-        if fh["left"] is not None:
-            self.hands_sent = fh
-        self.mux.set_upper(jm.wire_from_mj17(out), jm.wire_from_mj17(vel), fh["left"], fh["right"])
+        hs = {side: (list(hands[side]) if hands.get(side) is not None else None) for side in SIDES}
+        fh = _fill_hands(hs)
+        with self._wire_lock:
+            if self._latch_req is not None:
+                # a halt arrived during this tick: its frozen pose stays on the wire, the next tick applies it
+                self.stats["ticks_skipped_latch"] += 1
+                return
+            self.sent = out
+            self.hands_sent = fh if fh["left"] is not None else hs
+            self.mux.set_upper(jm.wire_from_mj17(out), jm.wire_from_mj17(vel), fh["left"], fh["right"])
         if s is not None and self.phase == "active":
             self._progress(s, now)
 
@@ -1444,6 +1648,8 @@ class ArmChannel:
                     "servo": {**self.sv, "corr_max_abs": round(max(abs(c) for c in self.corr[3:]), 4),
                               "corr_waist_yaw": round(self.corr[YAW_IDX], 4)},
                     "latched": self.latched, "halt_epoch": self.halt_epoch, "latch": self.latch_info,
+                    "latch_pending": self._latch_req is not None, "arms": "free" if self.phase == "off" else "held",
+                    "ik": self.ik.snapshot(),
                     "hold": None if self.hold is None else self.hold.brief(now),
                     "carry": carry_info(self.hold, self.measured_mj17(), now),
                     "hands": [side for side in SIDES if self.hands_sent.get(side) is not None],

@@ -6,11 +6,14 @@
              [b"body.resumed", JSON]:   {epoch, was_latched, ...}                       (BodyService.resume)
 
 Why a thread of its own: the control loop can be busy for tens of milliseconds (an A* plan at a go_to start, a P1
-call), and a halt must never wait for it. This thread only does thread-safe things: SonicMux.latch (IDLE on the wire
-at once), ArmChannel.latch under the service's arm lock, the fence latch, and the body.halted publish under the
-event-socket lock. Cancelling the active leg motion (its `canceled` terminal event) is left to the control loop,
-which runs it before it handles the next request or tick (<= 20 ms); the mux latch has already made that motion's
-commands ineffective. The socket is bound by BodyService.setup() on the control thread and used only here afterwards.
+call), and a halt must never wait for it. This thread only does thread-safe things, under locks that are held for
+microseconds: SonicMux.latch (IDLE on the wire at once), ArmChannel.latch (lock-free with respect to the arm lock: it
+freezes the override under the channel's wire lock and queues the rest for the next tick), the fence latch, and the
+body.halted publish under the event-socket lock. Nothing CPU-heavy runs in the body process's threads (the
+arm_script IK is in a worker process, body/ik_worker.py), so the GIL comes back quickly too (M2b wave 2, B-D1).
+Cancelling the active leg motion (its `canceled` terminal event) is left to the control loop, which runs it before it
+handles the next request or tick (<= 20 ms); the mux latch has already made that motion's commands ineffective.
+The socket is bound by BodyService.setup() on the control thread and used only here afterwards.
 """
 
 from __future__ import annotations

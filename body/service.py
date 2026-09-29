@@ -13,8 +13,11 @@ State    (PUB 5611, multipart [b"body.state", JSON]) at 5 Hz: mode, speed, contr
 Topics   (PUB 5611, multipart [b"body.<topic>", JSON], docs/contracts/m1.md §3.10-§3.12): body.halted, body.resumed,
          body.mode, body.fault, body.stale_command, body.lease, body.session.
 Halt     (PUSH -> PULL 5612, body/halt.py): {"op": "halt", "epoch", "t_wall"} -> SonicMux IDLE at the current facing at
-         once, ArmChannel.latch, the fence latch, body.halted{epoch, t_mono, arms_latched} (on the lane thread);
-         the active leg motion ends `canceled` (reason halt) on the control thread before its next request or tick.
+         once, ArmChannel.latch (lock-free; the next tick applies it by who owns the arms), the fence latch,
+         body.halted{epoch, t_mono, arms_latched} (on the lane thread); the active leg motion ends `canceled` (reason
+         halt) on the control thread before its next request or tick.
+IK       arm_script's IK runs in a worker process (body/ik_worker.py); its reply is sent when the solve is back
+         (ScriptPending, polled every loop), so the control thread and the halt lane never wait for it.
 
 Rules: one active motion at a time; a new motion op pre-empts the current one (it ends "canceled" with
 reason "preempted"); stop cancels (reason "stop") and runs a StopMotion (planner IDLE until |v| < 0.05).
@@ -50,12 +53,13 @@ import uuid
 import zmq
 
 from .approach import ApproachMotion
-from .arm import ArmChannel, ArmError
+from .arm import ArmChannel, ArmError, ScriptPending
 from .config import BodyConfig, ep
 from .deploy_monitor import DeployMonitor
 from .fence import Fence, FenceReject, Fences
 from .frames import PlannerFrame
 from .halt import HaltLane
+from .ik_worker import IKWorker
 from .motions import MOTIONS, Motion, MotionError, StopMotion
 from .nav_grid import NavGrid
 from .p1_client import P1Error, P1Rpc, PoseSub
@@ -133,7 +137,13 @@ class BodyService:
         self.deploy = DeployMonitor(ep(P["sonic_debug"], cfg.host), ctx=self.ctx, on_debug=self._on_debug)
         self.mctx = MotionCtx(self)
         arm_kw = {"pose": self.pose_sub.latest} if "pose" in inspect.signature(ArmChannel).parameters else {}
+        # the arm_script IK runs in a worker PROCESS (body/ik_worker.py): never on this control thread, and never in
+        # a thread of this process (numpy's GIL release/re-take would starve the halt lane: B-D1)
+        self.ik = IKWorker(cfg.arm_ik_worker, log=self.log)
+        if "ik" in inspect.signature(ArmChannel).parameters:
+            arm_kw["ik"] = self.ik
         self.arm = ArmChannel(cfg, self.mux, self.deploy, self.emit, log=self.log, record=self._record, **arm_kw)
+        self._deferred: list[tuple[list, str, ScriptPending]] = []   # arm_script replies waiting for the IK worker
         self.fences = Fences()
         self.active: Motion | None = None
         self.ops: collections.OrderedDict[str, dict] = collections.OrderedDict()
@@ -369,8 +379,29 @@ class BodyService:
         except Exception as e:
             self.log(f"[ctl] op {op} crashed: {traceback.format_exc()}")
             rep = {"ok": False, "state": "failed", "error": f"internal: {e!r}"}
+        if isinstance(rep, ScriptPending):          # the IK worker answers later: _poll_deferred sends the reply
+            self._deferred.append((envelope, op_id, rep))
+            return
         rep["id"] = op_id
         self.ctl.send_multipart(envelope + [dumps_json(rep)])
+
+    def _poll_deferred(self) -> None:
+        """Control thread: send the replies of arm_script ops whose IK came back from the worker."""
+        if not self._deferred:
+            return
+        keep = []
+        for envelope, op_id, pend in self._deferred:
+            try:
+                rep = pend.poll(self._arm_can_start)
+            except Exception as e:
+                self.log(f"[ctl] arm_script {op_id} finish crashed: {traceback.format_exc()}")
+                rep = {"ok": False, "state": "failed", "error": f"internal: {e!r}"}
+            if rep is None:
+                keep.append((envelope, op_id, pend))
+                continue
+            rep["id"] = op_id
+            self.ctl.send_multipart(envelope + [dumps_json(rep)])
+        self._deferred = keep
 
     def _dispatch(self, op_id: str, op: str, args: dict, req: dict | None = None) -> dict:
         try:
@@ -841,6 +872,7 @@ class BodyService:
         self.deploy.start()
         self.halt_lane = HaltLane(self, halt_sock)
         self.halt_lane.start()
+        self.ik.start()                              # the IK worker process, warmed up in the background
         self.log(f"[body] up: ROUTER {P['body_ctl']} PUB {P['body_evt']} PULL halt {P['body_halt']} "
                  f"SONIC-in PUB {P['sonic_in']} P1 REQ {P['p1_rep']} gt.pose SUB {P['p1_pose']} "
                  f"g1_debug SUB {P['sonic_debug']}; extra arm ops {sorted(self.extra_ops)}")
@@ -856,6 +888,8 @@ class BodyService:
         nxt_state = nxt
         while self._running:
             timeout_ms = max(0.0, (nxt - time.monotonic()) * 1000.0)
+            if self._deferred:
+                timeout_ms = min(timeout_ms, 2.0)        # an IK answer is due: look again in 2 ms
             socks = dict(poller.poll(timeout_ms))
             if self.ctl in socks:
                 for _ in range(20):
@@ -864,6 +898,7 @@ class BodyService:
                     except zmq.Again:
                         break
                     self._handle(frames)
+            self._poll_deferred()
             now = time.monotonic()
             if now >= nxt:
                 t0 = time.perf_counter()
@@ -904,6 +939,7 @@ class BodyService:
         self.deploy.stop()
         self.p1.close()
         self._p1_async.shutdown(wait=False)
+        self.ik.close()
         if self._nav2 is not None:
             self._nav2.close()
         for s in (self.ctl, self.evt):
@@ -969,6 +1005,10 @@ def main(argv=None) -> int:
     if args.no_fault_band:
         cfg.fault_band_on = False
     log_dir = args.log_dir or f"/tmp/wl-body-{time.strftime('%Y%m%d-%H%M%S')}"
+    # GIL hand-over: a thread that wants the GIL (the halt lane) forces a switch after this long, not after 5 ms
+    # (CPython's default). The IK is in a worker process (B-D1); this bounds what any pure-Python work left on the
+    # control thread (an A* plan, a status dump) can add to a halt.
+    sys.setswitchinterval(cfg.gil_switch_s)
     svc = BodyService(cfg, log_dir=log_dir)
 
     def _sig(*_):

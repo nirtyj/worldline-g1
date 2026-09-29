@@ -86,6 +86,69 @@ def arm_frames(side: str, q_named: dict) -> dict[str, np.ndarray]:
     return {"torso": torso, "wrist": wrist, "palm": palm}
 
 
+# Dex3 hand collision envelope. Link chain and joint axes from the URDF P1 simulates (assets/g1/g1_sonic_dex3.urdf:
+# main.urdf with the Dex3 joints made revolute and the thumb_1 collision box from g1_29dof_with_hand.urdf), boxes =
+# the bounding boxes of the collision meshes ($WBC/gear_sonic/data/assets/robot_description/meshes/g1/*_hand_*.STL),
+# read 2026-09-29. Palm frame: x along the fingers, z across them (index at +z, middle at -z), y towards the thumb
+# on the right hand (the left hand mirrors y). The palm alone is a slab +-4.4 cm along z, which is near vertical at
+# table-height reaches: a palm target 3 cm above an object top puts the hand 1.4 cm into the object.
+def _box(x0, x1, y0, y1, z0, z1):
+    return [(x, y, z) for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]
+
+
+def _hand_links(side: str) -> list:
+    """(link, parent, origin xyz, axis, Dex3 index or None, box corners) for the palm and the 7 finger links."""
+    m = 1.0 if side == "right" else -1.0                       # the left hand mirrors y
+    yb = lambda a, b: (min(m * a, m * b), max(m * a, m * b))   # noqa: E731
+    fing = _box(-0.007, 0.055, *yb(-0.013, 0.015), -0.013, 0.013)
+    tip = _box(-0.007, 0.052, *yb(-0.009, 0.009), -0.013, 0.013)
+    return [("palm", None, (0.0, 0.0, 0.0), None, None, _box(0.0, 0.087, *yb(-0.021, 0.02), -0.044, 0.044)),
+            ("thumb_0", "palm", (0.0255, 0.0, 0.0), (0, 1, 0), 0, _box(-0.012, 0.01, *yb(0.0, 0.028), -0.01, 0.01)),
+            ("thumb_1", "thumb_0", (-0.0025, m * 0.0193, 0.0), (0, 0, 1), 1, _box(-0.011, 0.009, *yb(0.017, 0.047),
+                                                                                   -0.01, 0.01)),
+            ("thumb_2", "thumb_1", (0.0, m * 0.0458, 0.0), (0, 0, 1), 2, _box(-0.009, 0.009, *yb(-0.007, 0.052),
+                                                                               -0.013, 0.013)),
+            ("middle_0", "palm", (0.0777, -m * 0.0016, -0.0285), (0, 0, 1), 3, fing),
+            ("middle_1", "middle_0", (0.0458, 0.0, 0.0), (0, 0, 1), 4, tip),
+            ("index_0", "palm", (0.0777, -m * 0.0016, 0.0285), (0, 0, 1), 5, fing),
+            ("index_1", "index_0", (0.0458, 0.0, 0.0), (0, 0, 1), 6, tip)]
+
+
+HAND_LINKS = {s: _hand_links(s) for s in ("left", "right")}
+
+
+def forearm_points(side: str, q_named: dict, n: int = 5) -> np.ndarray:
+    """n points from the elbow joint to the wrist yaw joint (the forearm's axis) in the pelvis frame, (n, 3). The
+    forearm is a ~3.5 cm radius link: callers check these with that much extra margin."""
+    T = np.eye(4)
+    for j in WAIST_CHAIN:
+        T = _step(T, j, float(q_named.get(j, 0.0)))
+    elbow = None
+    for j in ARM_CHAIN[side]:
+        T = _step(T, j, float(q_named.get(j, 0.0)))
+        if j.endswith("elbow_joint"):
+            elbow = T[:3, 3].copy()
+    wrist = T[:3, 3]
+    return np.array([elbow + (wrist - elbow) * k / (n - 1) for k in range(n)])
+
+
+def hand_points(side: str, q_named: dict, hand7: Sequence[float] | None = None) -> np.ndarray:
+    """The hand's collision boxes' corners in the pelvis frame, (64, 3), for the arm pose q_named and the Dex3 joint
+    angles hand7 (Dex3 order: thumb_0, thumb_1, thumb_2, middle_0, middle_1, index_0, index_1; default open)."""
+    h = [0.0] * 7 if hand7 is None else [float(v) for v in hand7]
+    T = {"palm": arm_frames(side, q_named)["palm"]}
+    out = []
+    for name, parent, xyz, axis, k, box in HAND_LINKS[side]:
+        if parent is not None:
+            M = np.eye(4)
+            M[:3, :3] = _axis_angle(axis, h[k])
+            M[:3, 3] = xyz
+            T[name] = T[parent] @ M
+        c = np.asarray(box, float)
+        out.append(c @ T[name][:3, :3].T + T[name][:3, 3])
+    return np.vstack(out)
+
+
 def named_from_mj17(v17: Sequence[float]) -> dict:
     return {n: float(v) for n, v in zip(UPPER_BODY_MUJOCO_JOINTS, v17)}
 

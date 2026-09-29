@@ -3,6 +3,7 @@
 Ground truth comes from the fake P1 (speed) and the fake deploy (what SONIC was sent: planner mode, command{stop}
 count); the body's own claims are only checked against them."""
 
+import json
 import math
 import statistics
 import threading
@@ -11,6 +12,7 @@ import time
 import pytest
 import zmq
 
+from body.client import BodyClient
 from body.frames import PlannerFrame
 from body.sonic_mux import PlannerCmd, SonicMux
 from body.wire import LocomotionMode, dumps_json
@@ -160,3 +162,47 @@ def test_halt_via_router_op_and_bad_lane_messages(stack):
     push.close()                                           # close(0) would drop them (linger 0)
     assert _wait(lambda: svc.halt_lane.stats["bad"] == 2 and svc.halt_lane.stats["resumes"] == 1, 2.0)
     assert _wait(lambda: not bc.status()["latched"], 1.0)
+
+
+def test_halt_during_an_arm_script_ik_is_not_delayed(stack, port_offset):
+    """B-D1 over the wire (the real BodyService, its IK worker process): halts sent while the body solves an
+    unreachable arm_script goal (the longest IK: every iteration of both stages) are acked within the B.1 bars. Live
+    before the fix: 176-221 ms (the latch waited for the arm lock, and numpy's GIL hand-offs starved the lane)."""
+    bc, svc = stack.bc, stack.svc
+    stack.stand()
+    bc2 = BodyClient(port_offset=port_offset).connect(15)
+    try:
+        p = bc.pose()
+        far = [p.x + 0.3 * math.cos(p.yaw), p.y + 0.3 * math.sin(p.yaw), p.z + 1.4]    # 1.4 m above the pelvis
+        warm = bc2.request("arm_script", {"phase": "grasp", "arm": "right", "target_w": far})
+        assert warm["error"] == "ik_unreachable", warm
+        ik_ms = warm["data"]["ik_ms"]
+        rows = []
+        for ep in range(1, 7):
+            out = {}
+
+            def go():
+                t0 = time.perf_counter()
+                out["rep"] = bc2.request("arm_script", {"phase": "grasp", "arm": "right", "target_w": far,
+                                                        "control_epoch": ep})
+                out["ms"] = (time.perf_counter() - t0) * 1e3
+
+            th = threading.Thread(target=go)
+            th.start()
+            time.sleep(0.004 + 0.003 * ep)
+            t_halt = time.perf_counter()
+            r = bc.halt(ep, timeout_s=0.5)
+            th.join(10)
+            assert r["acked"], r
+            rows.append({"rtt_ms": r["rtt_ms"], "handle_ms": r["body"]["handle_ms"], "script": out["rep"].get("error"),
+                         "script_ms": out["ms"], "arms": r["body"]["arm"]})
+            assert bc.resume(ep)["ok"]
+        print(json.dumps({"ik_ms": ik_ms, "rows": rows}, default=str))
+        # the halts overlapped the solves (the script answered after the halt: `halted`), and none waited for them
+        assert all(x["script"] in ("halted", "ik_unreachable") for x in rows), rows
+        assert sum(x["script"] == "halted" for x in rows) >= 4, rows
+        assert max(x["handle_ms"] for x in rows) < 10.0 and max(x["rtt_ms"] for x in rows) < 30.0, (ik_ms, rows)
+        assert all(not x["arms"]["latched"] and x["arms"]["arms"] == "free" for x in rows)     # free arms stay free
+        assert svc.arm.snapshot()["ik"]["mode"] == "process" and bc.status()["arm"]["mode"] == "off"
+    finally:
+        bc2.close()

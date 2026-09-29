@@ -1,6 +1,21 @@
-"""B.1 live exit test (docs/M2.md §7.2, contract §3.10): halts through the halt lane mid-walk and mid-arm-stream.
+"""B.1 live exit test (docs/M2.md §7.2, contract §3.10): halts through the halt lane mid-walk, mid-arm-stream,
+during an arm_script IK, during chunk sessions, on a CarryLock hold, and with SONIC's free arms (M2b wave 2, body-fix
+B-D1..B-D3).
 
-    .venv/bin/python -m tools.halt_test [--walk 20] [--arm 5] [--out outputs/body_wave/halt-<ts>] [--port-offset N]
+    .venv/bin/python -m tools.halt_test [--walk 20] [--arm 5] [--script 20] [--chunk 10] [--carry 10] [--free-walks 3]
+                                        [--out outputs/body_wave/halt-<ts>] [--port-offset N]
+
+    --script N      halts 4-30 ms after an arm_script whose goal is out of reach (1.4 m above the pelvis: the longest
+                    IK, 150-250 ms): the halt must not wait for it (B-D1). Nothing moves; the arms must stay free.
+    --chunk N       halts mid-way through a synthetic chunk session (groot_arms' wire: mode chunk, 40-row chunks at
+                    2.5 Hz, lead 0.15, hands closing to --hand-closure); 3 poisoned chunks (+0.4 rad elbow) after the
+                    ack must be rejected and never reach the wire. Checked: the hand command after the halt = the
+                    last hand target (B-D2), the waist on the wire does not step (B-low), the session ends canceled.
+    --carry N       a CarryLock hold (a target stream closing the right hand to --carry-closure, ended hold_on_end
+                    target), then N halt + resume cycles: the hand command on the wire is unchanged and CarryLock
+                    stays engaged (B-D2).
+    --free-walks N  with no arm op: N walks before and N after a halt + resume while standing; the arms must stay
+                    SONIC's (no override on the wire) and swing as before (B-D3).
 
 Runs against a standing M1 stack, only through BodyClient (halt = PUSH 5612, receipt = body.halted on 5611).
 Per halt it records, from sources other than the body's own claims:
@@ -11,8 +26,9 @@ Per halt it records, from sources other than the body's own claims:
   command{stop} count (must stay 0), the upper-body / hand override;
 - arms (mid-arm-stream halts; g1_debug 5557): both palms (FK of the measured joints, pelvis frame) over the 2 s
   after the halt vs at the halt (drift), measured and commanded hand closure before/after (never opened).
-Pass (per the B.1 exit): receipt < 30 ms, upright, at rest within 1.5 s, 0 falls; arm halts: arms frozen at the
-measured pose (drift reported), hands not opened. Writes trials.json, summary.json, raw.npz.
+Pass (per the B.1 exit and the wave-2 bars): every receipt < 30 ms, body handling p99 < 10 ms, upright, at rest
+within 1.5 s, 0 falls; arm halts: arms held at the measured pose (drift reported), hand command = the last target;
+free arms stay free. Writes trials.json, summary.json, raw.npz.
 """
 
 from __future__ import annotations
@@ -208,6 +224,8 @@ class HaltTest:
     def __init__(self, a):
         off = a.port_offset if a.port_offset is not None else port_offset_from_env()
         self.a = a
+        self.off = off
+        self.script_warm = self.carry = self.free = None
         self.P = _ports(off)
         self.bc = BodyClient(port_offset=off).connect(15)
         self.tap = Tap(self.P)
@@ -380,6 +398,256 @@ class HaltTest:
             time.sleep(0.2)
         self.arms_released = (self.bc.status().get("mux") or {}).get("upper") is None
 
+    # -- B-D1: halts during an arm_script IK ----------------------------------------------------------------------
+    def script_trials(self, n: int) -> None:
+        bc2 = BodyClient(port_offset=self.off).connect(15)
+        try:
+            p = self.pose()
+            far = [p["x"] + 0.3 * math.cos(p["yaw"]), p["y"] + 0.3 * math.sin(p["yaw"]), p["pelvis_z"] + 1.4]
+            t0 = time.perf_counter()
+            warm = bc2.request("arm_script", {"phase": "grasp", "arm": "right", "target_w": far})
+            self.script_warm = {"reply": warm.get("error") or warm.get("state"), "ms": round((time.perf_counter() - t0)
+                                                                                            * 1e3, 1),
+                                "ik_ms": (warm.get("data") or {}).get("ik_ms")}
+            self.log(f"script warm-up: {self.script_warm}")
+            for i in range(n):
+                out = {}
+                ep_ = self.epoch
+
+                def go():
+                    t1 = time.perf_counter()
+                    out["t_req"] = time.monotonic()
+                    out["rep"] = bc2.request("arm_script", {"phase": "grasp", "arm": "right", "target_w": far,
+                                                            "control_epoch": ep_})
+                    out["ms"] = round((time.perf_counter() - t1) * 1e3, 1)
+
+                th = threading.Thread(target=go)
+                th.start()
+                time.sleep(random.uniform(0.004, 0.030))
+                t_lead = time.monotonic()
+                rec = self.halt_and_measure("script", {"i": i}, watch_s=1.0)
+                th.join(10)
+                r = out.get("rep") or {}
+                rec.update({"script_reply": r.get("error") or r.get("state"), "script_ms": out.get("ms"),
+                            "halt_after_request_ms": round((t_lead - out.get("t_req", t_lead)) * 1e3, 1),
+                            "ik_ms": (r.get("data") or {}).get("ik_ms"),
+                            "override_on_wire": any(x[2] is not None for x in self.tap.window(
+                                "plan", rec["t_send_mono"], rec["t_send_mono"] + 1.0))})
+                rec["overlapped"] = rec["script_reply"] == "halted"
+                self.trials.append(rec)
+                self.log(f"script {i}: rtt {rec['rtt_ms']} ms (body {rec['handle_ms']} ms), halt "
+                         f"{rec['halt_after_request_ms']} ms after the request, script {rec['script_reply']} after "
+                         f"{rec['script_ms']} ms, override {rec['override_on_wire']}")
+                rep = self.resume()
+                if not rep.get("ok"):
+                    self.log(f"resume failed: {rep}")
+        finally:
+            bc2.close()
+
+    # -- B-D1/B-D2/B-low: halts during chunk sessions ---------------------------------------------------------------
+    def chunk_trials(self, n: int) -> None:
+        k_el = jm.UPPER_BODY_MUJOCO_JOINTS.index("right_elbow_joint")
+        k_sl = jm.UPPER_BODY_MUJOCO_JOINTS.index("left_shoulder_pitch_joint")
+        k_sr = jm.UPPER_BODY_MUJOCO_JOINTS.index("right_shoulder_pitch_joint")
+        for i in range(n):
+            sid = f"halt-test-chunk-{i}-{int(time.time() * 1000) % 10 ** 8}"
+            ce = self.epoch
+            base = {"stream": sid, "session_id": sid, "execution_id": sid, "generation": 1, "control_epoch": ce,
+                    "mode": "chunk"}
+            q0 = self.bc_ref_mj17()
+            closure = self.a.hand_closure
+            t_start = time.monotonic()
+
+            def rows(t0: float, T: int = 40, poison: float = 0.0):
+                ub, lh, rh = [], [], []
+                for k in range(T):
+                    t = t0 + k * 0.02 - t_start
+                    q = list(q0)
+                    q[k_sl] += 0.15 * math.sin(2 * math.pi * 0.5 * t)
+                    q[k_sr] += 0.15 * math.sin(2 * math.pi * 0.5 * t + 1.0)
+                    q[k_el] += poison
+                    ub.append(q)
+                    c = min(closure, closure * max(0.0, t) / 1.0)
+                    lh.append(jm.hand_closure("left", c))
+                    rh.append(jm.hand_closure("right", c))
+                return ub, lh, rh
+
+            rep0 = self.bc.request("arm", {**base, "t_wall": time.time(), "hold_on_end": "measured", "lead_s": 0.15,
+                                           "left_hand": [0.0] * 7, "right_hand": [0.0] * 7})
+            if not rep0.get("ok"):
+                self.log(f"chunk {i}: session start rejected {rep0}")
+                self.resume()
+                continue
+            op_id = (rep0.get("data") or {}).get("id")
+            seq = [0]
+            sent_after_ack, rejected_after = [], collections.Counter()
+            last_hand = {}
+
+            def send_chunk(poison: float = 0.0, record_after: bool = False):
+                d = self.tap.last("dbg")
+                t0 = d[0] if d is not None else time.monotonic()
+                ub, lh, rh = rows(t0, poison=poison)
+                seq[0] += 1
+                r = self.bc.request("arm", {**base, "t_wall": time.time(), "chunk": {
+                    "seq": seq[0], "t0_mono": t0, "dt": 0.02, "order": "mj17", "upper_body": ub, "left_hand": lh,
+                    "right_hand": rh, "inference_ms": 150.0}})
+                if record_after:
+                    sent_after_ack.append(round(time.monotonic(), 4))
+                    if not r.get("ok"):
+                        rejected_after[r.get("error")] += 1
+                return r
+
+            halt_at = random.uniform(1.6, 3.0)
+            nxt = time.monotonic()
+            while time.monotonic() - t_start < halt_at:
+                send_chunk()
+                nxt += 0.4
+                time.sleep(max(0.0, nxt - time.monotonic()))
+            plan_before = self.tap.last("plan")
+            dbg_before = self.tap.last("dbg")
+            rec = self.halt_and_measure("chunk", {"i": i, "session_id": sid, "arm_op": op_id}, watch_s=0.05)
+            for _ in range(3):                             # in flight when the halt came: must never play
+                send_chunk(poison=0.4, record_after=True)
+                time.sleep(0.05)
+            time.sleep(max(0.0, self.a.arm_watch_s - 0.2))
+            t_h = rec["t_send_mono"]
+            rec.update(self.arm_metrics(t_h, dbg_before, plan_before))
+            plan_after = self.tap.window("plan", t_h, t_h + 1.0)
+            ups = [x for x in plan_after if x[2] is not None]
+            pb = plan_before[2] if plan_before is not None else None
+            if ups and pb is not None:
+                pb17 = jm.mj17_from_wire(pb)
+                a17 = [jm.mj17_from_wire(x[2]) for x in ups]
+                rec["waist_step_after_halt_rad"] = round(max(max(abs(q[k] - pb17[k]) for k in range(3)) for q in a17), 4)
+                rec["poison_on_wire"] = any(q[k_el] > pb17[k_el] + 0.3 for q in a17)
+                rec["hand_cmd_equal_last_target"] = all(
+                    x[3] is not None and plan_before[3] is not None and
+                    max(abs(u - v) for u, v in zip(x[3], plan_before[3])) < 1e-4 and
+                    max(abs(u - v) for u, v in zip(x[4], plan_before[4])) < 1e-4 for x in ups)
+            rec["chunks_sent_after_ack"] = len(sent_after_ack)
+            rec["chunks_rejected_after_ack"] = dict(rejected_after)
+            ev = self.find_terminal(op_id)
+            rec["arm_terminal"] = None if ev is None else {"state": ev.get("state"),
+                                                           "ended_by": (ev.get("data") or {}).get("ended_by"),
+                                                           "hold": (ev.get("data") or {}).get("hold")}
+            rec["arm_latch_applied"] = (self.bc.status().get("arm") or {}).get("latch")
+            self.trials.append(rec)
+            self.log(f"chunk {i}: rtt {rec['rtt_ms']} ms (body {rec['handle_ms']} ms), after the ack "
+                     f"{rec['chunks_sent_after_ack']} sent / rejected {rec['chunks_rejected_after_ack']}, poison on "
+                     f"wire {rec.get('poison_on_wire')}, waist step {rec.get('waist_step_after_halt_rad')} rad, hand "
+                     f"cmd = last target {rec.get('hand_cmd_equal_last_target')}, op {rec['arm_terminal']}")
+            rep = self.resume()
+            if not rep.get("ok"):
+                self.log(f"resume failed: {rep}")
+            if rec["fell"]:
+                break
+        self.release_arms()
+
+    # -- B-D2: CarryLock through repeated halts -------------------------------------------------------------------
+    def carry_trials(self, n: int) -> None:
+        stream = f"halt-test-carry-{int(time.time())}"
+        ce = self.epoch
+        for _ in range(40):                             # close the right hand on "an object" at SONIC's arm pose
+            self.bc.request("arm", {"stream": stream, "right_hand": self.a.carry_closure, "left_hand": 0.0,
+                                    "control_epoch": ce, "t_wall": time.time()})
+            time.sleep(0.05)
+        time.sleep(0.5)
+        r = self.bc.request("arm", {"stream": stream, "end": True, "hold_on_end": "target", "control_epoch": ce})
+        time.sleep(1.5)
+
+        def carry_state():
+            a = self.bc.status().get("arm") or {}
+            c = a.get("carry") or {}
+            return {"engaged": c.get("engaged"), "hold": (a.get("hold") or {}).get("kind"), "mode": a.get("mode"),
+                    "closure": (a.get("hold") or {}).get("closure")}
+
+        def wire_hands():
+            x = self.tap.last("plan")
+            return None if x is None or x[3] is None else (list(x[3]), list(x[4]))
+
+        self.carry = {"end_reply": r.get("state") or r.get("error"), "before": carry_state(), "cycles": []}
+        h0 = wire_hands()
+        d0 = self.tap.last("dbg")
+        self.carry["hand_cmd_closure_before"] = None if h0 is None else round(jm.hand_closure_of("right", h0[1]), 4)
+        self.carry["hand_meas_closure_before"] = None if d0 is None or d0[3] is None else round(
+            jm.hand_closure_of("right", d0[3]), 4)
+        for i in range(n):
+            rec = self.halt_and_measure("carry", {"i": i}, watch_s=0.6)
+            latched = carry_state()
+            h1 = wire_hands()
+            self.resume()
+            time.sleep(0.4)
+            after = carry_state()
+            h2 = wire_hands()
+            same = h0 is not None and h1 is not None and h2 is not None and all(
+                max(abs(u - v) for u, v in zip(a, b)) < 1e-5 for a, b in ((h0[0], h1[0]), (h0[1], h1[1]),
+                                                                         (h0[0], h2[0]), (h0[1], h2[1])))
+            rec.update({"carry_latched": latched, "carry_after_resume": after, "hand_cmd_unchanged": same,
+                        "hand_cmd_closure": None if h2 is None else round(jm.hand_closure_of("right", h2[1]), 4)})
+            self.trials.append(rec)
+            self.carry["cycles"].append({"i": i, "engaged_latched": latched["engaged"],
+                                         "engaged_after": after["engaged"], "hand_cmd_unchanged": same,
+                                         "hand_cmd_closure": rec["hand_cmd_closure"]})
+            self.log(f"carry {i}: rtt {rec['rtt_ms']} ms, CarryLock latched {latched['engaged']} / after resume "
+                     f"{after['engaged']}, hand cmd unchanged {same} (closure {rec['hand_cmd_closure']})")
+        d1 = self.tap.last("dbg")
+        self.carry["hand_meas_closure_after"] = None if d1 is None or d1[3] is None else round(
+            jm.hand_closure_of("right", d1[3]), 4)
+        self.release_arms()
+
+    # -- B-D3: free arms through a halt ----------------------------------------------------------------------------
+    def free_walk_trials(self, n: int) -> None:
+        self.release_arms()
+        st = self.bc.status().get("arm") or {}
+        self.free = {"arm_mode_before": st.get("mode"), "before": [], "after": []}
+
+        def walk_once(label: str, i: int) -> dict:
+            p = self.pose()
+            heading = wrap(p["yaw"] + (math.pi if i % 2 else 0.0))
+            self.bc.turn_to(heading, timeout=40)
+            t0 = time.monotonic()
+            hw = self.bc.walk(vx=self.a.vx, duration_s=3.0)
+            t1 = time.monotonic()
+            dbg = self.tap.window("dbg", t0 + 1.0, t1 - 0.3)
+            plan = self.tap.window("plan", t0, t1)
+            sp = [(r[1][jm.MJ["left_shoulder_pitch_joint"]], r[1][jm.MJ["right_shoulder_pitch_joint"]]) for r in dbg]
+            swing = None if not sp else [round(float(np.ptp([x[k] for x in sp])), 4) for k in (0, 1)]
+            out = {"i": i, "walk": hw.state, "shoulder_pitch_swing_rad": swing,
+                   "override_frac": None if not plan else round(sum(1 for x in plan if x[2] is not None) / len(plan), 4)}
+            self.log(f"free walk {label} {i}: {out}")
+            return out
+
+        for i in range(n):
+            self.free["before"].append(walk_once("before", i))
+        rec = self.halt_and_measure("free", {"i": 0}, watch_s=1.0)
+        rec["arm_mode_latched"] = (self.bc.status().get("arm") or {}).get("mode")
+        rec["override_on_wire_latched"] = any(x[2] is not None for x in self.tap.window(
+            "plan", rec["t_send_mono"], rec["t_send_mono"] + 1.0))
+        self.trials.append(rec)
+        self.resume()
+        time.sleep(0.5)
+        self.free["arm_mode_after_resume"] = (self.bc.status().get("arm") or {}).get("mode")
+        for i in range(n):
+            self.free["after"].append(walk_once("after", i))
+        self.free["halt"] = {k: rec.get(k) for k in ("rtt_ms", "handle_ms", "arms_latched", "arm_mode_latched",
+                                                     "override_on_wire_latched")}
+
+    def release_arms(self) -> None:
+        """Give the arms back to SONIC (stop {arms}) and wait until the override is off the wire."""
+        self.bc.stop(arms=True)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 6.0 and (self.bc.status().get("mux") or {}).get("upper") is not None:
+            time.sleep(0.2)
+
+    def find_terminal(self, op_id, timeout: float = 2.0):
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            for _, ev in list(self.events):
+                if ev.get("id") == op_id and ev.get("state") in ("succeeded", "failed", "canceled"):
+                    return ev
+            time.sleep(0.05)
+        return None
+
     def bc_ref_mj17(self):
         d = self.tap.last("dbg")
         return jm.mj17_from_mujoco(d[1]) if d is not None else list(jm.DEFAULT_ANGLES[12:29])
@@ -426,8 +694,38 @@ class HaltTest:
         tr = self.trials
         walk = [t for t in tr if t["kind"] == "walk"]
         arm = [t for t in tr if t["kind"] == "arm"]
-        s = {"n_walk": len(walk), "n_arm": len(arm),
+        script = [t for t in tr if t["kind"] == "script"]
+        chunk = [t for t in tr if t["kind"] == "chunk"]
+        carry = [t for t in tr if t["kind"] == "carry"]
+        free = [t for t in tr if t["kind"] == "free"]
+        hm = [t["handle_ms"] for t in tr if t["handle_ms"] is not None]
+        s = {"n_walk": len(walk), "n_arm": len(arm), "n_script": len(script), "n_chunk": len(chunk),
+             "n_carry": len(carry), "n_free": len(free),
              "rtt_ms": stats([t["rtt_ms"] for t in tr]), "handle_ms": stats([t["handle_ms"] for t in tr]),
+             "handle_ms_p99": pct(hm, 99),
+             "by_kind": {k: {"rtt_ms": stats([t["rtt_ms"] for t in tr if t["kind"] == k]),
+                             "handle_ms": stats([t["handle_ms"] for t in tr if t["kind"] == k]),
+                             "handle_ms_p99": pct([t["handle_ms"] for t in tr if t["kind"] == k and
+                                                   t["handle_ms"] is not None], 99)}
+                         for k in ("walk", "arm", "script", "chunk", "carry", "free") if any(t["kind"] == k for t in tr)},
+             "script": {"warm": getattr(self, "script_warm", None),
+                        "overlapped": sum(1 for t in script if t.get("overlapped")),
+                        "replies": dict(collections.Counter(t.get("script_reply") for t in script)),
+                        "script_ms": stats([t.get("script_ms") for t in script]),
+                        "override_on_wire": sum(1 for t in script if t.get("override_on_wire"))},
+             "chunk": {"arms_latched": sum(1 for t in chunk if t["arms_latched"]),
+                       "chunks_sent_after_ack": sum(t.get("chunks_sent_after_ack", 0) for t in chunk),
+                       "chunks_rejected_after_ack": dict(sum((collections.Counter(t.get("chunks_rejected_after_ack")
+                                                                                  or {}) for t in chunk),
+                                                             collections.Counter())),
+                       "poison_on_wire": sum(1 for t in chunk if t.get("poison_on_wire")),
+                       "waist_step_after_halt_rad": stats([t.get("waist_step_after_halt_rad") for t in chunk]),
+                       "hand_cmd_equal_last_target": sum(1 for t in chunk if t.get("hand_cmd_equal_last_target")),
+                       "canceled_halt": sum(1 for t in chunk if (t.get("arm_terminal") or {}).get("ended_by") == "halt"),
+                       "palm_drift_mm": stats([max(t["palm_drift_mm"].values()) for t in chunk
+                                               if "palm_drift_mm" in t])},
+             "carry": getattr(self, "carry", None),
+             "free": getattr(self, "free", None),
              "acked": sum(1 for t in tr if t["acked"]),
              "rtt_under_30ms": sum(1 for t in tr if t["rtt_ms"] is not None and t["rtt_ms"] < 30.0),
              "falls": sum(1 for t in tr if t["fell"]),
@@ -452,6 +750,7 @@ class HaltTest:
              "arms_released_after": getattr(self, "arms_released", None)}
         s["pass"] = {
             "receipt_under_30ms": s["rtt_under_30ms"] == len(tr) and s["acked"] == len(tr),
+            "handle_p99_under_10ms": s["handle_ms_p99"] is not None and s["handle_ms_p99"] < 10.0,
             "zero_falls": s["falls"] == 0,
             "at_rest_1p5s": s["at_rest_within_1p5s"] == len(walk),
             "upright": s["pelvis_z_min"] is not None and s["pelvis_z_min"] >= 0.55,
@@ -459,6 +758,26 @@ class HaltTest:
             "arms_latched": s["arms_latched"] == len(arm),
             "hands_not_opened": s["hands_opened"] == 0,
         }
+        if script:
+            s["pass"]["script_arms_free"] = s["script"]["override_on_wire"] == 0 and \
+                not any(t["arms_latched"] for t in script)
+        if chunk:
+            c = s["chunk"]
+            s["pass"]["chunk_latched_and_fenced"] = c["arms_latched"] == len(chunk) and c["poison_on_wire"] == 0 and \
+                c["chunks_rejected_after_ack"].get("halted", 0) == c["chunks_sent_after_ack"] and \
+                c["canceled_halt"] == len(chunk)
+            s["pass"]["chunk_hand_cmd_is_last_target"] = c["hand_cmd_equal_last_target"] == len(chunk)
+            s["pass"]["chunk_no_waist_step"] = (c["waist_step_after_halt_rad"]["max"] or 0.0) < 0.02
+        if carry:
+            cy = (getattr(self, "carry", None) or {}).get("cycles") or []
+            s["pass"]["carrylock_kept"] = bool(cy) and all(x["engaged_latched"] and x["engaged_after"] and
+                                                           x["hand_cmd_unchanged"] for x in cy)
+        if free:
+            f = getattr(self, "free", None) or {}
+            s["pass"]["free_arms_stay_free"] = not any(t["arms_latched"] or t.get("override_on_wire_latched")
+                                                       for t in free) and \
+                all((w.get("override_frac") or 0.0) == 0.0 for w in f.get("after", [])) and \
+                f.get("arm_mode_after_resume") == "off"
         s["all_pass"] = all(s["pass"].values())
         return s
 
@@ -524,6 +843,11 @@ def main(argv=None) -> int:
     ap.add_argument("--analyze", help="recompute the metrics of a finished run dir (raw.npz + trials.json)")
     ap.add_argument("--walk", type=int, default=20)
     ap.add_argument("--arm", type=int, default=5)
+    ap.add_argument("--script", type=int, default=0, help="halts during an unreachable arm_script IK (B-D1)")
+    ap.add_argument("--chunk", type=int, default=0, help="halts during synthetic chunk sessions")
+    ap.add_argument("--carry", type=int, default=0, help="halt + resume cycles on a CarryLock hold (B-D2)")
+    ap.add_argument("--free-walks", type=int, default=0, help="walks before/after a halt with free arms (B-D3)")
+    ap.add_argument("--carry-closure", type=float, default=0.99)
     ap.add_argument("--vx", type=float, default=0.45)
     ap.add_argument("--epoch0", type=int, default=int(time.time()) % 100000 * 10)
     ap.add_argument("--hand-closure", type=float, default=0.6)
@@ -549,8 +873,16 @@ def main(argv=None) -> int:
         return 2
     t.log(f"start: mode {st.get('mode')}, pose {st.get('pose')}, epoch0 {t.epoch}")
     try:
+        if a.free_walks:
+            t.free_walk_trials(a.free_walks)
         if a.walk:
             t.walk_trials(a.walk)
+        if a.script:
+            t.script_trials(a.script)
+        if a.chunk:
+            t.chunk_trials(a.chunk)
+        if a.carry:
+            t.carry_trials(a.carry)
         if a.arm:
             t.arm_trials(a.arm)
     finally:

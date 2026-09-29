@@ -126,7 +126,7 @@ def test_servo_gated_model_cuts_the_step_overshoot_and_keeps_static_accuracy():
 
 
 # ------------------------------------------------------------------------------------------------ halt latch
-def test_latch_freezes_measured_pose_keeps_hands_and_rejects_stale_epochs():
+def test_latch_freezes_measured_pose_keeps_hand_targets_and_rejects_stale_epochs():
     rig = Rig({"arm_servo_ki": 0.0, "arm_blend_s": 0.3})
     ch = rig.ch
     q0 = ch.reference_mj17()
@@ -135,17 +135,18 @@ def test_latch_freezes_measured_pose_keeps_hands_and_rejects_stale_epochs():
     assert rig.arm({**base(epoch=2), "right_hand": half, "left_hand": 0.0,
                     "chunk": chunk(1, rig.clock(), rows, hands=0.5)}, op_id="c1")["ok"]
     rig.run(0.4)
-    meas_hands = {s: list(rig.dep.latest[f"{s}_hand_q"]) for s in ("left", "right")}
     q_meas = rig.q()
     sent_at = rig.sent()
+    hands_at = (list(rig.mux.upper[2]), list(rig.mux.upper[3]))          # the hand TARGETS on the wire
     t0 = time.perf_counter()
     info = ch.latch(2, "halt")
     ms = (time.perf_counter() - t0) * 1e3
-    assert info["latched"] and info["pose_source"] == "g1_debug.body_q" and info["ended_op"] == "c1"
+    assert info["latched"] and info["arms"] == "held" and info["op"] == "c1" and info["pending"]
     assert ms < 5.0 and info["latch_ms"] < 5.0
     assert rig.sent() == pytest.approx(sent_at, abs=1e-12)      # the wire froze at once: no new row after the ack
+    assert rig.mux.upper[1] == pytest.approx([0.0] * 17)          # ... with zero velocity
     assert ch.state()["mode"] == "latched"
-    # the terminal event is queued (no I/O in latch) and published by the next tick
+    # the rest is applied by the next tick (the lane never takes the arm lock); its terminal event comes with it
     assert rig.terminal("c1") is None
     d_prev = abs(rig.sent()[R_ELBOW] - q_meas[R_ELBOW])
     for _ in range(25):
@@ -156,14 +157,18 @@ def test_latch_freezes_measured_pose_keeps_hands_and_rejects_stale_epochs():
     assert rig.sent()[R_ELBOW] == pytest.approx(q_meas[R_ELBOW], abs=1e-9)
     ev = rig.terminal("c1")
     assert ev["state"] == "canceled" and ev["data"]["ended_by"] == "halt" and ev["data"]["hold"] == "measured"
-    # hands: the measured q at the latch, never opened, never a fist
-    assert rig.mux.upper[2] == pytest.approx(meas_hands["left"]) and rig.mux.upper[3] == pytest.approx(meas_hands["right"])
+    li = ch.latch_info
+    assert li["case"] == "session" and li["pose_source"] == "g1_debug.body_q" and li["hands_source"] == "last_target"
+    assert li["waist"] == "ref"
+    # hands: the last TARGET at the latch (B-D2: never the measured q, which lags and ratchets a grip open)
+    assert rig.mux.upper[2] == pytest.approx(hands_at[0]) and rig.mux.upper[3] == pytest.approx(hands_at[1])
     # rejected while latched, whatever the epoch; stale epochs rejected for good
     for ep in (1, 2, 3):
         assert rig.arm({**base("s9", epoch=ep), "chunk": chunk(1, rig.clock(), rows)})["error"] == "halted"
     assert rig.arm({"stream": "legacy", "upper_body": q0})["error"] == "halted"
     assert ch.end("stop") is False and ch.state()["mode"] == "latched"
     assert ch.handle_scan("sc", {}, (True, None, {}))["error"] == "halted"
+    assert ch.handle_arm_script("as", {"phase": "release", "arm": "left"}, (True, None, {}))["error"] == "halted"
     ch.unlatch(1)                                               # an older resume does not open a newer latch
     assert ch.state()["mode"] == "latched"
     ch.unlatch(2)
@@ -183,7 +188,10 @@ def test_latch_freezes_measured_pose_keeps_hands_and_rejects_stale_epochs():
 def test_latch_then_end_blends_back_after_resume():
     rig = Rig({"arm_blend_s": 0.3})
     q0 = rig.ch.reference_mj17()
+    rig.arm({"stream": "x0", "upper_body": q0}, op_id="t0")         # a v0.5 stream owns the arms
+    rig.run(0.1)
     rig.ch.latch(5)
+    rig.run(DT)
     assert rig.mux.upper is not None and rig.ch.state()["mode"] == "latched"
     assert rig.arm({"stream": "x", "end": True})["error"] == "halted"
     rig.ch.unlatch(5)
@@ -387,3 +395,235 @@ def test_latch_with_servo_does_not_step_the_wire_and_settles_on_the_halt_point()
     assert max(steps[:5]) < 0.01, steps[:5]                      # no step at the latch
     assert abs(rig.q()[R_ELBOW] - q_halt[R_ELBOW]) < 0.01          # settled on the halt point (it was moving)
     assert abs(rig.q()[k_wp] - q_halt[k_wp]) < 0.02                # the untracked wrist stays where it was
+
+
+# ------------------------------------------------------------------------------------------------ wave 2 (body-fix)
+def test_latch_never_waits_for_the_arm_lock():
+    """B-D1: a handler or tick holding the arm lock (live: an arm_script IK, 198-233 ms) must not delay a halt."""
+    import threading
+
+    rig = Rig()
+    q0 = rig.ch.reference_mj17()
+    rig.arm({**base(), "chunk": chunk(1, rig.clock(), [q0] * 40)}, op_id="c1")
+    rig.run(0.1)
+    held, release = threading.Event(), threading.Event()
+
+    def hog():
+        with rig.ch._lock:
+            held.set()
+            release.wait(2.0)
+
+    th = threading.Thread(target=hog)
+    th.start()
+    assert held.wait(1.0)
+    t0 = time.perf_counter()
+    info = rig.ch.latch(3)
+    ms = (time.perf_counter() - t0) * 1e3
+    release.set()
+    th.join()
+    assert ms < 5.0 and info["latched"] and info["froze_wire"], (ms, info)
+    assert rig.arm({**base(), "chunk": chunk(2, rig.clock(), [q0] * 40)})["error"] == "halted"
+    rig.run(DT)
+    assert rig.terminal("c1")["data"]["ended_by"] == "halt"
+
+
+def test_a_halt_during_a_tick_never_commits_that_ticks_pose():
+    """The lane latches while the control thread is inside a tick: the tick must not put its (newer) pose on the
+    wire after the freeze; the next tick applies the latch."""
+    rig = Rig({"arm_servo_ki": 0.0, "arm_max_vel": 50.0})
+    ch = rig.ch
+    q0 = ch.reference_mj17()
+    rig.arm({**base(), "lead_s": 0.0, "chunk": chunk(1, rig.clock(), _ramp_rows(q0, R_ELBOW, 1.0))}, op_id="c1")
+    rig.run(0.2)
+    orig = ch._servo
+    fired = []
+
+    def servo_and_halt(*a):
+        orig(*a)
+        if not fired:
+            fired.append(ch.latch(4))                       # "the lane", mid-tick
+
+    ch._servo = servo_and_halt
+    frozen = rig.sent()
+    rig.clock.t += DT
+    ch.tick(rig.clock.t)                                    # the tick that was running when the halt came
+    assert fired and rig.sent() == pytest.approx(frozen, abs=1e-12)
+    assert ch.stats["ticks_skipped_latch"] == 1 and rig.terminal("c1") is None
+    rig.run(DT)                                             # the next tick applies it
+    assert rig.terminal("c1")["data"]["ended_by"] == "halt" and ch.hold.kind == "latched"
+    assert abs(rig.sent()[R_ELBOW] - frozen[R_ELBOW]) <= 50.0 * DT + 1e-9
+
+
+def test_latch_leaves_free_arms_free_and_resume_gives_them_back():
+    """B-D3: with no arm op, a halt adds no override (SONIC keeps swinging its own arms while walking), arm messages
+    are still `halted` while latched, and after the resume the arms are exactly as free as before."""
+    rig = Rig()
+    ch = rig.ch
+    assert rig.mux.upper is None
+    info = ch.latch(7)
+    assert info["latched"] is False and info["arms"] == "free" and not info["froze_wire"]
+    rig.run(0.5)
+    assert rig.mux.upper is None and rig.mux.log == [] and ch.state()["mode"] == "off"
+    assert ch.state()["latched"] and ch.state()["arms"] == "free" and ch.latch_info["case"] == "off"
+    assert rig.arm({"stream": "a", "upper_body": ch.reference_mj17()})["error"] == "halted"
+    ch.unlatch(7)
+    rig.run(0.5)
+    assert rig.mux.upper is None and ch.state() == {**ch.state(), "mode": "off", "latched": False, "arms": "free"}
+    # the next owner starts normally after the resume
+    assert rig.arm({"stream": "b", "upper_body": ch.reference_mj17(), "control_epoch": 8}, op_id="b")["ok"]
+
+
+def test_repeated_halts_keep_carrylock_and_the_hand_targets():
+    """B-D2: a CarryLock hold (a chunk session ended `target` with the left hand closed) through 10 halt/resume
+    cycles: the hold, the hand command on the wire and CarryLock are unchanged, even though the measured hand stops
+    short of its target (hand_gain 0.93: an object in the hand), which the old latch copied (0.9936 -> 0.9461 live)."""
+    rig = Rig(plant_kw={"hand_gain": 0.93})
+    ch = rig.ch
+    q0 = ch.reference_mj17()
+    rows = _ramp_rows(q0, L_SHP, -0.4)
+    rig.arm({**base("g1"), "lead_s": 0.0, "chunk": chunk(1, rig.clock(), rows, hands=0.9)}, op_id="g1")
+    rig.run(0.6)
+    rig.arm({**base("g1"), "end": True, "hold_on_end": "target"})
+    rig.run(0.5)
+    assert ch.snapshot()["carry"]["engaged"]
+    pose0, hands0 = list(ch.hold.pose), (list(rig.mux.upper[2]), list(rig.mux.upper[3]))
+    assert jm.hand_closure_of("left", rig.dep.latest["left_hand_q"]) < 0.9 * 0.95   # the hand lags its target
+    for n in range(10):
+        ch.latch(10 + n)
+        rig.run(0.2)
+        snap = ch.snapshot()
+        assert snap["mode"] == "latched" and snap["carry"]["engaged"] and ch.hold.kind == "target"
+        assert (list(rig.mux.upper[2]), list(rig.mux.upper[3])) == hands0
+        ch.unlatch(10 + n)
+        rig.run(0.1)
+    assert ch.hold.kind == "target" and ch.hold.pose == pose0 and ch.snapshot()["carry"]["engaged"]
+    assert (list(rig.mux.upper[2]), list(rig.mux.upper[3])) == hands0
+    assert ch.latch_info["case"] == "hold" and ch.latch_info["carry"] is True
+
+
+def test_repeated_halts_of_sessions_never_ratchet_the_grip():
+    """B-D2 with sessions: each cycle a new session (newer epoch) takes the latched pose over and is halted again;
+    the hand command stays the session's target, never the (lagging) measured closure."""
+    rig = Rig(plant_kw={"hand_gain": 0.93})
+    ch = rig.ch
+    q0 = ch.reference_mj17()
+    target = jm.hand_closure("right", 0.95)
+    for n in range(10):
+        sid = f"s{n}"
+        rep = rig.arm({**base(sid, epoch=n + 1), "chunk": chunk(1, rig.clock(), [q0] * 40, hands=target)})
+        assert rep["ok"], rep
+        rig.run(0.4)
+        ch.latch(n + 1)
+        rig.run(0.1)
+        assert rig.mux.upper[3] == pytest.approx(target, abs=1e-9), n
+        ch.unlatch(n + 1)
+    assert jm.hand_closure_of("right", rig.mux.upper[3]) == pytest.approx(0.95, abs=1e-6)
+
+
+def test_latch_keeps_the_sessions_waist():
+    """B-low: a session sending SONIC's reference waist (the default) must not get the MEASURED waist at a halt
+    (live: a 0.12-0.14 rad waist step at every arm/chunk halt); a session commanding the waist keeps its value."""
+    rig = Rig({"arm_max_vel": 50.0})
+    rig.plant.bias[0] = 0.13                                  # SONIC's waist yaw sits 0.13 rad off its reference
+    ch = rig.ch
+    q0 = ch.reference_mj17()
+    rig.arm({**base(), "chunk": chunk(1, rig.clock(), [q0] * 40)}, op_id="c1")
+    rig.run(0.5)
+    assert abs(rig.q()[0] - q0[0]) > 0.1                       # measured waist != reference
+    w_before = rig.sent()[0:3]
+    ch.latch(2)
+    rig.run(0.5)
+    assert rig.sent()[0:3] == pytest.approx(w_before, abs=1e-9)
+    assert ch.hold.waist_mode == "ref" and ch.latch_info["waist"] == "ref"
+    # waist "cmd" (a v0.5 client naming the waist): the value it sent is held
+    ch.unlatch(2)
+    rig.arm({"stream": "v", "upper_body": {"waist_yaw_joint": 0.2}, "control_epoch": 3}, op_id="v")
+    rig.run(0.5)
+    w_cmd = rig.sent()[0:3]
+    assert w_cmd[0] == pytest.approx(0.2, abs=1e-6)
+    ch.latch(4)
+    rig.run(0.5)
+    assert rig.sent()[0:3] == pytest.approx(w_cmd, abs=1e-9) and ch.hold.waist_mode == "cmd"
+
+
+def test_measured_hold_on_end_keeps_the_waist_too():
+    rig = Rig()
+    rig.plant.bias[0] = 0.13
+    q0 = rig.ch.reference_mj17()
+    rig.arm({**base(), "chunk": chunk(1, rig.clock(), [q0] * 40)}, op_id="c1")
+    rig.run(0.5)
+    w = rig.sent()[0:3]
+    rig.arm({**base(), "end": True, "hold_on_end": "measured"})
+    rig.run(0.5)
+    assert rig.ch.hold.kind == "measured" and rig.ch.hold.waist_mode == "ref"
+    assert rig.sent()[0:3] == pytest.approx(w, abs=1e-9)
+
+
+def test_latch_pauses_a_blend_and_resume_finishes_it():
+    rig = Rig({"arm_blend_s": 1.0, "arm_servo_ki": 0.0})
+    ch = rig.ch
+    q0 = ch.reference_mj17()
+    far = list(q0)
+    far[R_ELBOW] += 0.5
+    rig.arm({"stream": "a", "upper_body": far}, op_id="a")
+    rig.run(0.6)
+    assert ch.end("stop")
+    rig.run(0.3)                                                # mid-blend
+    ch.latch(5)
+    rig.run(DT)
+    frozen = rig.sent()
+    rig.run(1.5)                                                # longer than the blend: it must not finish
+    assert rig.sent() == pytest.approx(frozen, abs=1e-12) and ch.state()["mode"] == "latched"
+    assert rig.terminal("a")["data"]["ended_by"] == "halt" and ch.latch_info["case"] == "blend"
+    ch.unlatch(5)
+    rig.run(1.2)
+    assert rig.mux.upper is None and ch.state()["mode"] == "off"   # free again, as before the halt
+
+
+def test_v05_end_during_the_watchdog_hold_succeeds():
+    """B-low: the client's `end` while its stream sits in the watchdog hold is a client end (succeeded), not
+    client_silent."""
+    rig = Rig({"arm_hold_s": 1.0, "arm_blend_s": 0.3})
+    q0 = rig.ch.reference_mj17()
+    rig.arm({"stream": "A", "upper_body": q0}, op_id="t1")
+    rig.run(0.5)                                                # 0.3 s watchdog -> hold
+    assert rig.ch.hold is not None and rig.ch.hold.kind == "watchdog"
+    assert rig.arm({"stream": "A", "end": True})["ok"]
+    rig.run(0.5)
+    ev = rig.terminal("t1")
+    assert ev["state"] == "succeeded" and ev["data"]["ended_by"] == "client" and ev["data"]["reason"] is None
+
+
+def test_chunk_session_fence_covers_end_release_and_keepalive():
+    """B-low: every message acting on a chunk session's stream is fenced, not only chunk-mode ones."""
+    rig = Rig()
+    ch = rig.ch
+    q0 = ch.reference_mj17()
+    rig.arm({**base("g", gen=2, epoch=5), "chunk": chunk(1, rig.clock(), [q0] * 40)}, op_id="g")
+    rig.run(0.1)
+    # without the session fields: bad_args; with another / older session: stale_session; nothing changes
+    for msg in ({"stream": "g", "end": True}, {"stream": "g", "release": True}, {"stream": "g", "keepalive": True}):
+        with pytest.raises(ArmError) as e:
+            rig.arm(msg)
+        assert e.value.reason == "bad_args"
+    for extra in ({"session_id": "old"}, {"generation": 1}, {"control_epoch": 4}):
+        for act in ({"end": True}, {"release": True}, {"keepalive": True}):
+            m = {"stream": "g", "session_id": "g", "generation": 2, "control_epoch": 5, **extra, **act}
+            assert rig.arm(m)["error"] == "stale_session", m
+    assert ch.state()["mode"] == "chunk"
+    # its own end (no mode field) ends it into a target hold; a stale release of that hold is refused, its own works
+    assert rig.arm({"stream": "g", "session_id": "g", "generation": 2, "control_epoch": 5, "end": True,
+                    "hold_on_end": "target"})["ok"]
+    assert ch.hold.kind == "target" and ch.hold.fence["session_id"] == "g"
+    assert rig.arm({"stream": "g", "session_id": "g0", "release": True})["error"] == "stale_session"
+    assert rig.arm({"stream": "g", "session_id": "g", "keepalive": True, "mode": "chunk", "generation": 2,
+                    "control_epoch": 5})["error"] == "stale_session"      # the session is over
+    assert rig.arm({"stream": "g", "session_id": "g", "release": True})["data"]["released"] == "target"
+    rig.run(2.0)
+    assert rig.mux.upper is None
+
+
+def test_stale_t_wall_says_why():
+    rig = Rig()
+    rep = rig.arm({"stream": "A", "upper_body": rig.ch.reference_mj17(), "t_wall": time.time() - 5.0})
+    assert rep["error"] == "stale_command" and rep["data"]["why"] == "t_wall" and rep["data"]["age_s"] > 4.0

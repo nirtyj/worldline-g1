@@ -88,9 +88,9 @@ def test_arm_script_rejections_change_nothing():
     rig = Rig(pose=_pose())
     ch = rig.ch
     far_w = pelvis_to_world([1.0, -0.2, 0.1], rig.pose).tolist()
-    with pytest.raises(ArmError) as e:
-        ch.handle_arm_script("x", {"phase": "grasp", "arm": "right", "target_w": far_w}, OK)
-    assert e.value.reason == "ik_unreachable" and ch.state()["mode"] == "off" and rig.mux.upper is None
+    rep = ch.handle_arm_script("x", {"phase": "grasp", "arm": "right", "target_w": far_w}, OK)
+    assert rep["state"] == "rejected" and rep["error"] == "ik_unreachable" and rep["data"]["ik_err_m"] > 0.02
+    assert ch.state()["mode"] == "off" and rig.mux.upper is None
     for bad in ({"phase": "wave", "arm": "right"}, {"phase": "grasp", "arm": "right"},
                 {"phase": "grasp", "arm": "middle", "target_w": far_w}, {"phase": "grasp", "arm": "left",
                                                                          "target_w": [1, 2]}):
@@ -104,9 +104,8 @@ def test_arm_script_rejections_change_nothing():
     assert ch.handle_arm_script("b", {"phase": "release", "arm": "left"}, OK)["error"] == "arm_busy"
     assert rig.arm({"stream": "c", "upper_body": ch.reference_mj17()})["error"] == "arm_busy"
     ch.latch(1)
-    ch.flush()
-    assert rig.terminal("a")["data"]["ended_by"] == "halt"
     assert ch.handle_arm_script("b", {"phase": "release", "arm": "left"}, OK)["error"] == "halted"
+    assert rig.terminal("a")["data"]["ended_by"] == "halt"          # applied by that handler (or the next tick)
 
 
 def test_ik_locks_the_wrist_pitch_and_yaw():
@@ -271,3 +270,162 @@ def test_grasp_tracks_the_world_goal_when_the_pelvis_steps_back():
         if track:
             assert ev["data"]["track_updates"] >= 1 and ev["data"]["pelvis_shift_m"] == pytest.approx(0.04, abs=1e-3)
     assert out[False] > 0.03 and out[True] < 0.01, out
+
+
+# ------------------------------------------------------------------------------------------------ wave 2 (body-fix)
+class ManualIK:
+    """An IK worker whose answers the test releases (the service's worker process answers 2-230 ms later)."""
+
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, fn, *args):
+        import concurrent.futures as cf
+
+        f = cf.Future()
+        self.jobs.append((f, fn, args))
+        return f
+
+    def run_all(self):
+        jobs, self.jobs = self.jobs, []
+        for f, fn, args in jobs:
+            f.set_result(fn(*args))
+
+    def snapshot(self):
+        return {"mode": "manual"}
+
+    def note_failure(self, e):
+        pass
+
+
+def _poll(pend, can=OK, max_s=30.0):
+    import time as _t
+
+    t_end = _t.monotonic() + max_s
+    while _t.monotonic() < t_end:
+        rep = pend.poll(lambda: can)
+        if rep is not None:
+            return rep
+        _t.sleep(0.002)
+    raise AssertionError("no reply")
+
+
+def test_arm_script_ik_runs_in_a_worker_process():
+    """B-D1: the service's IK worker is a separate process; the handler returns a pending reply at once, the arm lock
+    is free while the worker solves, and the reply (accepted with the plan, or ik_unreachable) is the same as before."""
+    import time as _t
+
+    from body.arm import ScriptPending
+    from body.ik_worker import IKWorker
+
+    ik = IKWorker("process").start()
+    try:
+        rig = Rig(pose=_pose(), ik=ik)
+        ch = rig.ch
+        far_w = pelvis_to_world([1.0, -0.2, 0.1], rig.pose).tolist()
+        t0 = _t.perf_counter()
+        pend = ch.handle_arm_script("x", {"phase": "grasp", "arm": "right", "target_w": far_w}, OK)
+        assert isinstance(pend, ScriptPending) and (_t.perf_counter() - t0) < 0.05
+        assert ch._lock.acquire(timeout=0.01)                 # the arm lock is free while the worker solves
+        ch._lock.release()
+        rep = _poll(pend)
+        assert rep["error"] == "ik_unreachable" and rep["data"]["ik_ms"] > 0
+        assert ch.state()["mode"] == "off" and rig.mux.upper is None
+        ok_w = pelvis_to_world([0.3, 0.2, 0.1], rig.pose).tolist()
+        rep = _poll(ch.handle_arm_script("a", {"phase": "pregrasp", "arm": "left", "target_w": ok_w}, OK))
+        assert rep["state"] == "accepted" and rep["data"]["ik_err_m"] < 0.02 and rep["data"]["ik_ms"] > 0
+        assert ch.snapshot()["ik"]["mode"] == "process" and ch.stats["scripts_async"] == 2
+        ev = _run_op(rig, "a")
+        assert ev["state"] == "succeeded" and ev["data"]["palm_err_b_m"]["p90"] < 0.02
+        assert ev["data"]["track_submits"] >= 0 and ev["data"]["track_errors"] == 0
+    finally:
+        ik.close()
+
+
+def test_a_halt_while_the_ik_solves_wins():
+    rig = Rig(pose=_pose(), ik=ManualIK())
+    ch = rig.ch
+    ok_w = pelvis_to_world([0.3, 0.2, 0.1], rig.pose).tolist()
+    pend = ch.handle_arm_script("a", {"phase": "pregrasp", "arm": "left", "target_w": ok_w}, OK)
+    assert pend.poll(lambda: OK) is None
+    ch.latch(3)
+    rig.run(DT)
+    rig.ch.ik.run_all()
+    rep = pend.poll(lambda: OK)
+    assert rep["error"] == "halted" and rig.mux.upper is None and ch.sess is None
+
+
+def test_arm_script_starts_from_the_pose_being_sent_when_the_ik_returns():
+    """The pose being sent moves while the worker solves (here: a blend back to SONIC): the session starts from where
+    the wire is then, so there is no jump at the start."""
+    rig = Rig({"arm_blend_s": 1.0}, pose=_pose(), ik=ManualIK())
+    ch = rig.ch
+    q0 = ch.reference_mj17()
+    far = list(q0)
+    far[jm.UPPER_BODY_MUJOCO_JOINTS.index("left_elbow_joint")] += 0.5
+    rig.arm({"stream": "v", "upper_body": far}, op_id="v")
+    rig.run(0.6)
+    assert ch.end("stop")
+    rig.run(0.2)
+    ok_w = pelvis_to_world([0.3, 0.2, 0.1], rig.pose).tolist()
+    pend = ch.handle_arm_script("a", {"phase": "pregrasp", "arm": "left", "target_w": ok_w}, OK)
+    rig.run(0.4)                                             # the blend goes on meanwhile
+    ch.ik.run_all()
+    before = rig.sent()
+    assert pend.poll(lambda: OK)["state"] == "accepted"
+    rig.run(DT)
+    step = max(abs(a - b) for a, b in zip(rig.sent()[3:], before[3:]))
+    assert step < 0.02, step
+
+
+def test_arm_script_times_out_when_the_worker_never_answers():
+    rig = Rig(pose=_pose(), ik=ManualIK())
+    ok_w = pelvis_to_world([0.3, 0.2, 0.1], rig.pose).tolist()
+    pend = rig.ch.handle_arm_script("a", {"phase": "pregrasp", "arm": "left", "target_w": ok_w}, OK)
+    rig.clock.t += 6.0
+    rep = pend.poll(lambda: OK)
+    assert rep["error"] == "ik_timeout" and rig.mux.upper is None
+
+
+def test_pregrasp_from_above_and_finger_preshape():
+    rig = Rig(pose=_pose())
+    ch = rig.ch
+    tgt = pelvis_to_world([0.32, -0.2, 0.2], rig.pose)
+    rep = ch.handle_arm_script("p", {"phase": "pregrasp", "arm": "right", "target_w": tgt.tolist(),
+                                     "approach": "above", "preshape": 0.3}, OK)
+    assert rep["state"] == "accepted" and rep["data"]["approach"] == "above" and rep["data"]["preshape"] == 0.3
+    assert rep["data"]["goal_w"] == pytest.approx((tgt + np.array([0.0, 0.0, 0.08])).tolist(), abs=1e-4)
+    ev = _run_op(rig, "p")
+    assert ev["state"] == "succeeded"
+    assert rig.mux.upper[3] == pytest.approx(jm.hand_closure("right", 0.3), abs=1e-9)   # open = the pre-shape
+    rep = ch.handle_arm_script("g", {"phase": "grasp", "arm": "right", "target_w": tgt.tolist(), "preshape": 0.3,
+                                     "closure": 0.8}, OK)
+    ev = _run_op(rig, "g")
+    assert ev["state"] == "succeeded" and ev["data"]["palm_err_b_m"]["p90"] < 0.02
+    assert rig.mux.upper[3] == pytest.approx(jm.hand_closure("right", 0.8), abs=1e-9)
+    with pytest.raises(ArmError):
+        ch.handle_arm_script("b", {"phase": "pregrasp", "arm": "right", "target_w": tgt.tolist(),
+                                   "approach": "side"}, OK)
+
+
+def test_clear_z_raises_the_goal_until_the_hand_clears_the_surface():
+    """B-D4: the Dex3 hand is ~4.4 cm thick below the palm origin at a table-height reach, so a palm goal 3 cm above an
+    object top pushes the hand into it (live: the palm stopped 1.4-2.8 cm high). With clear_z the goal is raised until
+    the hand's collision envelope clears the surface by clearance_m, and the plan says by how much."""
+    rig = Rig(pose=_pose())
+    top_b = np.array([0.33, -0.2, 0.22])                      # an object top, pelvis frame
+    tgt = pelvis_to_world(top_b + [0.0, 0.0, 0.03], rig.pose)
+    top_z = float(pelvis_to_world(top_b, rig.pose)[2])
+    rep = rig.ch.handle_arm_script("g", {"phase": "grasp", "arm": "right", "target_w": tgt.tolist(),
+                                         "clear_z": top_z}, OK)
+    c = rep["data"]["clear"]
+    assert rep["state"] == "accepted" and c["clear_z"] == pytest.approx(top_z) and 0.005 < c["goal_raise_m"] < 0.08
+    assert rep["data"]["goal_w"][2] == pytest.approx(tgt[2] + c["goal_raise_m"], abs=1e-4)
+    ev = _run_op(rig, "g")
+    q = K.named_from_mj17(jm.mj17_from_mujoco(rig.dep.latest["body_q"]))
+    low = K.hand_points("right", q, rig.dep.latest["right_hand_q"])[:, 2].min()
+    assert low >= top_b[2] + 0.01 - 0.004, low                                       # clear, within tracking
+    assert ev["state"] == "succeeded" and ev["data"]["palm_err_w_m"]["p90"] < 0.02
+    # without clear_z nothing changes
+    rep = rig.ch.handle_arm_script("h", {"phase": "pregrasp", "arm": "right", "target_w": tgt.tolist()}, OK)
+    assert rep["data"]["clear"] is None

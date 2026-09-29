@@ -669,50 +669,32 @@ def pick_test(R: Runner) -> dict:
         raise RuntimeError(f"no support found for {obj['id']}")
     (ox0, oy0, oz0), (ox1, oy1, oz1) = obj["aabb"]
     grasp_w = [(ox0 + ox1) / 2, (oy0 + oy1) / 2, oz1 + a.grasp_above]
-    sx, sy, syaw, d_edge = stance_for(obj, sup, a.gap, a.lateral, a.arm)
-    S = {"object": obj["id"], "support": sup["id"], "grasp_w": _r(grasp_w), "edge_dist_m": _r(d_edge),
-         "stance": _r([sx, sy, math.degrees(syaw)], 3)}
-    print(f"[arm_wave] pick {obj['id']} on {sup['id']}: stance {S['stance']}", flush=True)
-    h = R.bc.go_to(sx, sy, yaw=syaw, timeout_s=120)
-    S["go_to"] = {"state": h.state, "pos_err": (h.result or {}).get("pos_err"),
-                  "yaw_err_deg": (h.result or {}).get("yaw_err_deg")}
-    time.sleep(1.5)
-    # A* keeps >= 0.25 m from the furniture; the palm needs the object ~reach m ahead: close in with `approach`
-    # (body B.6, a straight strafing reposition on ground truth, no A*)
-    f = np.array([math.cos(syaw), math.sin(syaw)])
-    left = np.array([-f[1], f[0]])
-    sgn = -1.0 if a.arm == "right" else 1.0
-    fx, fy = np.array(grasp_w[:2]) - a.reach * f - sgn * a.lateral * left
-    S["final_stance"] = _r([fx, fy, math.degrees(syaw)], 3)
-    S["approach"] = []
-    for _ in range(2):
-        g = R.mon.last_gt()
-        off = world_to_pelvis(grasp_w, Pose_(g))
-        if abs(off[0] - a.reach) < 0.03 and abs(off[1] - sgn * a.lateral) < 0.04:
-            break
-        ha = R.bc.approach(float(fx), float(fy), yaw=syaw, tol=(0.03, 4.0), timeout=45)
-        S["approach"].append({"state": ha.state, "reason": ha.reason,
-                              **{k: (ha.result or {}).get(k) for k in ("pos_err", "yaw_err_deg", "attempts")}})
-        time.sleep(1.0)
+    S = {"object": obj["id"], "support": sup["id"], "grasp_w": _r(grasp_w)}
+    print(f"[arm_wave] pick {obj['id']} on {sup['id']}", flush=True)
+    # go_to (A*-safe), raise the hand over the support first with --rise-gap, then `approach` (body B.6) in
+    _stance_at(R, obj, sup, grasp_w, S)
     g = R.mon.last_gt()
     S["pose_at_stance"] = _r([g[1], g[2], math.degrees(g[4])], 3)
-    ob = world_to_pelvis(grasp_w, Pose_(g))
-    S["grasp_b_at_stance"] = _r(ob)
+    ext = {}
+    if a.clear:                                      # hand clearance over the object + the collision-checked path
+        ext = {"clear_z": oz1, "avoid_boxes": [sup["aabb"], obj["aabb"]]}
     trials = []
     for k in range(a.trials):
         tr = {"k": k}
-        tr["pregrasp"] = script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w})
+        tr["pregrasp"] = script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w, **ext})
         tr["grasp"] = gr = script(R, {"phase": "grasp", "arm": a.arm, "target_w": grasp_w, "closure": 0.6,
-                                      "settle_s": a.settle})
+                                      "settle_s": a.settle, **ext})
         term = gr.get("terminal") or {}
         if term.get("state") == "succeeded":
             m1 = gr["t1"] - 0.05
-            e = palm_err_tool(R, m1 - min(1.0, a.settle - 0.3), m1, a.arm, grasp_w)
+            e = palm_err_tool(R, m1 - min(1.0, a.settle - 0.3), m1, a.arm, (gr.get("plan") or {}).get("goal_w")
+                              or grasp_w)
             tr["tool_palm_err_w_m"] = {"median": _pct(e, 50), "p90": _pct(e, 90), "max": _r(max(e) if e else None),
                                        "n": len(e)}
             tr["_tool_errs"] = e
         if k < a.trials - 1:
-            tr["retract"] = script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w, "hold_on_end": "target"})
+            tr["retract"] = script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w, "hold_on_end": "target",
+                                       **ext})
         trials.append(tr)
     allerr = [x for tr in trials for x in tr.pop("_tool_errs", [])]
     S["grasp_palm_err_w_m_tool"] = {"median": _pct(allerr, 50), "p90": _pct(allerr, 90),
@@ -768,6 +750,215 @@ def pick_test(R: Runner) -> dict:
     return S
 
 
+# ================================================================================================= grasp accuracy (B-D4)
+def grasp_candidates(scene: dict, a) -> list[dict]:
+    """Small objects on furniture tops the G1 palm can reach from an A*-safe stance: top 0.6-1.1 m, object <= 0.15 m
+    tall and <= 0.3 m across, its centre <= --max-edge m from the support edge nearest to it."""
+    objs = scene.get("objects") or []
+    out = []
+    for o in objs:
+        if "surface" not in str(o.get("id")):
+            continue
+        (x0, y0, z0), (x1, y1, z1) = o["aabb"]
+        if z1 - z0 > 0.15 or max(x1 - x0, y1 - y0) > 0.3:
+            continue
+        sup = support_of(o, objs)
+        if sup is None:
+            continue
+        top = sup["aabb"][1][2]
+        if not (0.6 <= top <= 1.1):
+            continue
+        try:
+            _, _, _, d = stance_for(o, sup, a.gap, a.lateral, a.arm)
+        except Exception:
+            continue
+        if d > a.max_edge:
+            continue
+        out.append({"id": o["id"], "support": sup["id"], "top_z": round(top, 3), "edge_dist_m": round(d, 3),
+                    "size": [round(x1 - x0, 3), round(y1 - y0, 3), round(z1 - z0, 3)]})
+    return sorted(out, key=lambda c: (c["support"], c["edge_dist_m"]))
+
+
+def _err_b(R: Runner, t0, t1, side, goal_w) -> list:
+    """Palm - goal in the GT pelvis frame (x forward, y left, z up), 50 Hz."""
+    out = []
+    for d in R.mon.dbg_between(t0, t1):
+        g = R.mon.pose_at(d[0])
+        if g is None or abs(g[0] - d[0]) > 0.05:
+            continue
+        pw = palm_world(d[1], g, side)
+        out.append(world_to_pelvis(pw, Pose_(g)) - world_to_pelvis(goal_w, Pose_(g)))
+    return out
+
+
+def _stance_at(R: Runner, obj, sup, grasp_w, S: dict) -> None:
+    a = R.a
+    gap = a.rise_gap if a.rise_gap else a.gap
+    sx, sy, syaw, d_edge = stance_for(obj, sup, gap, a.lateral, a.arm)
+    S["edge_dist_m"], S["stance"] = _r(d_edge), _r([sx, sy, math.degrees(syaw)], 3)
+    h = R.bc.go_to(sx, sy, yaw=syaw, timeout_s=120)
+    S["go_to"] = {"state": h.state, "reason": h.reason, "pos_err": (h.result or {}).get("pos_err")}
+    time.sleep(1.0)
+    if a.rise_gap:
+        # raise the hand above the support before stepping in: from the A* stance the open hand, sweeping up and
+        # forward from the arm's rest pose, catches the support's front edge (live 20260929-112144: the fingers stuck
+        # under the dresser top, SONIC stepped back 0.22 m). Raise it `rise_gap` from the edge, then `approach` in
+        # with the arm held (the override rides on every planner message while the legs walk).
+        g = R.mon.last_gt()
+        top_b = sup["aabb"][1][2] - g[5]
+        sgn = -1.0 if a.arm == "right" else 1.0
+        rz = script(R, {"phase": "carry", "arm": a.arm, "carry_b": [0.22, sgn * a.lateral, top_b + a.raise_above],
+                        "avoid_boxes": [sup["aabb"]], "hold_on_end": "target"})
+        term = rz.get("terminal") or {}
+        S["raise"] = {"reply": (rz.get("reply") or {}).get("error") or rz.get("reply_state"),
+                      "state": term.get("state"), "path": (rz.get("plan") or {}).get("path"),
+                      "palm_err_b_m": term.get("palm_err_b_m"), "pelvis_shift_m": term.get("pelvis_shift_m")}
+    f = np.array([math.cos(syaw), math.sin(syaw)])
+    left = np.array([-f[1], f[0]])
+    sgn = -1.0 if a.arm == "right" else 1.0
+    fx, fy = np.array(grasp_w[:2]) - a.reach * f - sgn * a.lateral * left
+    S["approach"] = []
+    for _ in range(3):
+        g = R.mon.last_gt()
+        off = world_to_pelvis(grasp_w, Pose_(g))
+        if abs(off[0] - a.reach) < 0.025 and abs(off[1] - sgn * a.lateral) < 0.03:
+            break
+        ha = R.bc.approach(float(fx), float(fy), yaw=syaw, tol=(0.025, 3.0), timeout=45)
+        S["approach"].append({"state": ha.state, "reason": ha.reason,
+                              **{k: (ha.result or {}).get(k) for k in ("pos_err", "yaw_err_deg", "attempts")}})
+        time.sleep(0.8)
+    g = R.mon.last_gt()
+    S["grasp_b_at_stance"] = _r(world_to_pelvis(grasp_w, Pose_(g)))
+
+
+def _one_grasp(R: Runner, grasp_w, extra: dict) -> dict:
+    a = R.a
+    tr = {"pregrasp": script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w, **extra})}
+    tr["pregrasp_path"] = ((tr["pregrasp"].get("plan") or {}).get("path"))
+    pre = tr["pregrasp"].get("terminal") or {}
+    if pre.get("state") != "succeeded":
+        tr["skipped"] = f"pregrasp {pre.get('state') or tr['pregrasp'].get('reply')}"
+        return tr
+    gr = script(R, {"phase": "grasp", "arm": a.arm, "target_w": grasp_w, "closure": a.closure,
+                    "settle_s": a.settle, **{k: v for k, v in extra.items() if k in ("preshape", "clear_z",
+                                                                                     "avoid_boxes")}})
+    plan = gr.get("plan") or {}
+    tr["grasp"] = {"plan": {k: plan.get(k) for k in ("goal_b", "goal_w", "ik_err_m", "ik_ms", "ik_seed", "move_s",
+                                                     "clear")},
+                   "reply": gr.get("reply")}
+    term = gr.get("terminal") or {}
+    tr["grasp"]["state"] = term.get("state")
+    if term.get("state") == "succeeded":
+        m1 = gr["t1"] - 0.05
+        m0 = m1 - min(1.0, a.settle - 0.3)
+        goal_w = plan.get("goal_w") or grasp_w           # what the script commanded (raised for hand clearance)
+        e = palm_err_tool(R, m0, m1, a.arm, goal_w)
+        e0 = palm_err_tool(R, m0, m1, a.arm, grasp_w)
+        eb = _err_b(R, m0, m1, a.arm, goal_w)
+        tr["tool_palm_err_w_m"] = {"median": _pct(e, 50), "p90": _pct(e, 90), "max": _r(max(e) if e else None),
+                                   "n": len(e)}
+        tr["tool_palm_err_vs_grasp_point_m"] = {"median": _pct(e0, 50), "p90": _pct(e0, 90), "n": len(e0)}
+        tr["goal_minus_grasp_point_m"] = _r(np.asarray(goal_w) - np.asarray(grasp_w))
+        tr["err_pelvis_frame_mean_m"] = _r(np.mean(eb, axis=0)) if eb else None
+        tr["body_palm_err_w_m"], tr["body_palm_err_b_m"] = term.get("palm_err_w_m"), term.get("palm_err_b_m")
+        tr["pelvis_shift_m"], tr["track_updates"] = term.get("pelvis_shift_m"), term.get("track_updates")
+        tr["_errs"] = e
+    return tr
+
+
+def grasp_at(R: Runner, scene: dict, oid: str) -> dict:
+    a = R.a
+    obj, objs = find_object(scene, oid)
+    sup = support_of(obj, objs)
+    (ox0, oy0, oz0), (ox1, oy1, oz1) = obj["aabb"]
+    grasp_w = [(ox0 + ox1) / 2, (oy0 + oy1) / 2, oz1 + a.grasp_above]
+    S = {"object": oid, "support": None if sup is None else sup["id"], "object_aabb": _r(obj["aabb"]),
+         "grasp_w": _r(grasp_w)}
+    print(f"[arm_wave] grasp {oid} on {S['support']}", flush=True)
+    if sup is None:
+        S["error"] = "no support"
+        return S
+    _stance_at(R, obj, sup, grasp_w, S)
+    extra = {"approach": a.approach, "preshape": a.preshape}
+    if a.above_m is not None:
+        extra["above_m"] = a.above_m
+    if a.clear:
+        extra["clear_z"] = oz1                        # the hand must clear the object's top (body: hand clearance)
+        extra["avoid_boxes"] = [sup["aabb"], obj["aabb"]]
+    S["trials"] = []
+    for k in range(a.trials):
+        tr = _one_grasp(R, grasp_w, extra)
+        tr["k"] = k
+        S["trials"].append(tr)
+        print(f"[arm_wave]   grasp {k}: {tr.get('tool_palm_err_w_m')} err_b {tr.get('err_pelvis_frame_mean_m')} "
+              f"{tr.get('skipped') or ''}", flush=True)
+        if k < a.trials - 1 and tr.get("grasp", {}).get("state") == "succeeded":
+            script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w, "hold_on_end": "target", **extra})
+    errs = [x for tr in S["trials"] for x in tr.pop("_errs", [])]
+    S["palm_err_w_m_tool"] = {"median": _pct(errs, 50), "p90": _pct(errs, 90), "max": _r(max(errs) if errs else None),
+                              "n": len(errs)}
+    S["_errs"] = errs
+    if a.free_air:
+        # the same pelvis-frame goal with the support out of reach: step back, then grasp in free air (no contact)
+        goals = [tr["grasp"]["plan"]["goal_b"] for tr in S["trials"] if (tr.get("grasp") or {}).get("plan", {}).get(
+            "goal_b")]
+        script(R, {"phase": "retract", "arm": a.arm})
+        g = R.mon.last_gt()
+        hb = R.bc.approach(g[1] - 0.3 * math.cos(g[4]), g[2] - 0.3 * math.sin(g[4]), yaw=g[4], tol=(0.05, 5.0),
+                           timeout=45)
+        S["free_air"] = {"step_back": hb.state, "trials": []}
+        if goals:
+            gb = np.mean(np.asarray(goals, float), axis=0)
+            for k in range(min(2, a.trials)):
+                g = R.mon.last_gt()
+                gw = pelvis_to_world(gb, Pose_(g)).tolist()
+                tr = _one_grasp(R, gw, extra)
+                tr.pop("_errs", None)
+                S["free_air"]["trials"].append({"goal_b": _r(gb), **tr})
+                print(f"[arm_wave]   free-air {k}: {tr.get('tool_palm_err_w_m')} err_b "
+                      f"{tr.get('err_pelvis_frame_mean_m')}", flush=True)
+    script(R, {"phase": "retract", "arm": a.arm})
+    return S
+
+
+def grasp_test(R: Runner) -> dict:
+    a = R.a
+    scene = R.p1.call("get_scene_info")
+    if a.list or not a.objects:
+        cands = grasp_candidates(scene, a)
+        print(json.dumps(cands, indent=1), flush=True)
+        if a.list or not cands:
+            return {"candidates": cands}
+        seen, ids = set(), []
+        for c in cands:                                   # one object per support, nearest the edge first
+            if c["support"] not in seen:
+                seen.add(c["support"])
+                ids.append(c["id"])
+        ids = ids[:a.n_objects]
+    else:
+        ids = a.objects.split(",")
+    S = {"variant": {k: getattr(a, k) for k in ("approach", "preshape", "reach", "lateral", "gap", "grasp_above",
+                                                  "closure", "settle", "above_m", "arm", "clear", "rise_gap",
+                                                  "raise_above")},
+         "objects": [grasp_at(R, scene, oid) for oid in ids]}
+    errs = [x for o in S["objects"] for x in o.pop("_errs", [])]
+    per = [tr["tool_palm_err_w_m"]["p90"] for o in S["objects"] for tr in o.get("trials", [])
+           if tr.get("tool_palm_err_w_m")]
+    S["pooled"] = {"grasps": len(per), "objects": sum(1 for o in S["objects"] if any(
+                       tr.get("tool_palm_err_w_m") for tr in o.get("trials", []))),
+                   "supports": len({o.get("support") for o in S["objects"] if any(
+                       tr.get("tool_palm_err_w_m") for tr in o.get("trials", []))}),
+                   "objects_tried": len(S["objects"]),
+                   "palm_err_w_m": {"median": _pct(errs, 50), "p90": _pct(errs, 90),
+                                    "max": _r(max(errs) if errs else None), "n": len(errs)},
+                   "per_grasp_p90_m": per, "grasps_p90_under_3cm": sum(1 for x in per if x < 0.03)}
+    S["pooled"]["pass_p90_under_3cm"] = bool(errs) and _pct(errs, 90) < 0.03 and len(per) >= 6 and \
+        S["pooled"]["supports"] >= 2
+    S["falls_total"] = R.mon.falls(R.t_start, time.monotonic())
+    S["rtf"] = _rtf(R)
+    return S
+
+
 # ================================================================================================= scan
 def scan_once(R: Runner, label: str, extra: dict | None = None) -> dict:
     t0 = time.monotonic()
@@ -817,7 +1008,7 @@ def scan_test(R: Runner) -> dict:
 # ================================================================================================= main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["chunk", "pick", "scan"])
+    ap.add_argument("mode", choices=["chunk", "pick", "scan", "grasp"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--port-offset", type=int, default=None)
     ap.add_argument("--fake", action="store_true", help="run against in-process fakes (fake P1 + fake deploy + body)")
@@ -844,6 +1035,21 @@ def main(argv=None) -> int:
     ap.add_argument("--walk-s", type=float, default=7.0)
     ap.add_argument("--yaw-deg", type=float, nargs="+", default=[-35.0, 0.0, 35.0])
     ap.add_argument("--at-counter", action="store_true")
+    # grasp (B-D4: accuracy over objects / surfaces)
+    ap.add_argument("--objects", default=None, help="comma-separated object ids (default: one per support, auto)")
+    ap.add_argument("--n-objects", type=int, default=2)
+    ap.add_argument("--list", action="store_true", help="grasp: only list the candidate objects")
+    ap.add_argument("--max-edge", type=float, default=0.16, help="grasp: object centre at most this from the edge")
+    ap.add_argument("--approach", default="front", choices=["front", "above"])
+    ap.add_argument("--preshape", type=float, default=0.0)
+    ap.add_argument("--above-m", type=float, default=None)
+    ap.add_argument("--closure", type=float, default=0.6)
+    ap.add_argument("--free-air", action="store_true", help="grasp: repeat the goal in free air (no contact)")
+    ap.add_argument("--clear", action="store_true", help="grasp: pass clear_z = the object's top (hand clearance) and "
+                    "avoid_boxes = the support + the object")
+    ap.add_argument("--rise-gap", type=float, default=0.0, help="grasp: go_to this far from the edge, raise the hand "
+                    "above the support there (carry phase), then approach in with the arm held (0: off)")
+    ap.add_argument("--raise-above", type=float, default=0.10, help="grasp: raised palm height above the support top")
     ap.add_argument("--scan-hold-variants", action="store_true")
     a = ap.parse_args(argv)
     if a.fake and a.port_offset is None:
@@ -851,7 +1057,7 @@ def main(argv=None) -> int:
     R = Runner(a)
     rc = 0
     try:
-        S = {"chunk": chunk_test, "pick": pick_test, "scan": scan_test}[a.mode](R)
+        S = {"chunk": chunk_test, "pick": pick_test, "scan": scan_test, "grasp": grasp_test}[a.mode](R)
     except Exception:
         R.notes["errors"].append(traceback.format_exc())
         S = {"error": traceback.format_exc()}

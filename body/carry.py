@@ -10,9 +10,12 @@ error, docs/arm_tracking.md §3.3). Kinds:
               including while a `walk` / `go_to` owns the legs (the override composes with any leg motion).
     measured  the measured upper body at the end tick (g1_debug body_q, through joint_map) and the hands' last target
               (`hold_on_end: "measured"`): stop where the arm is, drop nothing.
-    latched   the halt latch (ArmChannel.latch): the measured upper body and the measured hands. Nobody may take it
-              over before `resume`; afterwards a new owner with control_epoch > halt_epoch may, or `end` / `release`
-              blends it back to SONIC.
+    latched   what a halt leaves when it stops a session that was moving the arms (ArmChannel.latch): the measured
+              arm pose, the session's waist as it was sent, and the hands' last TARGET (never the measured q, so
+              repeated halts cannot ratchet a grip open). A halt does not replace any other hold: a CarryLock / target
+              / measured hold stays exactly as it is while latched and after the resume. Nobody may take a `latched`
+              hold over before `resume`; afterwards a new owner with control_epoch > halt_epoch may, or `end` /
+              `release` blends it back to SONIC.
     watchdog  a v0.5 target stream that went silent (hold_s, then blend); the op is still alive and its owner may
               resume.
 
@@ -43,6 +46,8 @@ class Hold:
     t_mono: float = field(default_factory=time.monotonic)
     epoch: int | None = None                    # latched: the halt epoch
     carry_arm: str | None = None                # the hand the ending session closed on purpose (CarryLock), if any
+    fence: dict | None = None                   # {session_id, generation, control_epoch} of the session that left it:
+                                                # a later `release` / `end` on its stream must match (arm_chunk.md §4)
 
     def closure(self) -> dict:
         """Closure fraction per hand (0 open .. 1 the deploy's fist), None for a hand that is not held."""
@@ -65,6 +70,7 @@ class Hold:
         return {"kind": self.kind, "stream": self.stream, "op": self.op_id, "source": self.source,
                 "waist": self.waist_mode, "age_s": round(now - self.t_mono, 2), "closure": self.closure(),
                 "carry": self.is_carry(), "carry_arm": self.carry_arm, "epoch": self.epoch,
+                "session_id": None if not self.fence else self.fence.get("session_id"),
                 "pose_mj17": [round(v, 4) for v in self.pose]}
 
 
