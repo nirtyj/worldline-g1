@@ -20,7 +20,8 @@ height; radius) whose residuals say how well that model holds.
 `ReachabilityModel` (services/reachability.py) with the calibrated config: the robot at the object's surface
 keypoint (its stand), `check_reachability`; on `needs_reposition` it moves to the suggested stance (exactly; the
 body's `approach` lands within 5 cm, docs/contracts/m1.md §3.13) and checks again. Verdicts: `keypoint`,
-`one_approach`, or the reason (`too_far`, `beyond_reach`, `too_low`, `too_high`, `out_of_workspace`, ...).
+`one_approach`, `far_stance` (the outline-wide search's stance: a walk round the furniture, then the approach), or
+the reason (`too_far`, `beyond_reach`, `too_low`, `too_high`, `out_of_workspace`, ...).
 """
 
 from __future__ import annotations
@@ -201,7 +202,7 @@ class CoverageRow:
     type: str
     surface: str
     height_m: float                 # centre above the floor
-    verdict: str                    # keypoint | one_approach | other_stand | <reason>
+    verdict: str                    # keypoint | one_approach | far_stance | other_stand | <reason>
     gap_m: float | None = None      # object -> nearest spot the pelvis may stand (stance_clearance_m from obstacles)
     reach_m: float = 0.0            # the arm's largest horizontal reach at the object's grasp height
     first: dict = field(default_factory=dict)
@@ -258,7 +259,9 @@ def coverage(house: str, *, profile: str = "sonic", config_dir: str | Path | Non
             st = r1.stance
             r2 = at(o.where, (st["x"], st["y"], st["yaw"]))
             row.second = _res(r2)
-            row.verdict = "one_approach" if r2.reachable else f"after_approach:{r2.reason}"
+            far = "walk_m" in st                        # the outline-wide search's stance
+            row.verdict = ("far_stance" if far else "one_approach") if r2.reachable else \
+                f"after_{'far_stance' if far else 'approach'}:{r2.reason}"
         elif r1.reason == "too_far" and r1.suggest_location and r1.suggest_location in m.keypoints:
             r2 = at(r1.suggest_location)
             if r2.reason == "needs_reposition" and r2.stance:
@@ -292,6 +295,7 @@ def coverage_summary(rows: list[CoverageRow], ws: dict) -> dict:
             "reachable_keypoint_or_one_approach": sum(r.verdict in ok for r in rows),
             "frac_all": frac(rows, ok), "frac_in_band": frac(band, ok),
             "frac_in_band_incl_other_stand": frac(band, ok + ("other_stand",)),
+            "frac_in_band_incl_far_stance": frac(band, ok + ("far_stance",)),
             "verdicts": dict(sorted(counts.items(), key=lambda kv: -kv[1]))}
 
 

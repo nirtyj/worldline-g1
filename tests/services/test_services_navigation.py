@@ -174,10 +174,22 @@ def test_reach_stance_reposition_keeps_the_anchor():
         assert "interim" in r.data
         assert s.robot.nav.at() == ("bedroom_bed_1b", None)
         assert "repositioned" in r.summary
-        # too far for a reposition
+        # farther than approach_max_m (the outline-wide search's far stance): A* go_to next to it, then the final
+        # leg, under one lease; the anchor stays
         far = {"x": k.x + 1.5, "y": k.y, "yaw": k.yaw}
         r2 = await s.run("navigate", {"location": "reach_stance", "anchor": "bedroom_bed_1b", "stance": far})
-        assert r2.status == "failed" and r2.data["reason"] == "stance_not_reached"
+        assert r2.status == "succeeded", r2.summary
+        assert r2.data["legs"] == ["go_to", "go_to"] and r2.data["walk"]["state"] == "succeeded"
+        assert r2.data["via"] and r2.data["final_err_m"] <= 0.10 and r2.data["walked_m"] >= 1.2
+        assert s.robot.nav.at() == ("bedroom_bed_1b", None)
+        # no free spot next to the stance (the middle of the bed): refused before anything moves
+        bed = s.world.map.surfaces["bedroom_bed_1b"]
+        p0 = s.world.robot_pose()
+        inside = {"x": bed.center[0], "y": bed.center[1], "yaw": k.yaw}
+        r2 = await s.run("navigate", {"location": "reach_stance", "anchor": "bedroom_bed_1b", "stance": inside})
+        assert r2.status == "failed" and r2.data["reason"] == "stance_not_reached", r2.data
+        assert "no free spot next to it" in r2.data["detail"]
+        assert (s.world.robot_pose().x, s.world.robot_pose().y) == (p0.x, p0.y)
         # no stance at all
         r3 = await s.run("navigate", {"location": "reach_stance", "anchor": "bedroom_bed_1b"})
         assert r3.status == "failed" and r3.data["reason"] == "no_reach_stance"

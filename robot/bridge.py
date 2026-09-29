@@ -386,7 +386,8 @@ class G1Robot:
     def timeout_s(self, tool: str, args: dict) -> float:
         if tool == "navigate":
             if args.get("location") == "reach_stance" or args.get("stance"):
-                return self.nav.reposition_timeout_s() + 5.0
+                st = args.get("stance")
+                return self.nav.reposition_timeout_s(st if isinstance(st, dict) else None) + 5.0
             t = self.nav.timeout_s(self.world.robot_pose(), self.nav.resolve(str(args.get("location", ""))))
             if args.get("timeout_s"):
                 t = min(t, float(args["timeout_s"]))

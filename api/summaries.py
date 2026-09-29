@@ -16,6 +16,8 @@ from .reasons import AREA_OF_TOOL, hint
 
 FALLBACK_TAG = "fallback"
 TOO_FAR_NO_SUGGESTION = "no stand the robot knows reaches it; try another stand of that surface once, or tell the user"
+# too_far after the robot's outline-wide search (services/reachability.py find_far_stance) found no stance anywhere
+TOO_FAR_NOWHERE = "no spot around that surface reaches it; tell the user"
 
 
 def _m(v: Any) -> str:
@@ -98,16 +100,20 @@ def summarize(tool: str, status: str, data: dict[str, Any], *, action: str | Non
             arm_txt = "either arm" if arm == "either" else f"the {arm} arm"
             return f"{o} visible, reachable with {arm_txt}{dist}"
         r = str(d.get("reason") or "not reachable")
+        why = f": {d['detail']}" if d.get("detail") and r in ("needs_reposition", "too_far", "beyond_reach") else ""
         if r == "needs_reposition":
-            return (f"{o} visible but not reachable from this exact pose: needs_reposition{dist}; "
+            # a far stance says where and how far (e.g. "reach stance on the other side of kitchen_dining_table_1
+            # (-y side), 2.6 m walk")
+            return (f"{o} visible but not reachable from this exact pose: needs_reposition{dist}{why}; "
                     f"navigate(location='reach_stance'), then check again")
         vis = "visible but " if d.get("visible") else ""
         sug = f"; try {d['suggest_location']}" if d.get("suggest_location") and r == "too_far" else ""
         h = hint(r)
         if r == "too_far" and not sug:
-            # no stand to suggest: never "navigate to the suggested location" (there is none)
-            h = TOO_FAR_NO_SUGGESTION
-        return f"{o} {vis}not reachable from here: {r}{dist}{sug}" + (f" ({h})" if h and not sug else "")
+            # no stand to suggest: never "navigate to the suggested location" (there is none); after the
+            # outline-wide search (a detail says why) not "another stand" either
+            h = TOO_FAR_NOWHERE if why else TOO_FAR_NO_SUGGESTION
+        return f"{o} {vis}not reachable from here: {r}{dist}{why}{sug}" + (f" ({h})" if h and not sug else "")
 
     if tool == "manipulate":
         act = d.get("action") or action or a.get("action") or "pick"

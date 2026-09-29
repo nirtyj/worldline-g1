@@ -6,7 +6,10 @@ mapping and timeouts scaled for humanoid walking.
     reposition(stance)      navigate(location="reach_stance"): the body's `approach` op (B.6: a strafing
                             reposition on ground truth, tol 5 cm / 5 deg) to the stance the last check_reachability
                             returned (<= approach_max_m, straight-line free); a body without it (M1, lite) gets a
-                            go_to with a tight tolerance, labelled INTERIM
+                            go_to with a tight tolerance, labelled INTERIM. A stance farther than approach_max_m or
+                            without a straight free line (the outline-wide search's far stance: the other side of a
+                            table) is reached in two legs under one lease: A* go_to to a free spot next to it (the
+                            stance's `via`, else one found here), then that approach from where the walk ended
     list_locations          services/locations.py (walking distance from the current GT pose)
     timeout_s               clamp(1.8 * path_m / v + 12, 20, 240) with v = the profile's effective walking speed
     at()                    keypoint within 0.30 m of the GT pose, else between [last keypoint, target]
@@ -255,8 +258,72 @@ class NavigationService:
         return all(g.clearance(p.x + (sx - p.x) * k / (n - 1), p.y + (sy - p.y) * k / (n - 1))
                    >= c.approach_path_clearance_m for k in range(n))
 
-    def reposition_timeout_s(self) -> float:
-        return self.cfg.approach_timeout_s if self.uses_approach() else self.cfg.reposition_timeout_s
+    def reposition_timeout_s(self, stance: dict | None = None) -> float:
+        """The reposition's budget; a far stance adds its A* walk's navigate timeout."""
+        t = self.cfg.approach_timeout_s if self.uses_approach() else self.cfg.reposition_timeout_s
+        leg = self._far_leg(stance) if stance else None
+        return t + (self._walk_timeout_s(leg[1]) if leg is not None else 0.0)
+
+    def _walk_timeout_s(self, path_m: float) -> float:
+        c = self.cfg
+        return max(c.timeout_min_s, min(c.timeout_max_s, c.timeout_k * path_m / max(c.nav_speed_mps, 0.05)
+                                        + c.timeout_base_s))
+
+    def _far_leg(self, st: dict | None, p: Any = None) -> tuple[tuple[float, float], float] | None:
+        """For a stance the approach cannot take from here (farther than approach_max_m, or no straight free line):
+        (the A* go_to target next to it, the planned path length); None for a near stance or no such target."""
+        if not st or "x" not in st:
+            return None
+        p = p or self.world.robot_pose()
+        sx, sy = float(st["x"]), float(st["y"])
+        approach = self.uses_approach()
+        if math.hypot(sx - p.x, sy - p.y) <= self.cfg.approach_max_m + 0.05 and self._stance_line_ok(p, sx, sy,
+                                                                                                    approach):
+            return None
+        via = self._staging(st, p, approach)
+        if via is None:
+            return None
+        plan = self.map.grid.plan((p.x, p.y), via)
+        return (via, float(plan.length)) if plan.ok else None
+
+    def _staging(self, st: dict, p: Any, approach: bool) -> tuple[float, float] | None:
+        """The A* go_to target of a far reposition: the check's `via` when it is still a free spot of the planner's
+        map on the robot's component from which the final leg (approach, or the tight go_to) passes its own rule;
+        else the nearest such spot within 0.45 m of the stance (the stance itself first)."""
+        g = self.map.grid
+        sx, sy = float(st["x"]), float(st["y"])
+        comp = g.component(p.x, p.y)
+
+        class _XY:
+            def __init__(self, x: float, y: float):
+                self.x, self.y = x, y
+
+        def ok(qx: float, qy: float) -> bool:
+            if not g.is_free(qx, qy) or g.nav.c_blocked[g.nav._world_to_c(qx, qy)]:
+                return False
+            if comp is not None and g.component(qx, qy) != comp:
+                return False
+            return self._stance_line_ok(_XY(qx, qy), sx, sy, approach)
+
+        v = st.get("via")
+        if isinstance(v, dict) and "x" in v and ok(float(v["x"]), float(v["y"])):
+            return float(v["x"]), float(v["y"])
+        if ok(sx, sy):
+            return sx, sy
+        r = 0.10
+        while r <= 0.45 + 1e-9:
+            best = None
+            for k in range(16):
+                a = k * math.pi / 8
+                qx, qy = round(sx + r * math.cos(a), 3), round(sy + r * math.sin(a), 3)
+                if ok(qx, qy):
+                    c = g.clearance(qx, qy)
+                    if best is None or c > best[0]:
+                        best = (c, qx, qy)
+            if best is not None:
+                return best[1], best[2]
+            r += 0.05
+        return None
 
     async def _lease(self, ex: Execution) -> dict:
         return await body_acquire(self.body, ex, "LOCOMOTION")
@@ -390,14 +457,23 @@ class NavigationService:
         else:
             tol_m, tol_deg, budget = c.reposition_tol_m, c.reposition_tol_deg, c.reposition_timeout_s
             extra["interim"] = "body go_to with a tight tolerance; the body has no `approach` op (B.6)"
-        if d > c.approach_max_m + 0.05:
-            return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor, t0=t0,
-                                kind="reposition", final_err_m=round(d, 3),
-                                extra={**extra, "detail": f"stance {d:.2f} m away > approach_max_m"})
-        if not self._stance_line_ok(p, sx, sy, approach):
-            return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor, t0=t0,
-                                kind="reposition", final_err_m=round(d, 3),
-                                extra={**extra, "detail": "no straight free line to the stance"})
+        via, walk_plan = None, None
+        if d > c.approach_max_m + 0.05 or not self._stance_line_ok(p, sx, sy, approach):
+            # a far stance (the outline-wide search): A* go_to next to it first
+            via = self._staging(st, p, approach)
+            if via is None:
+                return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor, t0=t0,
+                                    kind="reposition", final_err_m=round(d, 3), extra={
+                                        **extra, "detail": f"stance {d:.2f} m away and no free spot next to it that "
+                                                           f"A* reaches and the final approach passes"})
+            walk_plan = self.map.grid.plan((p.x, p.y), via)
+            if not walk_plan.ok:
+                return self._finish(ex, "failed", "reach_stance", reason="no_path", at=anchor, t0=t0,
+                                    kind="reposition", final_err_m=round(d, 3),
+                                    extra={**extra, "body_reason": walk_plan.reason,
+                                           "detail": f"no A* path to the spot next to the stance ({walk_plan.reason})"})
+            extra["via"] = {"x": round(via[0], 3), "y": round(via[1], 3)}
+            extra["legs"] = ["go_to", extra["reposition_op"]]
         epoch = ex.control_epoch
         if self.gate.latched:
             return self._finish(ex, "failed", "reach_stance", reason="halted", at=anchor, t0=t0, kind="reposition",
@@ -408,15 +484,38 @@ class NavigationService:
             return self._finish(ex, "failed", "reach_stance", reason=r, at=anchor, t0=t0, kind="reposition",
                                 final_err_m=round(d, 3), extra={**extra, "body_reason": lease.get("reason")})
         self._moving, self._target = True, anchor
+        walk: dict[str, Any] | None = None                 # the far stance's A* leg: its outcome
+        walked0, p1 = 0.0, p
         try:
-            if approach:
-                op = await self.body.approach(sx, sy, syaw, v=c.reposition_mps, tol=(tol_m, tol_deg),
-                                              timeout_s=budget, fence=body_fence(self.body, ex))
+            if via is not None and walk_plan is not None:
+                t_walk = self._walk_timeout_s(float(walk_plan.length))
+                op0 = await self.body.go_to(via[0], via[1], syaw, speed=c.cruise_mps, timeout_s=t_walk + 5.0,
+                                            final_pos_tol=c.final_pos_tol_m, final_yaw_tol_deg=c.final_yaw_tol_deg,
+                                            fence=body_fence(self.body, ex))
+                res0, why0 = await self._await_op(op0, h, epoch, t_walk)
+                d0 = res0.get("data") or {}
+                p1 = self.world.robot_pose()
+                walked0 = float(d0.get("walked_m") or d0.get("displacement_m") or 0.0) or \
+                    math.hypot(p1.x - p.x, p1.y - p.y)
+                walk = {"state": res0.get("state"), "why": why0, "body_reason": d0.get("reason"),
+                        "path_len_m": round(float(d0.get("path_len_m") or walk_plan.length), 2),
+                        "final_pose": [round(p1.x, 3), round(p1.y, 3), round(p1.yaw, 4)]}
+                d1 = math.hypot(sx - p1.x, sy - p1.y)
+                if why0 is None and res0.get("state") == "succeeded" and not (
+                        d1 <= c.approach_max_m + 0.05 and self._stance_line_ok(p1, sx, sy, approach)):
+                    walk["why"] = "approach_refused"
+                    walk["detail"] = f"after the walk the stance is {d1:.2f} m away without a free straight line"
+            if walk is None or (walk["why"] is None and walk["state"] == "succeeded"):
+                if approach:
+                    op = await self.body.approach(sx, sy, syaw, v=c.reposition_mps, tol=(tol_m, tol_deg),
+                                                  timeout_s=budget, fence=body_fence(self.body, ex))
+                else:
+                    op = await self.body.go_to(sx, sy, syaw, speed=c.reposition_mps, timeout_s=budget,
+                                               final_pos_tol=tol_m, final_yaw_tol_deg=tol_deg,
+                                               fence=body_fence(self.body, ex))
+                res, why = await self._await_op(op, h, epoch, budget + 2.0)
             else:
-                op = await self.body.go_to(sx, sy, syaw, speed=c.reposition_mps, timeout_s=budget,
-                                           final_pos_tol=tol_m, final_yaw_tol_deg=tol_deg,
-                                           fence=body_fence(self.body, ex))
-            res, why = await self._await_op(op, h, epoch, budget + 2.0)
+                res, why = res0, walk["why"]                  # the walk leg ended the reposition
         finally:
             self._moving = False
             self.last_motion_t = self.clock.now()
@@ -429,10 +528,26 @@ class NavigationService:
             self._last_at = anchor
         data = res.get("data") or {}
         body_extra = {k: data.get(k) for k in ("pos_err", "yaw_err_deg", "attempts", "turns") if k in data}
-        common = dict(kind="reposition", walked_m=round(math.hypot(fp.x - p.x, fp.y - p.y), 3),
-                      final_err_m=round(err, 3), t0=t0, path_len_m=round(d, 3),
+        if walk is not None:
+            extra["walk"] = walk
+        common = dict(kind="reposition", walked_m=round(walked0 + math.hypot(fp.x - p1.x, fp.y - p1.y), 3),
+                      final_err_m=round(err, 3), t0=t0,
+                      path_len_m=round(d if walk_plan is None else float(walk_plan.length) + math.hypot(
+                          sx - via[0], sy - via[1]), 3),                       # type: ignore[index]
                       extra={**extra, "yaw_err_deg": round(yaw_err, 1), "body_reason": data.get("reason"),
                              "tol": [tol_m, tol_deg], **({"body": body_extra} if body_extra else {})})
+        if walk is not None and walk["why"] == "approach_refused":
+            return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor,
+                                **{**common, "extra": {**common["extra"], "detail": walk["detail"]}})
+        if walk is not None and walk["why"] is None and walk["state"] == "failed":
+            # the A* walk failed: the body's reason, mapped as a keypoint navigate maps it (no_path, blocked, fell)
+            meaning = refusal(data.get("reason"), data)
+            reason = self._refused(ex, meaning, data.get("reason"), data) if meaning is not None \
+                else map_body_reason(data.get("reason"))
+            if reason == "fell":
+                self.events.emit("safety_event", kind="fell", execution_id=ex.execution_id)
+            return self._finish(ex, "failed", "reach_stance", reason=reason, at=anchor, **{
+                **common, "extra": {**common["extra"], "detail": "the A* walk toward the reach stance failed"}})
         if why == "cancel":
             return self._finish(ex, "cancelled", "reach_stance", reason=h.cancel_reason or "cancelled", at=anchor,
                                 **common)

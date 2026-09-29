@@ -84,7 +84,8 @@ class WhereModel:
                             and t.thor_type not in vocab.NON_SOLID_TYPES and t.thor_type not in ("Painting",)]
         self._stretches: dict[str, list] = {}
         for s in smap.surfaces.values():
-            self._stretches.setdefault(s.furniture_id, []).append(s)
+            if not getattr(s, "extra_side", False):     # a stand on another free side shares its stretch's box: an
+                self._stretches.setdefault(s.furniture_id, []).append(s)   # object's where stays the stretch's name
 
     # ------------------------------------------------------------------
     def furniture_name(self, scene_id: str, x: float, y: float) -> str:
