@@ -277,3 +277,66 @@ async def test_prompt_never_renders_robot_state_or_perception():
     text = ReferenceBrain(None, ctx.map).render(ctx)
     assert "SECRET_ROBOT_STATE" not in text and "SECRET_GT_OBJECT" not in text
     assert "ACTIONS" in text and "g1 " in text or "g0 " in text
+
+
+@pytest.mark.asyncio
+async def test_quiet_rule_two_no_change_waits_then_sleep():
+    brain = ScriptBrain([ToolCall("wait_and_observe", {"timeout_s": 0})] * 10, kinds={"hmm": "chitchat"})
+    rt, robot, user, _ = make(brain)
+    user.say("hmm")                                         # an open, unanswered utterance
+    try:
+        await run_until(rt, lambda: any(r["type"] == "wait_quiet" for r in rt.tracer.rows), what="quiet")
+        await asyncio.sleep(0.3)
+    finally:
+        await stop(rt)
+    waits = [e for e in rt.history if e.tool_name == "wait_and_observe"]
+    assert 1 <= len(waits) <= 2                             # rule 7: no new information -> stop asking
+    assert all(w.result.status == "succeeded" for w in waits)
+
+
+@pytest.mark.asyncio
+async def test_correction_during_a_pick_is_late_world_information_and_the_hand_is_reconciled():
+    calls = [ToolCall("navigate", {"location": "bedroom_dresser_1a"}),
+             ToolCall("check_reachability", {"object_type": "alarm_clock"}),
+             ToolCall("manipulate", {"action": "pick", "object_type": "alarm_clock"})]
+    brain = ScriptBrain(calls, kinds={"bring me the alarm clock": "request", "no, the apple instead": "correction"})
+    rt, robot, user, _ = make(brain)
+    robot.ignore_cancel = True                              # the grasp finishes anyway (a chunk can't be cut)
+    user.say("bring me the alarm clock")
+    try:
+        await run_until(rt, lambda: any(e.tool_name == "manipulate" and not e.finished for e in rt.history),
+                        wall_s=10, what="pick running")
+        user.say("no, the apple instead")
+        await keep_running(rt, lambda: any(r["type"] == "reconcile_done" for r in rt.tracer.rows), wall_s=10,
+                           what="reconciled")
+    finally:
+        await stop(rt)
+    pick = next(e for e in rt.history if e.tool_name == "manipulate")
+    assert pick.generation < rt.task.intent_version and pick.result.late is True
+    assert pick.status == "succeeded" and robot.hands["right"] == "alarm_clock_1"      # it really holds it
+    # the late success was not taken as progress: hand UNKNOWN, then the reconcile observation verified it
+    unknown = [r for r in rt.tracer.rows if r["type"] == "reconcile_start"]
+    assert unknown and any(e.tool_name == "observe" and e.args.get("why") == "after cancel" for e in rt.history)
+    assert rt.belief.holding["right"].value == "alarm_clock_1" and rt.belief.holding["right"].verified
+    assert not [r for r in rt.tracer.rows if r["type"] == "delivered"]
+
+
+@pytest.mark.asyncio
+async def test_a_fall_is_a_safety_event_that_pauses_and_says_so_once():
+    rt, robot, user, brain = make(nav_s_per_m=4.0)
+    user.say("bring me the alarm clock")
+    try:
+        await run_until(rt, lambda: any(e.tool_name == "navigate" and not e.finished for e in rt.history),
+                        what="walking")
+        robot.emit({"type": "safety_event", "kind": "fell"})
+        ack = "I've lost my balance; I'm stopping until I'm steady."
+        await keep_running(rt, lambda: rt.task.paused and ack in robot.said, what="paused and said")
+        robot.emit({"type": "capability_changed", "capability": "manipulation", "detail": "policy server down"})
+        robot.emit({"type": "body_mode", "mode": "FAULT"})
+        await keep_running(rt, lambda: rt.tool_state() == "FAULT", what="fault state")
+    finally:
+        await stop(rt)
+    assert [r for r in rt.tracer.rows if r["type"] == "safety_event"][0]["kind"] == "fell"
+    assert robot.halts and "I've lost my balance; I'm stopping until I'm steady." in robot.said
+    assert "policy server down" in (rt._note or "") or any(r["type"] == "capability_changed" for r in rt.tracer.rows)
+    assert not robot.estops                                  # a fall never sends command{stop} (invariant 1)

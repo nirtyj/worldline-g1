@@ -263,8 +263,11 @@ class Runtime:
         return self.state.ingest(frame)
 
     def _body_mode_now(self) -> str | None:
+        """The body mode: the latest body_mode event (authoritative, on change), else telemetry."""
+        if self._body_mode is not None:
+            return self._body_mode
         body = (self.state.robot or {}).get("body") or {}
-        return body.get("mode") or self._body_mode
+        return body.get("mode")
 
     async def _observation_loop(self) -> None:
         """Continuously replace latest state; wake only on useful idle changes."""
