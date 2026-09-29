@@ -109,6 +109,33 @@ def points(q_named: dict, frame: str = "pelvis") -> dict[str, np.ndarray]:
     return out
 
 
+def palm_jacobian(side: str, q_named: dict, joints: Sequence[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(palm 4x4, d palm_position / d q (3 x n), d palm_z_axis / d q (3 x n)) in the pelvis frame for `joints` (a
+    subset of ARM_CHAIN[side]); revolute joints, so column i is axis_i x (p - origin_i) (and axis_i x z)."""
+    T = np.eye(4)
+    for j in WAIST_CHAIN:
+        T = _step(T, j, float(q_named.get(j, 0.0)))
+    axes, orgs = [], []
+    for j in ARM_CHAIN[side]:
+        xyz, R0 = _ORIGIN[j]
+        M = np.eye(4)
+        M[:3, :3] = R0
+        M[:3, 3] = xyz
+        Tj = T @ M
+        ax = CHAIN_PARAMS[j][2]
+        axes.append(Tj[:3, :3] @ np.asarray(ax, float))
+        orgs.append(Tj[:3, 3])
+        Rq = np.eye(4)
+        Rq[:3, :3] = _axis_angle(ax, float(q_named.get(j, 0.0)))
+        T = Tj @ Rq
+    P = _step(T, f"{side}_hand_palm_joint", 0.0)
+    p, z = P[:3, 3], P[:3, 2]
+    idx = [ARM_CHAIN[side].index(j) for j in joints]
+    Jp = np.stack([np.cross(axes[i], p - orgs[i]) for i in idx], axis=1)
+    Jz = np.stack([np.cross(axes[i], z) for i in idx], axis=1)
+    return P, Jp, Jz
+
+
 def ik_palm(side: str, target_xyz: Sequence[float], q_seed: dict, q_rest: dict | None = None,
             palm_dir: Sequence[float] | None = None, w_dir: float = 0.05, w_rest: float = 0.02,
             iters: int = 200, tol: float = 2e-3, margin: float = 0.05, lock: Sequence[str] = ()) -> tuple[dict, float]:
@@ -117,45 +144,45 @@ def ik_palm(side: str, target_xyz: Sequence[float], q_seed: dict, q_rest: dict |
     palm_dir: optional desired direction of the palm's +z axis (the fingers close towards palm -z on Dex3; used
     softly with weight w_dir). q_rest: posture the null space is pulled to (weight w_rest). Joint limits are
     enforced with `margin`. lock: arm joints held at their q_seed value (e.g. the wrist pitch, which SONIC barely
-    tracks: docs/arm_tracking.md §3.2). Returns (q_named, final position error in m)."""
+    tracks: docs/arm_tracking.md §3.2). Analytic Jacobian (palm_jacobian): ~1-3 ms per solve, so it can run on the
+    body's control thread at an op start. Returns (q_named, final position error in m)."""
     joints = tuple(j for j in ARM_CHAIN[side] if j not in lock)
+    n = len(joints)
     q = dict(q_seed)
     rest = q_rest or q_seed
+    rest_v = np.array([rest.get(j, 0.0) for j in joints])
     tgt = np.asarray(target_xyz, float)
+    pdir = None if palm_dir is None else np.asarray(palm_dir, float)
     lo = np.array([JOINT_LIMITS[j][0] + margin for j in joints])
     hi = np.array([JOINT_LIMITS[j][1] - margin for j in joints])
     x = np.array([q.get(j, 0.0) for j in joints])
     x = np.clip(x, lo, hi)
-
-    def resid(xv):
-        qq = {**q, **dict(zip(joints, xv))}
-        P = arm_frames(side, qq)["palm"]
-        r = [P[:3, 3] - tgt]
-        if palm_dir is not None:
-            r.append(w_dir * (P[:3, 2] - np.asarray(palm_dir, float)))
-        r.append(w_rest * (xv - np.array([rest.get(j, 0.0) for j in joints])))
-        return np.concatenate(r)
-
-    lam = 1e-2
+    lam = 1e-3
     for stage in (0, 1):       # stage 1: position only (posture/orientation terms dropped) if stage 0 fell short
         for _ in range(iters):
-            r = resid(x)
-            if stage == 1:
-                r = r[:3]
-            pos_err = float(np.linalg.norm(r[:3]))
-            if pos_err < tol:
+            P, Jp, Jz = palm_jacobian(side, {**q, **dict(zip(joints, x))}, joints)
+            rp = P[:3, 3] - tgt
+            if float(np.linalg.norm(rp)) < tol:
                 break
-            J = np.zeros((len(r), len(joints)))
-            for k in range(len(joints)):
-                d = np.zeros(len(joints))
-                d[k] = 1e-5
-                J[:, k] = ((resid(x + d)[:len(r)]) - r) / 1e-5
-            dx = -np.linalg.solve(J.T @ J + lam * np.eye(len(joints)), J.T @ r)
-            n = np.linalg.norm(dx)
-            if n > 0.2:
-                dx *= 0.2 / n
-            x = np.clip(x + dx, lo, hi)
-        if float(np.linalg.norm(resid(x)[:3])) < tol:
+            rows, Js = [rp], [Jp]
+            if stage == 0:
+                if pdir is not None:
+                    rows.append(w_dir * (P[:3, 2] - pdir))
+                    Js.append(w_dir * Jz)
+                rows.append(w_rest * (x - rest_v))
+                Js.append(w_rest * np.eye(n))
+            r, J = np.concatenate(rows), np.vstack(Js)
+            dx = -np.linalg.solve(J.T @ J + lam * np.eye(n), J.T @ r)
+            nn = np.linalg.norm(dx)
+            if nn > 0.2:
+                dx *= 0.2 / nn
+            x_new = np.clip(x + dx, lo, hi)
+            moved = float(np.abs(x_new - x).max())
+            x = x_new
+            if moved < 1e-5:           # converged (to the regularized optimum, or pinned at a limit)
+                break
+        P, _, _ = palm_jacobian(side, {**q, **dict(zip(joints, x))}, joints)
+        if float(np.linalg.norm(P[:3, 3] - tgt)) < tol:
             break
     q.update(dict(zip(joints, (float(v) for v in x))))
     err = float(np.linalg.norm(arm_frames(side, q)["palm"][:3, 3] - tgt))

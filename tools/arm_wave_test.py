@@ -1,0 +1,830 @@
+"""Live tests of the body wave's arm side (owner body-arm) on the M1 stack: B.8 chunk mode with cancel and halt, B.7
+arm_script + CarryLock (a scripted pick toward a real object, then a 2 m carry walk), B.5 waist scan.
+
+    # box, M1 stack up, body running this code (scripts/m1_restart_body.sh)
+    .venv/bin/python -m tools.arm_wave_test chunk --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-chunk
+    .venv/bin/python -m tools.arm_wave_test pick  --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-pick
+    .venv/bin/python -m tools.arm_wave_test scan  --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-scan
+    python -m tools.arm_wave_test chunk --fake --sessions 3 --cancels 1 --halts 1 --out /tmp/aw   # plumbing (fakes)
+
+chunk  Emulates groot_arms (services/executors/groot_arms.py, docs/contracts/arm_chunk.md): per session the start
+       message (open hands, hold_on_end measured, lead_s 0.15), then every 0.4 s an "inference": the observation time
+       t0 = receive time of the newest g1_debug, 150 ms of simulated inference, then a 40-row chunk (50 Hz, SONIC wire
+       order) of a smooth synthetic reach (IK keyframes: out, sway, close the hand, back) with a per-chunk random offset
+       (sigma 0.015 rad) standing in for GR00T's chunk-to-chunk disagreement. Sessions end `stand` or `target` (the
+       next one takes the hold over); `--cancels` sessions are cancelled mid-motion (end hold_on_end measured) and
+       `--halts` are halted on the body's halt lane (PUSH 5612, then resume and release). After every cancel/halt ack
+       three in-flight chunks with a +0.4 rad "poison" on the moving elbow are sent: the body must reject them and the
+       wire must never show them. Measured: falls (GT), the wire (a SUB on SONIC's input 5556: every planner message's
+       upper_body_position), max joint step per planner message and per body tick (the body's max_step_rad), around
+       chunk boundaries and elsewhere, g1_debug steps, clamped / slew fractions, ack times.
+pick   Scene objects from P1: the object (default the bedroom dresser's remote in procthor-train-38) and its support;
+       a stance `--gap` in front of the support edge with the object ahead of the right shoulder; go_to; then
+       `--trials` x (pregrasp, grasp, retract-to-pregrasp), each grasp's palm error to the grasp point (the object's
+       top centre + `--grasp-above`) measured by the tool itself (FK of g1_debug body_q on the GT pelvis pose, 50 Hz)
+       and by the body; then pregrasp, grasp, lift, carry (CarryLock) and a 2 m walk (turn 180 deg, walk 0.3 m/s):
+       palm drift against the held pose, falls; then release and retract.
+scan   The waist scan standing in open space (where the robot is) and in front of the support (`--at-counter`):
+       achieved yaw per hold, arm joint deviation ("only the waist moves"), base drift, falls.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import threading
+import time
+import traceback
+
+import numpy as np
+import zmq
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from body import g1_kin as K  # noqa: E402
+from body import joint_map as jm  # noqa: E402
+from body.arm_script import pelvis_to_world, world_to_pelvis  # noqa: E402
+from body.client import BodyClient  # noqa: E402
+from body.config import ep, port_offset_from_env, ports as _ports  # noqa: E402
+from body.p1_client import P1Rpc  # noqa: E402
+from body.wire import decode_planner, loads_any, split_topic, wrap  # noqa: E402
+
+MJ17 = jm.UPPER_BODY_MUJOCO_JOINTS
+ARM_K = list(range(3, 17))
+DT = 0.02
+
+
+def _r(v, n=4):
+    if v is None:
+        return None
+    if isinstance(v, (list, tuple, np.ndarray)):
+        return [_r(x, n) for x in v]
+    try:
+        return round(float(v), n)
+    except (TypeError, ValueError):
+        return v
+
+
+def _pct(a, q):
+    return None if len(a) == 0 else round(float(np.percentile(np.asarray(a, float), q)), 4)
+
+
+def _minjerk(s):
+    s = min(max(s, 0.0), 1.0)
+    return s * s * s * (10 - 15 * s + 6 * s * s)
+
+
+# ================================================================================================= monitors
+class Monitor:
+    """SUBs on the wire (SONIC input 5556, planner topic), g1_debug (5557) and gt.pose (5601); every sample is stamped
+    with this process's time.monotonic()."""
+
+    def __init__(self, P: dict, ctx: zmq.Context):
+        self.P, self.ctx = P, ctx
+        self.lock = threading.Lock()
+        self.wire: list = []           # (t, mode, mj17 | None, left | None, right | None)
+        self.dbg: list = []            # (t, q29, lh, rh)
+        self.gt: list = []             # (t, x, y, z, yaw, pelvis_z, fallen, quat)
+        self.dbg_latest = None
+        self.dbg_t = None
+        self.running = True
+        self.th = [threading.Thread(target=f, daemon=True) for f in (self._wire, self._dbg, self._gt)]
+        for t in self.th:
+            t.start()
+
+    def _sub(self, port, topic):
+        s = self.ctx.socket(zmq.SUB)
+        s.setsockopt(zmq.LINGER, 0)
+        s.setsockopt(zmq.RCVHWM, 5000)
+        s.setsockopt(zmq.SUBSCRIBE, topic)
+        s.connect(ep(port))
+        return s
+
+    def _wire(self):
+        s = self._sub(self.P["sonic_in"], b"planner")
+        while self.running:
+            if not s.poll(100):
+                continue
+            raw = s.recv()
+            t = time.monotonic()
+            try:
+                p = decode_planner(raw)
+            except Exception:
+                continue
+            up = p.get("upper_body_position")
+            with self.lock:
+                self.wire.append((t, int(p["mode"]), None if up is None else jm.mj17_from_wire(up),
+                                  p.get("left_hand_joints"), p.get("right_hand_joints")))
+        s.close(0)
+
+    def _dbg(self):
+        import msgpack
+        s = self._sub(self.P["sonic_debug"], b"g1_debug")
+        while self.running:
+            if not s.poll(100):
+                continue
+            raw = s.recv()
+            t = time.monotonic()
+            try:
+                d = msgpack.unpackb(raw[len(b"g1_debug"):], raw=False, strict_map_key=False)
+            except Exception:
+                continue
+            if d.get("body_q") is None or len(d["body_q"]) != 29:
+                continue
+            with self.lock:
+                self.dbg.append((t, list(d["body_q"]), d.get("left_hand_q"), d.get("right_hand_q")))
+                self.dbg_latest, self.dbg_t = d, t
+        s.close(0)
+
+    def _gt(self):
+        s = self._sub(self.P["p1_pose"], b"gt.pose")
+        while self.running:
+            if not s.poll(100):
+                continue
+            frames = s.recv_multipart()
+            t = time.monotonic()
+            pl = split_topic(frames, b"gt.pose")
+            if pl is None:
+                continue
+            try:
+                d = loads_any(pl)
+            except Exception:
+                continue
+            pos = d.get("base_pos") or [0, 0, 0]
+            with self.lock:
+                self.gt.append((t, float(pos[0]), float(pos[1]), float(pos[2]), float(d.get("yaw") or 0.0),
+                                float(d.get("pelvis_z") if d.get("pelvis_z") is not None else pos[2]),
+                                bool(d.get("fallen", False)), list(d.get("base_quat_wxyz") or [1, 0, 0, 0])))
+        s.close(0)
+
+    def falls(self, t0=None, t1=None) -> int:
+        with self.lock:
+            g = [x for x in self.gt if (t0 is None or x[0] >= t0) and (t1 is None or x[0] <= t1)]
+        n, prev = 0, False
+        for x in g:
+            f = x[6] or x[5] < 0.55
+            n += f and not prev
+            prev = f
+        return n
+
+    def pose_at(self, t):
+        with self.lock:
+            g = list(self.gt)
+        best = min(g, key=lambda x: abs(x[0] - t)) if g else None
+        return best
+
+    def last_gt(self):
+        with self.lock:
+            return self.gt[-1] if self.gt else None
+
+    def dbg_between(self, t0, t1):
+        with self.lock:
+            return [x for x in self.dbg if t0 <= x[0] <= t1]
+
+    def wire_between(self, t0, t1):
+        with self.lock:
+            return [x for x in self.wire if t0 <= x[0] <= t1]
+
+    def stop(self):
+        self.running = False
+        for t in self.th:
+            t.join(1.0)
+
+
+class Pose_:
+    """body.wire.Pose look-alike for the frame helpers (x, y, z, quat)."""
+
+    def __init__(self, g):
+        self.x, self.y, self.z, self.yaw, self.quat = g[1], g[2], g[3], g[4], g[7]
+
+
+def palm_world(q29, g, side):
+    return pelvis_to_world(K.points(K.named_from_q29(q29))[f"{side}_palm"], Pose_(g))
+
+
+# ================================================================================================= runner
+class Runner:
+    def __init__(self, a):
+        self.a = a
+        self.off = port_offset_from_env() if a.port_offset is None else a.port_offset
+        self.P = _ports(self.off)
+        self.ctx = zmq.Context.instance()
+        self.out = a.out
+        os.makedirs(self.out, exist_ok=True)
+        self.events: list = []
+        self.notes: dict = {"errors": []}
+        self.fake = None
+        if a.fake:
+            self._start_fakes()
+        self.mon = Monitor(self.P, self.ctx)
+        self.p1 = P1Rpc(ep(self.P["p1_rep"]), timeout_s=10.0, ctx=self.ctx)
+        self.bc = BodyClient(port_offset=self.off, ctx=self.ctx).connect(20)
+        self.bc.add_listener(lambda ev: self.events.append({"t": time.monotonic(), **ev}))
+        t0 = time.monotonic()
+        while (self.mon.dbg_t is None or self.mon.last_gt() is None) and time.monotonic() - t0 < 10:
+            time.sleep(0.05)
+        st = self.bc.status()
+        self.notes["status_start"] = {k: st.get(k) for k in ("fault", "in_control", "mode", "arm", "halt", "fences")}
+        self.notes["p1_stats_start"] = self.p1.try_call("get_stats")
+        self.notes["load_start"] = os.getloadavg()
+        if st.get("fault"):
+            raise RuntimeError(f"body fault {st['fault']}: reset the robot first")
+        if not st.get("in_control"):
+            h = self.bc.stand(timeout=120)
+            if not h.ok:
+                raise RuntimeError(f"stand failed: {h.result}")
+        self.epoch = self._epoch(st) + 1
+        self.t_start = time.monotonic()
+
+    def _start_fakes(self):
+        from body.config import BodyConfig
+        from body.service import BodyService
+        from tools.fake_deploy import FakeDeploy
+        from tools.fake_p1 import FakeP1
+
+        tmp = os.path.join(self.out, "fake")
+        self.fake = {"p1": FakeP1(self.off, os.path.join(tmp, "p1"), log=lambda *_: None).start(),
+                     "dep": FakeDeploy(self.off, log=lambda *_: None).start()}
+        svc = BodyService(BodyConfig(port_offset=self.off), log_dir=os.path.join(tmp, "body"), log=None)
+        th = threading.Thread(target=svc.run, daemon=True)
+        th.start()
+        self.fake["svc"] = svc
+
+    @staticmethod
+    def _epoch(st: dict) -> int:
+        cands = [0]
+        for path in (("fences", "halt_epoch"), ("fences", "epoch_seen"), ("halt", "last", "epoch"), ("arm", "halt_epoch")):
+            v = st
+            for k in path:
+                v = v.get(k) if isinstance(v, dict) else None
+            if isinstance(v, int):
+                cands.append(v)
+        return max(cands)
+
+    def ev_terminal(self, op_id):
+        for e in self.events:
+            if e.get("id") == op_id and e.get("state") in ("succeeded", "failed", "canceled"):
+                return e
+        return None
+
+    def wait_terminal(self, op_id, timeout):
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            e = self.ev_terminal(op_id)
+            if e is not None:
+                return e
+            time.sleep(0.02)
+        return None
+
+    def arm(self, args, op_id=None):
+        return self.bc.request("arm", args, op_id=op_id)
+
+    def ref_mj17(self):
+        d = self.mon.dbg_latest or {}
+        v = d.get("body_q_target") or d.get("body_q")
+        return jm.mj17_from_mujoco(v)
+
+    def q_mj17(self):
+        return jm.mj17_from_mujoco(self.mon.dbg_latest["body_q"])
+
+    def save(self, name, obj):
+        with open(os.path.join(self.out, name), "w") as f:
+            json.dump(obj, f, indent=1, default=_jd)
+
+    def close(self):
+        self.notes["p1_stats_end"] = self.p1.try_call("get_stats")
+        self.notes["load_end"] = os.getloadavg()
+        with self.mon.lock:
+            np.savez_compressed(os.path.join(self.out, "raw.npz"),
+                                wire_t=np.array([w[0] for w in self.mon.wire]),
+                                wire_mode=np.array([w[1] for w in self.mon.wire]),
+                                wire_mj17=np.array([w[2] if w[2] is not None else [np.nan] * 17 for w in self.mon.wire]),
+                                dbg_t=np.array([d[0] for d in self.mon.dbg]),
+                                dbg_q=np.array([d[1] for d in self.mon.dbg]),
+                                gt=np.array([g[:7] for g in self.mon.gt], dtype=float))
+        self.save("events.json", self.events)
+        self.save("notes.json", self.notes)
+        self.mon.stop()
+        self.bc.close()
+
+
+def _jd(o):
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, (np.floating, np.integer)):
+        return o.item()
+    return str(o)
+
+
+# ================================================================================================= chunk sessions
+class Reach:
+    """A smooth synthetic reach (absolute mj17 targets as a function of the time since the session start): out to an
+    IK keyframe over 1.5 s, a Hann-windowed 0.5 Hz sway (shoulder pitch 0.15 rad, elbow 0.10 rad) with the hand
+    closing to 0.6,
+    back to SONIC's reference arms from 4.0 s, hand open again."""
+
+    def __init__(self, ref17, side: str, i: int):
+        self.ref, self.side = list(ref17), side
+        seed = K.named_from_mj17(ref17)
+        sgn = -1.0 if side == "right" else 1.0
+        q, err = K.ik_palm(side, (0.26, 0.20 * sgn, 0.02 + 0.03 * (i % 3)), seed, q_rest=seed,
+                           lock=(f"{side}_wrist_pitch_joint", f"{side}_wrist_yaw_joint"))
+        self.goal = list(ref17)
+        for n in K.ARM_CHAIN[side]:
+            self.goal[MJ17.index(n)] = q[n]
+        self.ik_err = err
+        self.k_sp = MJ17.index(f"{side}_shoulder_pitch_joint")
+        self.k_el = MJ17.index(f"{side}_elbow_joint")
+        self.duration = 5.5
+
+    def at(self, t):
+        if t < 1.5:
+            a = _minjerk(t / 1.5)
+            q = [r + (g - r) * a for r, g in zip(self.ref, self.goal)]
+        elif t < 4.0:
+            q = list(self.goal)
+            tau = t - 1.5
+            s = math.sin(2 * math.pi * 0.5 * tau) * math.sin(math.pi * tau / 2.5) ** 2   # Hann-windowed: smooth ends
+            q[self.k_sp] += 0.15 * s
+            q[self.k_el] += 0.10 * s
+        else:
+            a = _minjerk((t - 4.0) / 1.5)
+            q = [g + (r - g) * a for r, g in zip(self.ref, self.goal)]
+        c = 0.6 * _minjerk((t - 2.0) / 0.8) * (1.0 - _minjerk((t - 4.2) / 0.5))
+        hands = {"left": [0.0] * 7, "right": [0.0] * 7}
+        hands[self.side] = jm.hand_closure(self.side, c)
+        return q, hands
+
+
+def chunk_test(R: Runner) -> dict:
+    a = R.a
+    rng = random.Random(a.seed)
+    n_s = a.sessions
+    kinds = ["normal"] * n_s
+    idx = list(range(1, n_s))
+    rng.shuffle(idx)
+    for j in idx[:a.cancels]:
+        kinds[j] = "cancel"
+    for j in idx[a.cancels:a.cancels + a.halts]:
+        kinds[j] = "halt"
+    results = []
+    hold_next = False
+    for i in range(n_s):
+        sid = f"barm-{int(time.time())}-{i}"
+        side = "right" if i % 2 == 0 else "left"
+        kind = kinds[i]
+        end_hold = "target" if (kind == "normal" and i % 3 == 1 and i < n_s - 1) else "stand"
+        print(f"[arm_wave] chunk session {i} {kind} {side} end={end_hold if kind == 'normal' else kind}", flush=True)
+        try:
+            results.append(_chunk_session(R, rng, i, sid, side, kind, end_hold))
+        except Exception as e:
+            R.notes["errors"].append(f"session {i}: {traceback.format_exc()}")
+            results.append({"i": i, "sid": sid, "kind": kind, "error": repr(e)})
+        time.sleep(0.3 if end_hold == "target" and kind == "normal" else 2.0)
+    return summarize_chunk(R, results)
+
+
+def _chunk_session(R: Runner, rng, i, sid, side, kind, end_hold) -> dict:
+    a = R.a
+    base = {"stream": sid, "session_id": sid, "execution_id": sid, "generation": 1, "control_epoch": R.epoch,
+            "mode": "chunk"}
+    ref = R.ref_mj17()
+    traj = Reach(ref, side, i)
+    t_open = time.monotonic()
+    rep = R.arm({**base, "t_wall": time.time(), "hold_on_end": "measured", "watchdog_s": 2.0, "lead_s": a.lead,
+                 "left_hand": [0.0] * 7, "right_hand": [0.0] * 7, "hands_blend_s": 0.3}, op_id=f"arm-{sid}")
+    traj_step = max(max(abs(x - y) for x, y in zip(traj.at(k * DT)[0][3:], traj.at((k + 1) * DT)[0][3:]))
+                    for k in range(int(traj.duration / DT)))
+    out = {"i": i, "sid": sid, "kind": kind, "side": side, "end": end_hold, "start_reply": rep.get("state"),
+           "traj_max_step_rad": round(traj_step, 4),
+           "start_error": rep.get("error"), "ik_err_m": _r(traj.ik_err), "chunks": [], "late": [],
+           "epoch": R.epoch, "t_open": t_open}
+    if not rep.get("ok"):
+        return out
+    time.sleep(0.3)
+    t_sess0 = time.monotonic()
+    seq = 0
+    t_last_obs = -1e9
+    stop_at = {"cancel": 2.6, "halt": 2.6}.get(kind, traj.duration)
+    ack = None
+    while True:
+        now = time.monotonic()
+        if now - t_sess0 >= stop_at:
+            break
+        if now - t_last_obs < a.replan_s:
+            time.sleep(0.005)
+            continue
+        t_obs = R.mon.dbg_t                                   # observation = the newest g1_debug receive time
+        t_last_obs = t_obs
+        time.sleep(a.inference_s)                             # simulated inference
+        seq += 1
+        off = [rng.gauss(0.0, a.noise) for _ in range(17)]
+        rows, lh, rh = [], [], []
+        for k in range(40):
+            q, hands = traj.at(t_obs - t_sess0 + k * DT)
+            rows.append(jm.wire_from_mj17([v + (o if kk >= 3 else 0.0) for kk, (v, o) in enumerate(zip(q, off))]))
+            lh.append(hands["left"])
+            rh.append(hands["right"])
+        msg = {**base, "t_wall": time.time(), "chunk": {"seq": seq, "t0_mono": t_obs, "dt": DT, "order": "wire",
+                                                         "upper_body": rows, "left_hand": lh, "right_hand": rh,
+                                                         "inference_ms": round(a.inference_s * 1000, 1)}}
+        t_send = time.monotonic()
+        rep = R.arm(msg)
+        out["chunks"].append({"seq": seq, "t_obs": t_obs, "t_send": t_send, "t_reply": time.monotonic(),
+                              "ok": rep.get("ok"), "error": rep.get("error"),
+                              "dropped": (rep.get("data") or {}).get("dropped")})
+    q_at_stop = R.q_mj17()
+    hands_at_stop = {s: list((R.mon.dbg_latest or {}).get(f"{s}_hand_q") or []) for s in ("left", "right")}
+    if kind == "normal":
+        rep = R.arm({**base, "t_wall": time.time(), "end": True, "hold_on_end": end_hold, "reason": "done"})
+        out["end_reply"] = rep.get("state") if rep.get("ok") else rep.get("error")
+    elif kind == "cancel":
+        t_c = time.monotonic()
+        rep = R.arm({**base, "t_wall": time.time(), "end": True, "hold_on_end": "measured", "reason": "cancelled"})
+        ack = time.monotonic()
+        out["cancel"] = {"reply": rep.get("state") if rep.get("ok") else rep.get("error"),
+                         "ack_ms": round((ack - t_c) * 1e3, 2)}
+    else:
+        h = R.bc.halt(R.epoch, timeout_s=0.1, reason="arm_wave_test")
+        ack = time.monotonic()
+        out["halt"] = {"acked": h.get("acked"), "rtt_ms": h.get("rtt_ms"), "wait_ms": h.get("wait_ms"),
+                       "arms_latched": (h.get("body") or {}).get("arms_latched"),
+                       "arm": (h.get("body") or {}).get("arm"), "handle_ms": (h.get("body") or {}).get("handle_ms")}
+    out["t_stop"] = time.monotonic()
+    if ack is not None:
+        # in-flight chunks after the ack, poisoned: +0.4 rad on the moving arm's elbow
+        k_el = traj.k_el
+        poison = []
+        for j in range(3):
+            q, hands = traj.at(time.monotonic() - t_sess0)
+            q = list(q)
+            q[k_el] += 0.4
+            seq += 1
+            rep = R.arm({**base, "t_wall": time.time(),
+                         "chunk": {"seq": seq, "t0_mono": time.monotonic(), "dt": DT, "order": "wire",
+                                   "upper_body": [jm.wire_from_mj17(q)] * 40, "left_hand": [hands["left"]] * 40,
+                                   "right_hand": [hands["right"]] * 40}})
+            poison.append({"seq": seq, "ok": rep.get("ok"), "error": rep.get("error")})
+            time.sleep(0.05)
+        out["late"] = poison
+        time.sleep(1.0)
+        w_before = R.mon.wire_between(ack - 0.3, ack)
+        w_after = R.mon.wire_between(ack, ack + 1.0)
+        el_b = [w[2][k_el] for w in w_before if w[2] is not None]
+        el_a = [w[2][k_el] for w in w_after if w[2] is not None]
+        el_ack = el_b[-1] if el_b else None
+        out["after_ack"] = {"wire_elbow_at_ack": _r(el_ack),
+                            "wire_elbow_max_rise": _r(max(el_a) - el_ack) if el_a and el_ack is not None else None,
+                            "poison_applied": bool(el_a and el_ack is not None and max(el_a) - el_ack > 0.2),
+                            "n_wire": len(el_a)}
+        if kind == "halt":
+            q_after = R.q_mj17()
+            hq = {s: list((R.mon.dbg_latest or {}).get(f"{s}_hand_q") or []) for s in ("left", "right")}
+            w_last = w_after[-1] if w_after else None
+            out["after_ack"].update({
+                "measured_arm_drift_rad_1s": _r(max(abs(q_after[k] - q_at_stop[k]) for k in ARM_K)),
+                "wire_hands_vs_measured_at_halt_rad": None if w_last is None or w_last[3] is None else _r(max(
+                    max(abs(x - y) for x, y in zip(w_last[3], hands_at_stop["left"])),
+                    max(abs(x - y) for x, y in zip(w_last[4], hands_at_stop["right"])))),
+                "hand_closure_at_halt": {s: _r(jm.hand_closure_of(s, hands_at_stop[s]), 3) for s in ("left", "right")
+                                         if len(hands_at_stop[s]) == 7},
+                "hand_closure_1s_later": {s: _r(jm.hand_closure_of(s, hq[s]), 3) for s in ("left", "right")
+                                          if len(hq[s]) == 7}})
+            st = R.bc.status()
+            out["after_ack"]["arm_mode_latched"] = (st.get("arm") or {}).get("mode")
+            rep = R.bc.resume(R.epoch)
+            out["resume"] = rep.get("ok")
+            R.epoch += 1
+            rep = R.arm({"stream": f"{sid}-release", "end": True, "control_epoch": R.epoch, "t_wall": time.time()})
+            out["release_reply"] = rep.get("ok"), (rep.get("data") or {}).get("released"), rep.get("error")
+    ev = R.wait_terminal(f"arm-{sid}", 5.0)
+    out["terminal"] = None if ev is None else {"state": ev["state"], **{k: (ev.get("data") or {}).get(k) for k in (
+        "ended_by", "hold", "reason", "chunks", "clamped_frac_total", "slew_frac_total", "stall_s_max",
+        "max_step_rad", "cross_fades", "duration_s", "lead_s")}}
+    return out
+
+
+def _steps(samples, t_idx=0, v_idx=2, win=None):
+    """Max per-sample arm-joint step between consecutive samples (optionally only where the later sample falls in
+    one of the windows)."""
+    best = 0.0
+    prev = None
+    for s in samples:
+        v = s[v_idx]
+        if v is None:
+            prev = None
+            continue
+        if prev is not None and (win is None or any(a <= s[t_idx] <= b for a, b in win)):
+            best = max(best, max(abs(v[k] - prev[k]) for k in ARM_K))
+        prev = v
+    return best
+
+
+def summarize_chunk(R: Runner, results: list) -> dict:
+    t0, t1 = R.t_start, time.monotonic()
+    wire = R.mon.wire_between(t0, t1)
+    dbg = [(d[0], None, jm.mj17_from_mujoco(d[1])) for d in R.mon.dbg_between(t0, t1)]
+    bounds = []
+    for r in results:
+        for c in r.get("chunks", []):
+            if c.get("ok") and not c.get("dropped"):
+                bounds.append((c["t_reply"], c["t_reply"] + 0.16))
+    ok_sessions = [r for r in results if r.get("start_reply") == "accepted"]
+    terms = [r.get("terminal") or {} for r in results]
+    cancels = [r for r in results if r["kind"] == "cancel"]
+    halts = [r for r in results if r["kind"] == "halt"]
+
+    def no_chunk_after_ack(r):
+        late_ok = all(not x.get("ok") for x in r.get("late", []))
+        wire_ok = not (r.get("after_ack") or {}).get("poison_applied", True)
+        return bool(late_ok and wire_ok)
+
+    S = {
+        "sessions": len(results), "sessions_opened": len(ok_sessions),
+        "falls": R.mon.falls(t0, t1),
+        "chunks_sent": sum(len(r.get("chunks", [])) for r in results),
+        "chunks_applied_body": sum(((t.get("chunks") or {}).get("applied") or 0) for t in terms),
+        "chunks_dropped_body": _sum_dropped(terms),
+        "terminal_states": [(t.get("state"), t.get("ended_by"), t.get("hold")) for t in terms],
+        "wire_max_step_rad": {"all": round(_steps(wire), 4), "chunk_boundaries": round(_steps(wire, win=bounds), 4)},
+        "trajectory_max_step_rad": max([r.get("traj_max_step_rad") or 0.0 for r in results] or [0.0]),
+        "body_max_step_rad_per_tick": max([t.get("max_step_rad") or 0.0 for t in terms] or [0.0]),
+        "measured_max_step_rad": {"all": round(_steps(dbg), 4), "chunk_boundaries": round(_steps(dbg, win=bounds), 4)},
+        "slew_limit_rad_per_tick": 0.12,
+        "clamped_frac_total_max": max([t.get("clamped_frac_total") or 0.0 for t in terms] or [0.0]),
+        "slew_frac_total_max": max([t.get("slew_frac_total") or 0.0 for t in terms] or [0.0]),
+        "stall_s_max": max([t.get("stall_s_max") or 0.0 for t in terms] or [0.0]),
+        "cancel": {"n": len(cancels), "ok": sum(no_chunk_after_ack(r) and (r.get("terminal") or {}).get("state")
+                                               == "succeeded" for r in cancels),
+                   "ack_ms": [(r.get("cancel") or {}).get("ack_ms") for r in cancels]},
+        "halt": {"n": len(halts), "ok": sum(no_chunk_after_ack(r) and (r.get("halt") or {}).get("acked") and
+                                           (r.get("terminal") or {}).get("ended_by") == "halt" for r in halts),
+                 "rtt_ms": [(r.get("halt") or {}).get("rtt_ms") for r in halts],
+                 "arms_latched": [(r.get("halt") or {}).get("arms_latched") for r in halts],
+                 "arm_latch_ms": [((r.get("halt") or {}).get("arm") or {}).get("latch_ms") for r in halts],
+                 "measured_arm_drift_rad_1s": [(r.get("after_ack") or {}).get("measured_arm_drift_rad_1s")
+                                               for r in halts],
+                 "hand_closure_at_halt_vs_1s": [((r.get("after_ack") or {}).get("hand_closure_at_halt"),
+                                                 (r.get("after_ack") or {}).get("hand_closure_1s_later")) for r in halts]},
+        "late_chunk_replies": [[x.get("error") for x in r.get("late", [])] for r in cancels + halts],
+        "rtf": _rtf(R),
+    }
+    R.save("sessions.json", results)
+    return S
+
+
+def _sum_dropped(terms):
+    out = {}
+    for t in terms:
+        for k, v in (((t.get("chunks") or {}).get("dropped")) or {}).items():
+            out[k] = out.get(k, 0) + int(v or 0)
+    return out
+
+
+def _rtf(R):
+    st = R.p1.try_call("get_stats") or {}
+    return {k: st.get(k) for k in ("rtf_total", "rtf_10s", "rtf_1s_min", "rtf_1s_below_0p95_frac", "overruns")}
+
+
+# ================================================================================================= pick + carry
+def find_object(scene: dict, oid: str | None):
+    objs = scene.get("objects") or []
+    by_id = {o.get("id"): o for o in objs}
+    if oid:
+        return by_id[oid], objs
+    return by_id["RemoteControl|surface|2|30"], objs
+
+
+def support_of(obj, objs):
+    """The furniture whose footprint holds the object and whose top is at the object's bottom."""
+    (ox0, oy0, oz0), (ox1, oy1, oz1) = obj["aabb"]
+    cx, cy = (ox0 + ox1) / 2, (oy0 + oy1) / 2
+    best = None
+    for o in objs:
+        if o is obj or "surface" in str(o.get("id")):
+            continue
+        (x0, y0, z0), (x1, y1, z1) = o["aabb"]
+        if x0 <= cx <= x1 and y0 <= cy <= y1 and abs(z1 - oz0) < 0.06:
+            if best is None or (x1 - x0) * (y1 - y0) < (best["aabb"][1][0] - best["aabb"][0][0]) * \
+                    (best["aabb"][1][1] - best["aabb"][0][1]):
+                best = o
+    return best
+
+
+def stance_for(obj, sup, gap: float, lateral: float, side: str):
+    """Stand `gap` from the support edge nearest to the object, facing it, the object `lateral` to the arm's side."""
+    (x0, y0, _), (x1, y1, _) = sup["aabb"]
+    (ox0, oy0, _), (ox1, oy1, _) = obj["aabb"]
+    cx, cy = (ox0 + ox1) / 2, (oy0 + oy1) / 2
+    edges = [(cx - x0, (-1.0, 0.0)), (x1 - cx, (1.0, 0.0)), (cy - y0, (0.0, -1.0)), (y1 - cy, (0.0, 1.0))]
+    d, n = min(edges, key=lambda e: e[0])
+    f = np.array([-n[0], -n[1]])                      # facing: towards the support
+    left = np.array([-f[1], f[0]])
+    sgn = -1.0 if side == "right" else 1.0
+    xy = np.array([cx, cy]) - (d + gap) * f - sgn * lateral * left
+    return float(xy[0]), float(xy[1]), math.atan2(f[1], f[0]), d
+
+
+def script(R: Runner, args: dict, timeout: float = 20.0) -> dict:
+    op_id = f"as-{args.get('phase', 'scan')}-{int(time.time() * 1000) % 10 ** 8}"
+    op = "scan" if "phase" not in args else "arm_script"
+    t0 = time.monotonic()
+    rep = R.bc.request(op, {**args, "control_epoch": R.epoch}, op_id=op_id)
+    if not rep.get("ok"):
+        return {"op_id": op_id, "reply": rep, "t0": t0}
+    ev = R.wait_terminal(op_id, timeout)
+    return {"op_id": op_id, "reply_state": rep.get("state"), "plan": rep.get("data"), "t0": t0,
+            "t1": time.monotonic(), "terminal": None if ev is None else {"state": ev["state"], **(ev.get("data") or {})}}
+
+
+def palm_err_tool(R: Runner, t0, t1, side, goal_w):
+    errs = []
+    for d in R.mon.dbg_between(t0, t1):
+        g = R.mon.pose_at(d[0])
+        if g is None or abs(g[0] - d[0]) > 0.05:
+            continue
+        errs.append(float(np.linalg.norm(palm_world(d[1], g, side) - np.asarray(goal_w))))
+    return errs
+
+
+def pick_test(R: Runner) -> dict:
+    a = R.a
+    scene = R.p1.call("get_scene_info")
+    obj, objs = find_object(scene, a.object)
+    sup = support_of(obj, objs)
+    if sup is None:
+        raise RuntimeError(f"no support found for {obj['id']}")
+    (ox0, oy0, oz0), (ox1, oy1, oz1) = obj["aabb"]
+    grasp_w = [(ox0 + ox1) / 2, (oy0 + oy1) / 2, oz1 + a.grasp_above]
+    sx, sy, syaw, d_edge = stance_for(obj, sup, a.gap, a.lateral, a.arm)
+    S = {"object": obj["id"], "support": sup["id"], "grasp_w": _r(grasp_w), "edge_dist_m": _r(d_edge),
+         "stance": _r([sx, sy, math.degrees(syaw)], 3)}
+    print(f"[arm_wave] pick {obj['id']} on {sup['id']}: stance {S['stance']}", flush=True)
+    h = R.bc.go_to(sx, sy, yaw=syaw, timeout_s=120)
+    S["go_to"] = {"state": h.state, "pos_err": (h.result or {}).get("pos_err"),
+                  "yaw_err_deg": (h.result or {}).get("yaw_err_deg")}
+    time.sleep(1.5)
+    g = R.mon.last_gt()
+    S["pose_at_stance"] = _r([g[1], g[2], math.degrees(g[4])], 3)
+    ob = world_to_pelvis(grasp_w, Pose_(g))
+    S["grasp_b_at_stance"] = _r(ob)
+    trials = []
+    for k in range(a.trials):
+        tr = {"k": k}
+        tr["pregrasp"] = script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w})
+        tr["grasp"] = gr = script(R, {"phase": "grasp", "arm": a.arm, "target_w": grasp_w, "closure": 0.6,
+                                      "settle_s": a.settle})
+        term = gr.get("terminal") or {}
+        if term.get("state") == "succeeded":
+            m1 = gr["t1"] - 0.05
+            e = palm_err_tool(R, m1 - min(1.0, a.settle - 0.3), m1, a.arm, grasp_w)
+            tr["tool_palm_err_w_m"] = {"median": _pct(e, 50), "p90": _pct(e, 90), "max": _r(max(e) if e else None),
+                                       "n": len(e)}
+            tr["_tool_errs"] = e
+        if k < a.trials - 1:
+            tr["retract"] = script(R, {"phase": "pregrasp", "arm": a.arm, "target_w": grasp_w, "hold_on_end": "target"})
+        trials.append(tr)
+    allerr = [x for tr in trials for x in tr.pop("_tool_errs", [])]
+    S["grasp_palm_err_w_m_tool"] = {"median": _pct(allerr, 50), "p90": _pct(allerr, 90),
+                                    "max": _r(max(allerr) if allerr else None), "n": len(allerr)}
+    S["grasp_palm_err_w_m_body"] = [((tr["grasp"].get("terminal") or {}).get("palm_err_w_m")) for tr in trials]
+    S["grasp_palm_err_b_m_body"] = [((tr["grasp"].get("terminal") or {}).get("palm_err_b_m")) for tr in trials]
+    S["ik_err_m"] = [((tr["grasp"].get("plan") or {}).get("ik_err_m")) for tr in trials]
+    # carry: lift, tuck, CarryLock, turn, 2 m walk
+    lift = script(R, {"phase": "lift", "arm": a.arm, "lift_m": 0.06})
+    carry = script(R, {"phase": "carry", "arm": a.arm})
+    st = R.bc.status()
+    S["carry_lock"] = (st.get("arm") or {}).get("carry")
+    hold_pose = ((st.get("arm") or {}).get("hold") or {}).get("pose_mj17")
+    t_w0 = time.monotonic()
+    g0 = R.mon.last_gt()
+    ht = R.bc.turn_to(wrap(g0[4] + math.pi), timeout=40)
+    hw = R.bc.walk(vx=a.walk_v, duration_s=a.walk_s)
+    t_w1 = time.monotonic()
+    g1 = R.mon.last_gt()
+    drift = []
+    if hold_pose is not None:
+        want = K.points({**K.named_from_mj17(hold_pose)})
+        for d in R.mon.dbg_between(t_w0, t_w1):
+            qm = jm.mj17_from_mujoco(d[1])
+            got_n = K.named_from_mj17(qm)
+            want_n = K.named_from_mj17(hold_pose)
+            for wj in jm.WAIST_JOINTS:
+                want_n[wj] = got_n[wj]
+            pw, pg = K.points(want_n)[f"{a.arm}_palm"], K.points(got_n)[f"{a.arm}_palm"]
+            drift.append(float(np.linalg.norm(pw - pg)))
+    S["carry_walk"] = {"turn": {"state": ht.state, "yaw_err_deg": (ht.result or {}).get("yaw_err_deg")},
+                       "walk": {"state": hw.state, "walked_m": (hw.result or {}).get("walked_m"),
+                                "displacement_m": (hw.result or {}).get("displacement_m")},
+                       "gt_displacement_m": _r(math.hypot(g1[1] - g0[1], g1[2] - g0[2]), 3),
+                       "falls": R.mon.falls(t_w0, t_w1),
+                       "palm_drift_m": {"rms": _r(math.sqrt(sum(x * x for x in drift) / len(drift))) if drift else None,
+                                        "p90": _pct(drift, 90), "max": _r(max(drift) if drift else None),
+                                        "n": len(drift)},
+                       "carry_after": (R.bc.status().get("arm") or {}).get("carry")}
+    S["lift"], S["carry"] = lift.get("terminal"), carry.get("terminal")
+    rel = script(R, {"phase": "release", "arm": a.arm})
+    ret = script(R, {"phase": "retract", "arm": a.arm})
+    S["release"], S["retract"] = (rel.get("terminal") or {}).get("state"), (ret.get("terminal") or {}).get("state")
+    S["trials"] = trials
+    S["falls_total"] = R.mon.falls(R.t_start, time.monotonic())
+    S["rtf"] = _rtf(R)
+    return S
+
+
+# ================================================================================================= scan
+def scan_once(R: Runner, label: str) -> dict:
+    t0 = time.monotonic()
+    g0 = R.mon.last_gt()
+    q0 = R.q_mj17()
+    r = script(R, {"yaw_deg": R.a.yaw_deg}, timeout=20.0)
+    t1 = time.monotonic()
+    g1 = R.mon.last_gt()
+    dev = 0.0
+    legs = 0.0
+    for d in R.mon.dbg_between(t0, t1):
+        qm = jm.mj17_from_mujoco(d[1])
+        dev = max(dev, max(abs(qm[k] - q0[k]) for k in ARM_K))
+    term = r.get("terminal") or {}
+    return {"label": label, "state": term.get("state"), "holds": term.get("holds"),
+            "yaw_err_deg_max": term.get("yaw_err_deg_max"), "body_arm_dev_rad_max": term.get("arm_dev_rad_max"),
+            "tool_arm_dev_rad_max": _r(dev), "waist_roll_pitch_dev_rad_max": term.get("waist_roll_pitch_dev_rad_max"),
+            "base_shift_m": _r(math.hypot(g1[1] - g0[1], g1[2] - g0[2]), 4), "falls": R.mon.falls(t0, t1),
+            "duration_s": _r(t1 - t0, 2), "reply": r.get("reply")}
+
+
+def scan_test(R: Runner) -> dict:
+    a = R.a
+    S = {"standing": scan_once(R, "standing")}
+    if a.at_counter:
+        scene = R.p1.call("get_scene_info")
+        obj, objs = find_object(scene, a.object)
+        sup = support_of(obj, objs)
+        sx, sy, syaw, _ = stance_for(obj, sup, a.gap, a.lateral, a.arm)
+        h = R.bc.go_to(sx, sy, yaw=syaw, timeout_s=120)
+        S["go_to"] = {"state": h.state, "pos_err": (h.result or {}).get("pos_err"), "support": sup["id"]}
+        time.sleep(1.5)
+        S["at_counter"] = scan_once(R, f"at {sup['id']}")
+    S["rtf"] = _rtf(R)
+    return S
+
+
+# ================================================================================================= main
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("mode", choices=["chunk", "pick", "scan"])
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--port-offset", type=int, default=None)
+    ap.add_argument("--fake", action="store_true", help="run against in-process fakes (fake P1 + fake deploy + body)")
+    ap.add_argument("--seed", type=int, default=7)
+    # chunk
+    ap.add_argument("--sessions", type=int, default=10)
+    ap.add_argument("--cancels", type=int, default=3)
+    ap.add_argument("--halts", type=int, default=3)
+    ap.add_argument("--lead", type=float, default=0.15)
+    ap.add_argument("--replan-s", type=float, default=0.4)
+    ap.add_argument("--inference-s", type=float, default=0.15)
+    ap.add_argument("--noise", type=float, default=0.015)
+    # pick / scan
+    ap.add_argument("--object", default=None)
+    ap.add_argument("--arm", default="right", choices=["left", "right"])
+    ap.add_argument("--gap", type=float, default=0.26)
+    ap.add_argument("--lateral", type=float, default=0.20)
+    ap.add_argument("--grasp-above", type=float, default=0.03)
+    ap.add_argument("--trials", type=int, default=3)
+    ap.add_argument("--settle", type=float, default=2.0)
+    ap.add_argument("--walk-v", type=float, default=0.3)
+    ap.add_argument("--walk-s", type=float, default=7.0)
+    ap.add_argument("--yaw-deg", type=float, nargs="+", default=[-35.0, 0.0, 35.0])
+    ap.add_argument("--at-counter", action="store_true")
+    a = ap.parse_args(argv)
+    if a.fake and a.port_offset is None:
+        a.port_offset = 300
+    R = Runner(a)
+    rc = 0
+    try:
+        S = {"chunk": chunk_test, "pick": pick_test, "scan": scan_test}[a.mode](R)
+    except Exception:
+        R.notes["errors"].append(traceback.format_exc())
+        S = {"error": traceback.format_exc()}
+        rc = 1
+    S["mode"], S["args"], S["duration_s"] = a.mode, vars(a), round(time.monotonic() - R.t_start, 1)
+    S["errors"] = R.notes["errors"]
+    R.save("summary.json", S)
+    R.close()
+    print(json.dumps({k: v for k, v in S.items() if k not in ("trials", "args", "errors")}, default=_jd)[:4000])
+    if R.fake:
+        R.fake["svc"].stop()
+        R.fake["dep"].stop()
+        R.fake["p1"].stop()
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

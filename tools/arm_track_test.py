@@ -253,6 +253,8 @@ class Run:
         self.js_snapshots: list[dict] = []
         self.q = 1.0 if not a.quick else 0.25    # duration scale in --quick mode
         self.lead = float(a.lead)
+        self.notes["servo"] = {"ki": a.servo_ki, "delay_s": a.servo_delay, "max": a.servo_max,
+                               "model": a.servo_model or "body default", "lead_s": a.lead}
 
     # -- setup ---------------------------------------------------------------------------------------------
     def start(self):
@@ -288,6 +290,8 @@ class Run:
     def begin_stream(self, **kw):
         # always explicit, so a run records exactly what it measured (the body's default is servo_ki 2.0)
         kw = {"servo_ki": self.a.servo_ki, "servo_delay_s": self.a.servo_delay, "servo_max": self.a.servo_max, **kw}
+        if self.a.servo_model:
+            kw["servo_model"] = self.a.servo_model
         self.arm = self.bc.arm_stream(**kw)
         self.cur = np.array([self.cap.ref_q29()[i] for i in ARM_MJ])
         self.hands = {"left": None, "right": None}
@@ -1410,6 +1414,8 @@ def main(argv=None) -> int:
     ap.add_argument("--servo-ki", type=float, default=2.0, help="arm channel servo gain (0 = off, body/arm.py)")
     ap.add_argument("--servo-delay", type=float, default=0.15)
     ap.add_argument("--servo-max", type=float, default=0.4)
+    ap.add_argument("--servo-model", default=None, choices=["gated", "delay", "fopdt"],
+                    help="arm channel servo reference (body/arm.py; default: the body's, gated since the body wave)")
     ap.add_argument("--lead", type=float, default=0.0, help="send pre-planned targets this many s ahead")
     ap.add_argument("--sine-freqs", default="0.2,0.5,1.0")
     ap.add_argument("--sine-sides", default="left,right,both")
