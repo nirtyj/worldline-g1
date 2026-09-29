@@ -1,8 +1,9 @@
 # GR00T serving (P4): the N1.7 G1 checkpoint on the dev box, its contract, and the runtime client
 
-Status: **M2b wave 1, 2026-09-29.** Owner `groot_srv`. The server, the runtime client (`groot/`), the open-loop check
-and the link script are built and were run on the dev box `ludo-g1-arena`; numbers below name the run that produced
-them. Everything GR00T here is labelled **experimental** (owner decision, PLAN §0.8): an off-the-shelf checkpoint
+Status: **M2b wave 1, 2026-09-29** (owner `groot_srv`), **updated in wave 2** (owner `ops-groot`). The server, the
+runtime client (`groot/`), the open-loop check and the link script are built and were run on the dev box
+`ludo-g1-arena`; in wave 2 the OD3 link runs from the main box (§5.1) and the GR00T stance is derived (§8). Numbers
+below name the run that produced them. Everything GR00T here is labelled **experimental** (owner decision, PLAN §0.8): an off-the-shelf checkpoint
 trained on one apple-to-plate scene; in a house it is expected to move the arms plausibly and usually not grasp.
 
 Tags as in `docs/groot_arms_design.md`: **[v]** read in code or files (path:line), **[m]** measured (run named),
@@ -293,6 +294,28 @@ Wave-2 steps (in order):
 Wave-1 check of the restrictions (`groot_link.sh selftest`, dev box only; a throwaway key authorized with the same
 options plus `from="127.0.0.1"`, a loopback tunnel, then removed): §6.6.
 
+### 5.1 As run on the main box (wave 2, 2026-09-29, owner ops-groot) [m]
+
+| Step | What ran | Result |
+|---|---|---|
+| 1 | dev, under the dev stack lock: `groot_server.sh start --warm` | ready in 18.4 s, VRAM 6522 → 6656 MiB after the warm-up call (731 ms), bound 127.0.0.1:5550 (`/work/logs/groot/server-5550.json`, started 10:18:37Z) |
+| 2 | main: `groot_link.sh keygen` | `~/.ssh/groot_link_ed25519` (comment `groot-link@computeinstance-e00d6jcj272tzcyrbp`) |
+| 3 | main: `curl -s ifconfig.me` | 89.169.122.42. The private addresses do not route between the boxes (main 10.0.0.3 → dev 10.0.0.27: no route), so the link uses the public IPs; main → dev ICMP RTT 0.2-1.1 ms |
+| 4 | dev: `install-key '<pub>' --from 89.169.122.42` | one line in `~/.ssh/authorized_keys2`: `from="89.169.122.42",restrict,port-forwarding,permitopen="127.0.0.1:5550",command="echo groot-link: port-forward only; exit 1" ssh-ed25519 … groot-link`; `authorized_keys` untouched |
+| 5 | host key pinned | the laptop's `.state-ludo-g1-arena/known_hosts` line for 89.169.108.32 copied to main's `~/.ssh/groot_link_known_hosts` (no trust-on-first-use) |
+| 6 | main: `groot_link.sh up --host 89.169.108.32` | autossh is not installed on the main box either, so the reconnect loop runs (tmux `groot-link`); "PolicyServer answers through the link"; `check` ping 7.1 ms, `status` ping 2.2 ms |
+| 7a | restrictions, from the main box with the link key (`StrictHostKeyChecking yes`) | `ssh … id -un` → `groot-link: port-forward only` (the forced command); `ssh -tt` → `PTY allocation request failed`; `-L …:127.0.0.1:22` and `-L …:127.0.0.1:5551` → `administratively prohibited: open failed` |
+| 7b | reconnect: kill the link's ssh client | the loop logged `ssh exited …; reconnect in 2 s`, the ping answered again 2.24 s after the kill |
+| 7c | main → dev latency with the real request | §6.7 |
+
+Two things the steps above did not cover, found while doing them:
+
+- Killing the tmux loop's own shell (not the ssh client) ends the link for good: the loop is gone. `groot_link.sh
+  ensure` (new) pings, and when the link is down and no tmux session is left, runs `up` again with the host of the
+  last `up` (kept in `/work/logs/groot/link-5550.env`). `scripts/m2_up.sh --profile full` runs `ensure` instead of
+  `check`.
+- `up` needs `--host` only the first time; afterwards `up` and `ensure` reuse the recorded host.
+
 ## 6. Measurements (wave 1, dev box)
 
 Run `wave1-20260929T064355Z` (dev box, stack lock held, no other GPU job: `pre_state.txt` shows 0 MiB used before
@@ -417,8 +440,11 @@ itself is untested (§7).
 
 ## 7. Open items
 
-1. **Wave 2 (OD3):** the main→dev tunnel, its latency with the 0.92 MB request, and the SONIC timing gate with the
-   runtime's GR00T client running on the main box (§5). autossh presence on the main box unchecked.
+1. **Wave 2 (OD3):** the main→dev tunnel is up and checked (§5.1; autossh is on neither box, the reconnect loop runs).
+   **Not measured yet:** the main→dev `get_action` latency with the 0.92 MB request (`groot.bench --n 40 --obs-npz
+   /work/groot/eval/obs_ep0_f60.npz`, the npz is on the main box) and SONIC's timing gate with the GR00T client active
+   (`tools/groot_timing_gate.py`). Both boxes were stopped (Brev: STOPPED) from about 11:40Z before the stack locks
+   came free, so neither ran; the commands are in `docs/bringup.md` §6.1.
 2. **Camera (OD1):** the checkpoint saw Arena's head camera only. Open-loop numbers above use Arena's own frames;
    P1's `ego_view` must match that mount and FOV or the visual prior is lost.
 3. **Jitter:** 9 % of chunks carry steps above the body's slew limit (§6.3); decide in G2 whether to smooth.
@@ -429,3 +455,53 @@ itself is untested (§7).
 5. **Licence (OD2):** card vs LICENCE file (§2.8).
 6. `pyproject.toml` `testpaths` does not list `tests/groot` (shared file; request filed); run it explicitly:
    `.venv-rt/bin/python -m pytest tests/groot` (the `box` tests need `-m box` and a server).
+
+## 8. The GR00T stance (wave 2, W2.5)
+
+Arena's training frames show the apple on the surface in front of the robot, left of centre, in the lower part of
+the head camera (episode 0, frame 60 of the HF dataset: the apple's centre near v = 330 of 480, u = 105 of 640;
+`obs_ep0_f60.npz`). P1's `ego_view` is that camera (p1_m2b.md §5.1: pelvis + (0.045, 0, 0.353) m at zero waist, i.e.
+1.14 m at SONIC's 0.787 m stand, 35° down, fx = fy = 458.12 px), so where a target lands in the image depends only
+on its height and its offset from the pelvis. The pinhole model (the numbers below; `v` = image row of the target's
+centre, the bar is v >= 160: below the upper third):
+
+| Target (centre height) | f 0.25 | f 0.30 | f 0.35 | f 0.40 | f 0.45 |
+|---|---|---|---|---|---|
+| potato on the 0.78 m dining table (0.81 m) | 434 | 381 | 338 | 302 | 272 |
+| mug on the 0.94 m counter (0.98 m) | 262 | 215 | 180 | 152 | 129 |
+| mug on the 0.97 m dresser (1.01 m) | 216 | 173 | 141 | 116 | 96 |
+| pepper shaker on the counter (1.04 m) | 175 | 136 | 107 | 85 | 68 |
+
+(f = forward of the pelvis, lateral 0.10 m left; the lateral offset moves the target sideways only: u = 205 / 167 /
+158 at f 0.30, and at 0.20 m left a counter-height target leaves the image, u < 20.) So a low object on any of the
+three surfaces sits in the lower two-thirds at f <= 0.30 m (the dresser) to 0.35 m (the counter), with little lateral
+offset; a tall one (an alarm clock or a pepper shaker, centre >= 1.04 m) does not at any stance the robot can take.
+The world's reach sphere agrees (config/g1.yaml after R.7: `arm_reach_m` 0.405 from the shoulder sphere's centre;
+a table grasp point 0.88 m high at f 0.35 is outside it, at f 0.30 inside). The model is `groot/stance.py`;
+`tests/services/test_groot_arms_stance.py` pins it.
+
+**Encoded** (`config/skills.yaml`): `groot.pick.apple.arena_static_experimental.v0` has `stance {stand_off_m: 0.30,
+lateral_m: 0.10, yaw_to_object: 0.0, tol: [0.05, 25.0]}`, labelled INTERIM until §8.1 has run:
+
+- Only the apple skill (the checkpoint's own object, OD4). `services/reachability.py` treats a skill's stance as
+  strict: the object must sit at that offset, so check_reachability needs a free spot 0.30 m from it (with the
+  furniture clearance a reach stance keeps), i.e. an object within about 0.10 m of the front edge. On the `any` skill
+  that would make every deeper pickable unreachable in `full` before `groot_then_script` could fall back to the
+  scripted pick (with the stance on the `any` skill too, 5 tests of the default suite failed that way on HEAD
+  ca138da + this change: groot_then_script and the service tests pick an alarm clock that sits deeper). Request to world: use a
+  GR00T stance when a free spot satisfies it, else the next healthy candidate's window; then the `any` skill gets it.
+- `tol_deg` 25: `in_window` compares the heading with the bearing to the object when the lateral offset is above
+  `tol_m`; at this stance the bearing is atan2(0.10, 0.30) = 18.4° off the heading by construction, so 5° would
+  refuse the stance `find_stance` just produced. Request to world: compare with bearing − atan2(lateral_m,
+  stand_off_m) − yaw_to_object.
+- For a demo on the GR00T stance the object is staged near the edge (P1 `move_object`, test-only):
+  `tools/groot_episode.py --stage-at <surface> --depth 0.07`.
+
+### 8.1 Live probe (not run)
+
+`tools/groot_stance_probe.py` walks to each surface, stages a low object 0.07 m behind the front edge, puts the pelvis
+at each (forward, left) of a grid with the body's `approach` op and reads P1's instance segmentation of `ego_view`
+(pixels, bbox, the bbox centre against v = 160), saving each view with the model's prediction next to it. It was
+exercised on the in-process fakes only (`tools/fake_p1.FakeP1`, H40: the table at f 0.35 / l 0.15 gave v 327.5 vs
+the model's 338). The live run on the main box did not happen: the main stack lock was held by another owner from
+10:52Z and both boxes were stopped from about 11:40Z. Command: `docs/bringup.md` §6.1.

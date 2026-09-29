@@ -222,61 +222,91 @@ If the shared tree's P1 is mid-change again (the 06:18 refusal), use a snapshot 
 
 ## 6. Wave 2: the main box `ludo-g1-brev2`, verbatim
 
-Preconditions: the G0 arm-tracking work is finished and its owner agrees to the main box being taken over (only one
-deploy per box; SONIC needs a quiet box). The GR00T PolicyServer runs on the dev box (OD3, owner groot_srv,
-`scripts/groot_server.sh`, `docs/groot_serving.md` §5); the dev box must then run **no** Isaac/SONIC stack, only P4.
-The GR00T lines below follow `docs/groot_serving.md` §5; if they disagree, that file wins.
+The main box is shared by three wave-2 owners (robot, ops-groot, eval-live), one stack at a time: the stack lock
+`/work/locks/stack.d` (take it before anything runs SONIC; an owner that also sends GR00T inference takes the dev
+box's lock first, then the main box's). The GR00T PolicyServer runs on the dev box `ludo-g1-arena` (OD3), reached
+through `scripts/groot_link.sh` (`docs/groot_serving.md` §5, §5.1 has the run). One deploy per box: a stack left up
+by another owner is theirs to stop.
+
+### 6.1 The sequence
 
 ```bash
 # ---------- laptop
 cd /Users/nirty/workspace/ludo-interview/ludo_robotics_prep_g1/00_infra
 export BREV_NAME=ludo-g1-brev2
-./ssh.sh 'tmux ls; pgrep -fa "g1_deploy|sim_isaac.app|body.service|ui.server" | grep -v pgrep; nvidia-smi --query-compute-apps=pid,name --format=csv'
-#   must show no stack: if wl-m1 (G0) is still up, its owner stops it (bash scripts/m1_down.sh), not us
-WL_ROOT=/Users/nirty/workspace/ludo-interview/worldline-g1 ./sync_wl.sh push     # the merged checkout (or a worktree)
+LOCK='mkdir -p /work/locks; for i in $(seq 1 80); do mkdir /work/locks/stack.d 2>/dev/null && { echo "<you> $(date +%s)" > /work/locks/stack.d/owner; exit 0; }; sleep 30; done; cat /work/locks/stack.d/owner; exit 1'
+BREV_NAME=ludo-g1-arena ./ssh.sh "$LOCK"          # the dev lock first when the run sends GR00T inference
+./ssh.sh "$LOCK"                                   # then the main lock
+./ssh.sh 'tmux ls; nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader'
+#   must show no stack (no sim_isaac / g1_deploy): one deploy per box; `viz-server` (the viz page) may stay
+./sync_wl.sh push                                  # the checkout the run uses, right before it
 
-# ---------- main box: runtime venv and keys
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_venv.sh'
-#   rebuilds the broken macOS .venv-rt copy that is still on the main box (docs/devbox.md §5.2); ends "runtime venv ok"
-./ssh.sh 'bash -lc '"'"'for k in GEMINI_API_KEY TYPESAFE_API_KEY HF_TOKEN; do test -n "${!k:-}" && echo "$k set" || echo "$k MISSING"; done'"'"
-#   only if one is MISSING:  ./secrets.sh
+# ---------- main box, once: runtime venv (and after a dependency change)
+./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_venv.sh'        # "runtime venv ok: 18 modules import"
 
-# ---------- GR00T link (OD3; scripts/groot_link.sh, owner groot_srv; docs/groot_serving.md §5)
-BREV_NAME=ludo-g1-arena ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_server.sh start --warm && bash scripts/groot_server.sh status'
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_link.sh keygen'                 # prints the public key (once)
-./ssh.sh 'curl -s ifconfig.me'                                                      # <main box IP> as the dev box sees it
-BREV_NAME=ludo-g1-arena ./ssh.sh "cd /work/worldline-g1 && bash scripts/groot_link.sh install-key '<that public key>' --from <main box IP>"
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_link.sh up --host <dev box IP> && bash scripts/groot_link.sh check'
-#   <dev box IP>: BREV_IP in 00_infra/.state-ludo-g1-arena/instance.env
+# ---------- GR00T: the server on the dev box, the link on the main box (done 2026-09-29; groot_serving.md §5.1)
+BREV_NAME=ludo-g1-arena ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_server.sh status | head -4'
+#   not running: BREV_NAME=ludo-g1-arena ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_server.sh start --warm'
+./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_link.sh ensure'
+#   first time only: keygen + install-key + `up --host 89.169.108.32` (groot_serving.md §5 steps 2-6)
 
-# ---------- main box: the stack (session wl-m2, offset 0, page 8765; ~60-65 s on the dev box)
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_up.sh --profile full --scene procthor-train-40 --viz min'
-#   ends "READY: page http://127.0.0.1:8765"; stage times in outputs/m2/stack-latest-wl-m2/stages.json;
-#   the GR00T check result is in config.env (groot_link=ok|failed|skipped)
+# ---------- main box: the full stack (session wl-m2, H40)
+./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_up.sh --profile full --scene procthor-train-40 --viz min --p5-port 8766'
+#   ends "READY: page http://127.0.0.1:8766"; stage times in outputs/m2/stack-latest-wl-m2/stages.json;
+#   groot_link=ok|failed in config.env. --p5-port 8766: the viz page (`viz-server`, the user's live view) keeps 8765;
+#   without a viz server running, leave --p5-port out (8765).
+#   offline brains for a scripted run:  --planner brains.scripted:create --system1 tests.kept.system1_stub:create
 
 # ---------- laptop: the user's browser
-./tunnel.sh 8765          # then open http://127.0.0.1:8765  (laptop port 8765 must be free: lsof -iTCP:8765 -sTCP:LISTEN)
+./tunnel.sh 8766          # then open http://127.0.0.1:8766  (the Worldline page; laptop port 8766 must be free:
+                          # lsof -iTCP:8766 -sTCP:LISTEN).  The viz page stays at ./tunnel.sh 8765.
 
-# ---------- smoke tests (laptop, still in 00_infra with BREV_NAME exported; the stack stays up between them)
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_p5.sh restart --session wl-m2 --planner brains.scripted:create --system1 tests.kept.system1_stub:create'
-/Users/nirty/workspace/ludo-interview/worldline-g1/scripts/m2_smoke.sh --label main-smoke61-r1 --session wl-m2 --profile full
-#   for a clean start between runs: ./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_down.sh && bash scripts/m2_up.sh --profile full --viz min ...'
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_p5.sh restart --session wl-m2 --planner agent.model:create_brain --system1 brains.system1_jev:create'
-/Users/nirty/workspace/ludo-interview/worldline-g1/scripts/m2_smoke.sh --label main-smoke62-r1 --session wl-m2 --profile full
+# ---------- GR00T checks on the running stack (main box; the dev and main locks held)
+./ssh.sh 'cd /work/worldline-g1 && .venv-rt/bin/python -m groot.bench --n 40 --obs-npz /work/groot/eval/obs_ep0_f60.npz --endpoint tcp://127.0.0.1:5550 --out outputs/m2b_wave2/opsg/bench-main.json'
+./ssh.sh 'cd /work/worldline-g1 && .venv-rt/bin/python -m tools.groot_timing_gate --out outputs/m2b_wave2/opsg/timing-$(date +%Y%m%d-%H%M%S)'
+./ssh.sh 'cd /work/worldline-g1 && .venv-rt/bin/python -m tools.groot_stance_probe --out outputs/m2b_wave2/opsg/stance-$(date +%Y%m%d-%H%M%S) --surface kitchen_dining_table_1a:potato_1:0.07 --surface kitchen_counter_1b:mug_2:0.07 --surface bedroom_dresser_1b:mug_1:0.07'
+./ssh.sh 'cd /work/worldline-g1 && .venv-rt/bin/python -m tools.groot_live_smoke --g2 --arm body --stand kitchen_dining_table_1a --object potato_1 --stage 6.618,1.489,0.815 --approach 6.318,1.389,0 --max-s 15 --out outputs/m2b_wave2/opsg/g2-$(date +%Y%m%d-%H%M%S)'
+#   G2: 10 sessions (N C N H N C H N C H) of real chunks into the real arm op; the potato staged 0.07 m behind the table
+#   edge, the robot at the GR00T stance (0.30 m ahead of it, 0.10 m to its right = the potato 0.10 m left), by approach
 
-# ---------- down (when the lead says so)
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_down.sh'
-./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_link.sh down'
-BREV_NAME=ludo-g1-arena ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_link.sh remove-key'
-BREV_NAME=ludo-g1-arena ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_server.sh stop'
+# ---------- W2.7: one Worldline episode, scripted planner, the object staged at the GR00T stance
+./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_p5.sh restart --session wl-m2 --port 8766 --profile full --planner brains.scripted:create --system1 tests.kept.system1_stub:create'
+./ssh.sh 'cd /work/worldline-g1 && WL_PORT_OFFSET=0 .venv-rt/bin/python -m tools.groot_episode --url ws://127.0.0.1:8766/ws --object potato_1 --label potato --stage-at kitchen_dining_table_1a --depth 0.07 --out outputs/m2b_wave2/opsg/episode-$(date +%Y%m%d-%H%M%S)'
+#   back to the live brains (the default) for the user:
+./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_p5.sh restart --session wl-m2 --port 8766 --profile full'
+
+# ---------- release the locks (the stack may stay up; the next owner decides)
+./ssh.sh 'rm -rf /work/locks/stack.d'; BREV_NAME=ludo-g1-arena ./ssh.sh 'rm -rf /work/locks/stack.d'
+
+# ---------- down (the owner of the stack, when the lead says so)
+./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_down.sh --session wl-m2'
 ```
 
 Ports on the main box (all 127.0.0.1, offset 0): P1 5600/5601/5602/5565 and 5566 (`ego_view`, OD1; rendered only while
-enabled), P2 5556/5557, P3 5610/5611 (+5612 halt lane, B.1), P4 5550 (the local end of the GR00T link),
-P5 **8765** (the only port the laptop needs), recorder control 5630, DCGM 5555 (taken, never ours). DDS domain 0 on
-`lo`.
+enabled), P2 5556/5557, P3 5610/5611 (+5612 halt lane, B.1), P4 5550 (the local end of the GR00T link), P5 **8766**
+(8765 while no viz page runs), the viz page 8765, recorder control 5630, DCGM 5555 (taken, never ours). DDS domain 0
+on `lo`.
 
----
+### 6.2 What ran in wave 2 (ops-groot, 2026-09-29)
+
+| When (UTC) | What | Result |
+|---|---|---|
+| 10:12 | main box state | the G0-era M1 stack `wl-m1` (procthor-train-38, started 09:40 from the pre-merge tree: an M1 P1 without `ego_view` or the M2b ops) and `viz-server` on 8765; `.venv-rt` was the laptop's broken macOS copy |
+| 10:18-10:21 | GR00T server on the dev box, the OD3 link from the main box | up and checked; `docs/groot_serving.md` §5.1 |
+| 10:42 | `scripts/m2_venv.sh` on the main box (main lock held) | rebuilt in 3.7 s: "runtime venv ok: 18 modules import" (python 3.11.16, google-genai 2.25.0, websockets 16.1.1, numpy 2.4.6, pyzmq 27.2.0) |
+| 10:43 | tear down `wl-m1` and `viz-server` to bring the M2b stack up | **refused** by this session's permission guard ("interfere with workloads"): the stack and the user's viz page were left running and the main lock released |
+| 10:52-10:55 | owner robot took the main lock; by 10:55 `wl-m1` was gone and robot's M1-level stack `robot-m2` was up (H40, M2b P1, from `/work/robot-wl`) | the main lock was robot's at every check until the last one at 11:38 (the dev lock: worldcal, then bodyfix) |
+| ~11:40-11:47 | both boxes | **STOPPED** (Brev listing; ssh times out on both). Not restarted here: starting the instances is a cost decision for the user or the lead |
+
+So on the main box in wave 2 nothing of this section's GR00T part has run beyond the link: no `m2_up.sh --profile
+full` cold start, no main→dev latency bench, no timing gate, no stance probe, no G2, no W2.7 episode. Every one of
+them is a single command in §6.1; the tools were exercised on the in-process fakes (`tools/fake_p1.FakeP1` H40 +
+`tools/fake_deploy.FakeDeploy` + the real `body.service` + `tests/fakes/fake_policy_server.py`): G2 with plan NCH /
+HCN / NCHN (every cancel and halt fenced, 0 chunks sent after an ack), the timing gate's four phases, the stance
+probe on the table.
+
+Note for the next run: `viz-server` owns 8765, so P5 takes 8766 (`--p5-port 8766`) unless the viz page is moved; the
+user's page is then `./tunnel.sh 8766`.
 
 ## 7. Known issues and open items (found in the rehearsal; owner in brackets)
 
