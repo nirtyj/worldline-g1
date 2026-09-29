@@ -114,7 +114,7 @@ svg.bd { display: block; width: 100%; min-width: 820px; height: auto; color: var
   <h1>Worldline G1 Architecture</h1>
   <p class="lede">How GEAR-SONIC, Isaac Sim, the ProcTHOR house and our drive API fit together to make a simulated Unitree G1 walk through a home, and where Worldline and GR00T plug in next.</p>
   <div class="meta">
-    <span>Revision <b>r2</b></span>
+    <span>Revision <b>r3</b></span>
     <span>Updated <b>2026-09-28</b></span>
     <span>Milestone <b>M1 · SONIC G1 walking in a house</b></span>
     <span>Box <b>Brev ludo-g1-brev2 · 1× L40S</b></span>
@@ -318,7 +318,7 @@ flowchart TB
         <li>Kinematic planner (10 Hz) plus SONIC encoder/decoder policy (50 Hz)</li>
         <li>Runs on wall-clock time; exits if lowstate is absent for 500 ms</li>
       </ul>
-      <span class="pill warn">Stands · walking falls in MuJoCo ref</span>
+      <span class="pill warn">Stands, turns, strafes · forward walk falls</span>
     </article>
     <article class="proc" style="--c:var(--p3)">
       <h3>P3 · wl-body</h3>
@@ -392,6 +392,36 @@ sequenceDiagram
 
 <section class="two">
   <div style="display:grid; gap:14px">
+    <h2>Navigation</h2>
+    <p class="prose">A classic stack on top of SONIC walking. No learned navigation model; GR00T is used only for manipulation.</p>
+    <ol class="steps">
+      <li><b>Map.</b> The ProcTHOR house becomes a 5 cm occupancy grid (obstacles 0.1–1.6 m high, inflated by the G1 footprint).</li>
+      <li><b>Pose.</b> Isaac ground truth at 50 Hz. The later no-ground-truth stage swaps in odometry + KISS-ICP.</li>
+      <li><b>Plan.</b> A* on the grid, clearance-weighted, then smoothed.</li>
+      <li><b>Follow.</b> Pure pursuit turns the next path point into a SONIC walk command (slow walk, direction, facing, 0.2–0.8 m/s) at 50 Hz; turn in place when the heading error is large; arrival and stuck detection; re-plan.</li>
+      <li><b>Step.</b> SONIC's planner and policy do the legs and balance. Navigation never touches joints.</li>
+    </ol>
+    <p class="caption">M2: Worldline's <code>navigate(location)</code> resolves a named place through the semantic map to a pose, then calls the same <code>go_to</code>.</p>
+  </div>
+  <div style="display:grid; gap:14px">
+    <h2>Models and checkpoints</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Model</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td>SONIC release (<code>nvidia/GEAR-SONIC</code>)</td><td>Whole-body controller: deploy ONNX + planner, TensorRT. In M1.</td></tr>
+          <tr><td><code>nvidia/GR00T-N1.7-3B</code></td><td>Base VLA. Cannot drive SONIC without a <code>UNITREE_G1_SONIC</code> fine-tune.</td></tr>
+          <tr><td><code>nvidia/Cosmos-Reason2-2B</code></td><td>Gated backbone every N1.7 checkpoint loads. Licence accepted, cached.</td></tr>
+          <tr><td><code>cloudwalk-research/…grab-bottle-rh-210ep-v2-finetune</code> ckpt 20000</td><td><span class="pill warn">Unofficial</span> Real-G1 tabletop bottle grasp, Inspire hands (ours are Dex3). Plumbing test only; expect near-zero success in Isaac.</td></tr>
+          <tr><td>Our fine-tune (later)</td><td>50–150 Isaac demos per skill, trained off-box (~35 GB VRAM). Until then grasps are scripted and labelled.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="two">
+  <div style="display:grid; gap:14px">
     <h2>Start-up and stopping</h2>
     <ol class="steps">
       <li>P1 starts with the robot held by the elastic band and prints <code>WL_ISAAC_READY</code> once lowstate is flowing.</li>
@@ -452,6 +482,7 @@ sequenceDiagram
 <section>
   <h2>Status log</h2>
   <div class="log">
+    <div class="entry"><time>2026-09-28</time><p><b>r3.</b> Added Navigation and Models sections. SONIC reference run after the band hand-over fix: stand 15 s, strafe 1.1 m, turn in place and stop mid-walk pass with no falls; walking forward still falls after 0.4 m, heading drifts 22°, and the planner-timeout-to-IDLE check fails. An independent diagnosis is running.</p></div>
     <div class="entry"><time>2026-09-28</time><p><b>r2.</b> Added the block diagram. Clarified MuJoCo's role: NVIDIA's own SONIC simulator, used only as a test stand-in for Isaac so controller bugs and Isaac-bridge bugs can be told apart. It is not part of the M1 stack.</p></div>
     <div class="entry"><time>2026-09-28</time><p><b>r1.</b> Released SONIC checkpoint evaluated in Isaac Lab on the L40S: 8 G1s, success 1.0, 3.9 GB VRAM. Deploy built with TensorRT 10.13; in its MuJoCo reference it starts control at 50 Hz and stands 15 s, but walking tests fall (moving at 1.7 m/s, heading-frame mismatch). Isaac bridge publishes lowstate at 200 Hz with RTF 0.97–1.0 in an empty scene. ProcTHOR houses 15/38/59 and iTHOR FloorPlan10 load with occupancy and room labels. Drive API written and tested on fakes. Integration not started.</p></div>
   </div>
