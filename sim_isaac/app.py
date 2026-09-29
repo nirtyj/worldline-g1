@@ -53,6 +53,8 @@ def parse_args():
     ap.add_argument("--camera-vfov", type=float, default=45.0)
     ap.add_argument("--tp-camera", action="store_true", help="third-person chase camera on PUB 5602 'frame.tp'")
     ap.add_argument("--tp-hz", type=float, default=10.0)
+    from viz.isaac_cams import add_p1_args, viz_enabled  # viz hook (docs/viz.md 9.1): --viz off|min|low|high
+    add_p1_args(ap)
     ap.add_argument("--rt-pace", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--max-lag-ms", type=float, default=100.0)
     ap.add_argument("--port-offset", type=int, default=0)
@@ -76,7 +78,7 @@ def parse_args():
     a = ap.parse_args()
     a.headless = True
     a.device = "cpu" if a.physx_device == "cpu" else "cuda:0"
-    if a.camera != "none" or a.tp_camera:
+    if a.camera != "none" or a.tp_camera or viz_enabled(a):
         a.enable_cameras = True
     return a
 
@@ -247,6 +249,8 @@ class App:
         for op in ("ping", "get_pose", "get_scene_info", "get_occupancy", "band", "reset_robot", "get_stats",
                    "render_topdown", "get_joint_state", "record", "shutdown"):
             self.gt.register(op, getattr(self, f"op_{op}"))
+        from viz.isaac_cams import attach_p1  # viz hook: None unless --viz is on
+        self.viz = attach_p1(self)
 
         # stats
         self.pacer = RtPacer(self.dt, enabled=a.rt_pace, max_lag_s=a.max_lag_ms / 1000.0)
@@ -498,6 +502,9 @@ class App:
                     if next_tp < t_sim:
                         next_tp = t_sim + tp_dt
 
+            if self.viz:  # viz hook: chase/top cameras at --viz-hz (base_quat is wxyz)
+                self.viz.step(t_sim, st["base_pos"], st["base_quat"])
+
             if self.pacer.n_steps % steps_per_pose == 0:
                 self.contact.update(self.dt * steps_per_pose)
                 self.gt_seq += 1
@@ -733,6 +740,8 @@ class App:
 
     # ------------------------------------------------------------------ teardown
     def finish(self) -> dict:
+        if getattr(self, "viz", None):  # viz hook
+            self.viz.close()
         if self.recording is not None:  # still recording at shutdown: write what we have
             self.op_record({"on": False})
         for th in getattr(self, "_record_writers", []):
