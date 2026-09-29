@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Sample the CPU use of processes matching command-line patterns from /proc (stdlib only, ~0.1% CPU itself).
 
-    python3 nav2/tools/cpu_monitor.py --out cpu.csv --period 1.0 \
+    python3 nav2/tools/cpu_monitor.py --out cpu.csv --period 1.0 --session nav2-fakes-900 --session nav2-e2e-900 \
         --group nav2=component_container,controller_server,planner_server,bt_navigator,behavior_server,velocity_smoother,lifecycle_manager \
         --group bridge=ros_bridge.py --group launch="ros2 launch" --group body=body.service --group fakes=fake_stack
 
-One row per sample: t_wall, group, pids, cpu_pct (100 = one core), rss_mb. Processes are (re)discovered every sample,
-so groups can start later. Stop with SIGINT/SIGTERM; nav2/tools/cpu_summary.py splits the csv by test phase."""
+Only OUR processes are counted: with --session (tmux session, repeatable) and/or --root-pid, a process must descend
+from one of those sessions' panes / PIDs (the box is shared: other agents run body.service, ros2, python ...; matching
+command lines alone put their processes into our groups). Without either, every process on the box is matched (old
+behaviour, not recommended). One row per sample: t_wall, group, pids, cpu_pct (100 = one core), rss_mb. Processes and
+session panes are (re)discovered every sample, so groups and sessions can start later. Stop with SIGINT/SIGTERM;
+nav2/tools/cpu_summary.py splits the csv by test phase."""
 import argparse
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -34,13 +39,54 @@ def ticks_rss(pid: int):
         return None
 
 
+def ppid_map() -> dict:
+    out = {}
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                with open(f"/proc/{d}/stat") as f:
+                    out[int(d)] = int(f.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                pass
+    return out
+
+
+def session_roots(sessions) -> set:
+    roots = set()
+    for s in sessions:
+        try:
+            r = subprocess.run(["tmux", "list-panes", "-s", "-t", f"={s}", "-F", "#{pane_pid}"],
+                               capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        roots.update(int(x) for x in r.stdout.split() if x.isdigit())
+    return roots
+
+
+def descendants(roots: set, pp: dict) -> set:
+    kids: dict[int, list] = {}
+    for pid, par in pp.items():
+        kids.setdefault(par, []).append(pid)
+    seen, todo = set(), list(roots)
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        todo.extend(kids.get(p, []))
+    return seen
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--period", type=float, default=1.0)
     ap.add_argument("--group", action="append", default=[], help="name=pattern[,pattern...]")
     ap.add_argument("--per-process", action="store_true", help="also one row per process (group/<exe name>)")
+    ap.add_argument("--session", action="append", default=[], help="count only descendants of this tmux session's panes")
+    ap.add_argument("--root-pid", action="append", type=int, default=[], help="count only descendants of this PID")
     a = ap.parse_args()
+    scoped = bool(a.session or a.root_pid)
     groups = []
     for g in a.group:
         name, _, pats = g.partition("=")
@@ -56,11 +102,12 @@ def main() -> int:
             t = time.time()
             mono = time.monotonic()
             per = {name: [0.0, [], 0] for name, _ in groups}
+            ours = descendants(session_roots(a.session) | set(a.root_pid), ppid_map()) if scoped else None
             for d in os.listdir("/proc"):
                 if not d.isdigit():
                     continue
                 pid = int(d)
-                if pid == me:
+                if pid == me or (ours is not None and pid not in ours):
                     continue
                 cl = cmdline(pid)
                 if not cl:

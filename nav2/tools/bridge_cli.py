@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tiny client for nav2/ros_bridge.py REP (nav_bridge 5620 + offset). Works in any Python with pyzmq.
 
-    python3 nav2/tools/bridge_cli.py [--port-offset N] ping | stats | status ID | cancel ID | plan X Y | reload_map
+    python3 nav2/tools/bridge_cli.py [--port-offset N] ping | stats | status ID | cancel ID | plan X Y | goal_check X Y
+                                                       | escape [BELOW_M] | reload_map
     python3 nav2/tools/bridge_cli.py --port-offset N wait [--timeout 120]     # until ping says nav2_ready
 Prints JSON; exit 0 iff ok (wait: iff nav2_ready)."""
 import argparse
@@ -48,8 +49,10 @@ def main() -> int:
     req = {"op": a.cmd}
     if a.cmd in ("status", "cancel"):
         req["id"] = a.rest[0]
-    elif a.cmd == "plan":
+    elif a.cmd in ("plan", "goal_check"):
         req.update(x=float(a.rest[0]), y=float(a.rest[1]))
+    elif a.cmd == "escape" and a.rest:
+        req["below"] = float(a.rest[0])
     rep = call(port, req, 10.0)
     print(json.dumps(rep, indent=1))
     return 0 if rep.get("ok") else 1

@@ -9,7 +9,7 @@
 # Sensors: none in M1 -> both costmaps are static + inflation only.
 #   TODO(M2 sensors): add an obstacle/voxel layer to the local costmap (and the global one for replanning) fed by the
 #   head D435 depth -> PointCloud2 and/or a MID-360 LiDAR -> LaserScan, plus a collision_monitor between the velocity
-#   smoother and the bridge. Nothing else here needs to change.
+#   smoother and the bridge, and turn FollowPath.use_collision_detection back on. Nothing else here needs to change.
 # Frames: map -> odom -> base_link (base_link = pelvis projected on the floor: x, y, yaw).
 # All nodes run in one component container (nav2/launch/wl_nav2.launch.py) to keep CPU and DDS traffic low.
 
@@ -73,7 +73,14 @@ controller_server:
       use_velocity_scaled_lookahead_dist: true
       min_approach_linear_velocity: 0.2          # SLOW_WALK floor
       approach_velocity_scaling_dist: 0.6
-      use_collision_detection: true
+      # OFF while both costmaps are static-only: the Smac plan is already collision-free on the same map, and the
+      # check only re-tests that static map along the arc to the carrot. With SONIC's heading drift it fired in the
+      # ~0.8 m passage of procthor-train-38 near (5.7, 9.7) (best clearance 0.40 m, robot radius 0.30 m): "detected
+      # collision ahead!" -> PATIENCE_EXCEEDED -> stuck, and every later attempt from that pose failed the same way
+      # (verifier run verify-rpp-20260929-022627, 8/16 goals).
+      # TODO(M2 sensors): re-enable (true, 1.5 s) together with the obstacle/voxel layer and the collision_monitor
+      # (file header), when the local costmap sees things the plan does not.
+      use_collision_detection: false
       max_allowed_time_to_collision_up_to_carrot: 1.5
       use_regulated_linear_velocity_scaling: true
       use_cost_regulated_linear_velocity_scaling: true

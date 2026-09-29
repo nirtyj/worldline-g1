@@ -6,10 +6,13 @@ same script runs unchanged against the real stack (P1 Isaac + SONIC deploy) beca
 
 Tests (pass criteria in brackets; GT = gt.pose, independent of what the body reports):
   goals        go_to through Nav2 to >= 3 goals in >= 2 rooms  [body succeeded, backend nav2, GT pos err <= 0.30 m,
-               GT yaw err <= 15 deg when a yaw is given, no fall]
-  unreachable  a free goal the robot cannot reach (a free pocket not connected at the robot radius) -> failed no_path
-               synchronously [reply within 5 s, no motion]; plus a goal inside furniture -> goal_in_obstacle or no_path
-               (Smac's goal tolerance > 0 reports NO_VALID_PATH, not GOAL_OCCUPIED)
+               GT yaw err <= 15 deg when a yaw is given, no fall]. --goal-plan passage (procthor-train-38): 8 goals,
+               6 of them through the ~0.8 m passage near (5.7, 9.7), one from the pose where the verifier's run locked
+               up (reset_robot, fake only); every goal must succeed (no lockup)
+  unreachable  every unreachable goal gets the SAME reason from Nav2 and from A* (args.backend=astar), synchronously
+               [reply within 5 s, no motion]: a free pocket not connected at the robot radius -> no_path (skipped when
+               the house has none), a goal inside furniture -> goal_in_obstacle, a goal outside the map ->
+               goal_in_obstacle; plus the bridge's goal check snaps a goal 0.2 m from a wall like A* does
   cancel       go_to far away, cancel (= body stop) after ~1 m  [go_to canceled, Nav2 goal canceled, no /cmd_vel
                forwarded after the cancel, GT speed < 0.05 m/s within 2.0 s]
   watchdog     stream op velocity (pure wz 0.5 for 1.5 s, then vx 0.4 for 2 s), then stop sending  [planner goes IDLE
@@ -150,6 +153,8 @@ class Nav2Test:
         hi_path = os.path.join(a.house_dir, "house_info.json") if a.house_dir else None
         self.house = json.load(open(hi_path)) if hi_path and os.path.exists(hi_path) else {}
         self.occ, self.res, self.origin = load_map(a.house_dir, self.p1)
+        from scipy import ndimage
+        self.edt = ndimage.distance_transform_edt(~self.occ) * self.res
 
     def phase(self, name: str, t0: float, t1: float, **kw):
         self.phases.append({"name": name, "t0": t0, "t1": t1, **kw})
@@ -186,20 +191,69 @@ class Nav2Test:
             raise RuntimeError(f"stand failed: {h.result}")
         return {"ok": True, "duration_s": round(time.time() - t0, 2)}
 
-    def goals(self) -> dict:
+    # the ~0.8 m passage of procthor-train-38 (best clearance 0.40 m) between the living room and the kitchen
+    PASSAGE_BOX = (4.6, 6.8, 9.35, 9.95)            # x0, x1, y0, y1
+    LOCKUP_POSE = (6.0, 9.61, 2.884)                 # where the verifier's run stopped (verify-rpp-20260929-022627)
+
+    def _clear(self, x, y) -> float:
+        ix, iy = int((x - self.origin[0]) / self.res), int((y - self.origin[1]) / self.res)
+        if 0 <= iy < self.edt.shape[0] and 0 <= ix < self.edt.shape[1]:
+            return float(self.edt[iy, ix])
+        return 0.0
+
+    def _goal_plan(self):
         rp = {r["room"]: r for r in self.house.get("room_points", []) if r.get("ok")}
         spawn = self.house.get("spawn") or {}
-        # >= 3 goals across rooms; alternate yaw given / not given
         plan = []
+        if self.a.goal_plan == "passage" and all(k in rp for k in ("kitchen", "bedroom", "living_room")):
+            K = (rp["kitchen"]["x"], rp["kitchen"]["y"])
+            k2 = (rp["kitchen"]["x"], rp["kitchen"]["y"] + 1.2)
+            B = (rp["bedroom"]["x"], rp["bedroom"]["y"])
+            L = (rp["living_room"]["x"], rp["living_room"]["y"])
+            for room, (x, y), yaw, reset in (("kitchen", K, None, None), ("bedroom", B, math.pi, None),
+                                              ("living_room", L, math.pi / 2, None), ("kitchen", k2, 0.0, None),
+                                              ("living_room", L, -math.pi / 2, None), ("kitchen", K, None, None),
+                                              ("kitchen", k2, 0.0, self.LOCKUP_POSE),
+                                              ("living_room", L, math.pi / 2, None)):
+                plan.append({"room": room, "x": x, "y": y, "yaw": yaw, "reset": reset})
+            return plan
+        # >= 3 goals across rooms; alternate yaw given / not given
         order = [k for k in ("kitchen", "bedroom", "living_room") if k in rp] or list(rp)
         yaws = [None, math.pi, math.pi / 2]
         for k, room in enumerate(order):
             g = rp[room]
-            plan.append({"room": room, "x": g["x"], "y": g["y"], "yaw": yaws[k % len(yaws)]})
+            plan.append({"room": room, "x": g["x"], "y": g["y"], "yaw": yaws[k % len(yaws)], "reset": None})
         if spawn and "kitchen" in rp:
-            plan.append({"room": "kitchen", "x": rp["kitchen"]["x"], "y": rp["kitchen"]["y"] + 1.2, "yaw": 0.0})
+            plan.append({"room": "kitchen", "x": rp["kitchen"]["x"], "y": rp["kitchen"]["y"] + 1.2, "yaw": 0.0,
+                         "reset": None})
+        return plan
+
+    def _planner_stats(self, op_id: str) -> dict:
+        """SONIC planner command changes of one op (body planner_cmds.jsonl): IDLE facing steps and their size."""
+        pc = [c for c in load_jsonl(os.path.join(self.a.body_log, "planner_cmds.jsonl")) if c.get("owner") == op_id]
+        idle_steps, walk_changes, prev = [], 0, None
+        for c in pc:
+            f = c.get("facing_w")
+            if prev is not None and f is not None and prev.get("facing_w") is not None:
+                df = abs(math.degrees(wrap(f - prev["facing_w"])))
+                if c.get("mode") == 0 and df > 1.0:
+                    idle_steps.append(df)
+            if c.get("mode") == 1:
+                walk_changes += 1
+            prev = c
+        return {"planner_changes": len(pc), "idle_facing_steps": len(idle_steps),
+                "idle_step_max_deg": round(max(idle_steps), 1) if idle_steps else 0.0,
+                "idle_step_mean_deg": round(float(np.mean(idle_steps)), 1) if idle_steps else 0.0,
+                "walk_changes": walk_changes}
+
+    def goals(self) -> dict:
+        plan = self._goal_plan()
         out = []
         for k, g in enumerate(plan):
+            if g.get("reset"):
+                rx, ry, ryaw = g["reset"]
+                self.p1.call("reset_robot", x=rx, y=ry, yaw=ryaw, band=False)   # FAKE P1 only
+                time.sleep(1.5)
             p0 = self.pose()
             t0 = time.time()
             h = self.bc.go_to(g["x"], g["y"], yaw=g["yaw"], timeout_s=self.a.goal_timeout)
@@ -214,6 +268,12 @@ class Nav2Test:
             yaw_err = None if g["yaw"] is None else math.degrees(wrap(g["yaw"] - p1.yaw))
             acc = [e for e in h.events if e.get("state") == "accepted"]
             plan_path = ((acc[0].get("data") or {}).get("plan") or {}).get("path") if acc else None
+            if not plan_path and r.get("plans"):
+                plan_path = r["plans"][0].get("path")
+            tr = self.rec.arr(t0, t1)
+            bx0, bx1, by0, by1 = self.PASSAGE_BOX
+            through = bool(len(tr) and ((tr[:, 1] > bx0) & (tr[:, 1] < bx1) & (tr[:, 2] > by0) & (tr[:, 2] < by1)).any())
+            min_cl = round(min(self._clear(x, y) for x, y in tr[:, 1:3]), 3) if len(tr) else None
             ok = (h.state == "succeeded" and r.get("backend") == "nav2" and gt_err_snap <= 0.30
                   and (yaw_err is None or abs(yaw_err) <= 15.0) and not p1.fallen)
             rec = {"k": k, "room": g["room"], "goal": [g["x"], g["y"]], "goal_yaw": g["yaw"], "state": h.state,
@@ -223,63 +283,90 @@ class Nav2Test:
                    "gt_yaw_err_deg": None if yaw_err is None else round(yaw_err, 2),
                    "path_len_m": r.get("path_len_m"), "walked_m": r.get("walked_m"),
                    "duration_s": round(t1 - t0, 2), "start": [round(p0.x, 3), round(p0.y, 3)],
-                   "recoveries": r.get("replans"), "reapproach": r.get("approach_attempts"),
+                   "replans": r.get("replans"), "nav2_recoveries": r.get("nav2_recoveries"),
+                   "reapproach": r.get("approach_attempts"), "stuck_events": r.get("stuck_events"),
+                   "escapes": len(r.get("escapes") or []), "nav2_retries": r.get("nav2_retries"),
+                   "goto_reply_ms": r.get("goto_reply_ms"), "through_passage": through, "min_gt_clearance_m": min_cl,
+                   "reset_to": g.get("reset"), **self._planner_stats(h.id),
                    "nav2": r.get("nav2"), "velocity": r.get("velocity"), "pass": bool(ok), "id": h.id}
             print(f"[goals] {k} {g['room']} -> {h.state} {h.reason or ''} gt_err={gt_err:.3f} "
-                  f"yaw_err={rec['gt_yaw_err_deg']} t={t1 - t0:.1f}s walked={r.get('walked_m')}", flush=True)
+                  f"yaw_err={rec['gt_yaw_err_deg']} t={t1 - t0:.1f}s walked={r.get('walked_m')} "
+                  f"passage={through} min_cl={min_cl} replans={r.get('replans')} "
+                  f"stuck={len(r.get('stuck_events') or [])} idle_steps={rec['idle_facing_steps']} "
+                  f"(max {rec['idle_step_max_deg']} deg)", flush=True)
             out.append(rec)
             self.runs.append({"kind": "goal", "k": k, "t0": t0, "t1": t1, "goal": g, "plan": plan_path,
                               "id": h.id, "state": h.state})
             self.phase(f"goal{k}", t0, t1, room=g["room"])
         rooms = {o["room"] for o in out if o["pass"]}
         return {"pass": sum(o["pass"] for o in out) >= 3 and len(rooms) >= 2 and all(o["pass"] for o in out),
-                "n_pass": sum(o["pass"] for o in out), "n": len(out), "rooms_reached": sorted(rooms), "goals": out}
+                "n_pass": sum(o["pass"] for o in out), "n": len(out), "rooms_reached": sorted(rooms),
+                "n_through_passage": sum(o["through_passage"] for o in out),
+                "n_through_passage_pass": sum(o["through_passage"] and o["pass"] for o in out),
+                "label": self.a.label, "goals": out}
+
+    def _unreachable_goal(self, name: str, x: float, y: float, expect: tuple) -> dict:
+        """go_to through Nav2 and through A* (args.backend=astar): both must fail synchronously, without motion,
+        with the same reason, and that reason must be one of `expect`."""
+        p = self.pose()
+        t0 = time.time()
+        h = self.bc.go_to(x, y, timeout_s=30)
+        t1 = time.time()
+        ha = self.bc.go_to(x, y, timeout_s=30, backend="astar")
+        p1 = self.pose()
+        moved = math.hypot(p1.x - p.x, p1.y - p.y)
+        r = h.result or {}
+        out = {"goal": [round(x, 3), round(y, 3)], "state": h.state, "reason": h.reason,
+               "backend": r.get("backend"), "nav2": r.get("error_name"), "goal_check": r.get("goal_check"),
+               "astar_state": ha.state, "astar_reason": ha.reason, "astar_backend": (ha.result or {}).get("backend"),
+               "same_reason": h.reason == ha.reason, "t_reply_s": round(t1 - t0, 3), "moved_m": round(moved, 3)}
+        out["pass"] = (h.state == "failed" and ha.state == "failed" and h.reason == ha.reason and h.reason in expect
+                       and r.get("backend") == "nav2" and t1 - t0 < 5.0 and moved < 0.05)
+        self.runs.append({"kind": "unreachable", "t0": t0, "t1": t1, "goal": {"x": x, "y": y}, "plan": None,
+                          "state": h.state})
+        print(f"[unreachable] {name} {out}", flush=True)
+        return out
 
     def unreachable(self) -> dict:
         p = self.pose()
         pockets, _, _ = free_pockets(self.occ, self.res, self.origin, (p.x, p.y))
         out = {}
+        t0 = time.time()
         if pockets:
             x, y, margin, clear = pockets[0]
-            t0 = time.time()
-            h = self.bc.go_to(x, y, timeout_s=30)
-            t1 = time.time()
-            p1 = self.pose()
-            moved = math.hypot(p1.x - p.x, p1.y - p.y)
-            out["pocket"] = {"goal": [round(x, 3), round(y, 3)], "pocket_margin_m": round(margin, 3),
-                             "clearance_m": round(clear, 3), "state": h.state, "reason": h.reason,
-                             "reply_state": (h.reply or {}).get("state"), "t_reply_s": round(t1 - t0, 3),
-                             "moved_m": round(moved, 3), "nav2": (h.result or {}).get("error_name"),
-                             "pass": h.state == "failed" and h.reason == "no_path" and t1 - t0 < 5.0 and moved < 0.05}
-            self.runs.append({"kind": "unreachable", "t0": t0, "t1": t1, "goal": {"x": x, "y": y}, "plan": None})
-            self.phase("unreachable", t0, t1)
-            print(f"[unreachable] pocket {out['pocket']}", flush=True)
+            out["pocket"] = {**self._unreachable_goal("pocket", x, y, ("no_path",)),
+                             "pocket_margin_m": round(margin, 3), "clearance_m": round(clear, 3)}
         else:
-            out["pocket"] = {"pass": False, "reason": "no disconnected free pocket in this house"}
+            out["pocket"] = {"skipped": "no disconnected free pocket in this house"}
         fg = furniture_goal(self.house, self.occ, self.res, self.origin)
         if fg:
-            t0 = time.time()
-            h = self.bc.go_to(fg[0], fg[1], timeout_s=30)
-            t1 = time.time()
-            out["furniture"] = {"goal": [round(fg[0], 3), round(fg[1], 3)], "object": fg[3], "state": h.state,
-                                "reason": h.reason, "t_reply_s": round(t1 - t0, 3),
-                                "nav2": (h.result or {}).get("error_name"),
-                                "pass": h.state == "failed" and h.reason in ("goal_in_obstacle", "no_path")}
-            print(f"[unreachable] furniture {out['furniture']}", flush=True)
-            self.runs.append({"kind": "unreachable", "t0": t0, "t1": t1, "goal": {"x": fg[0], "y": fg[1]},
-                              "plan": None, "state": h.state})
-        # a goal outside the map (Nav2 GOAL_OUTSIDE_MAP)
-        t0 = time.time()
-        h = self.bc.go_to(self.origin[0] - 5.0, self.origin[1] - 5.0, timeout_s=30)
-        out["outside_map"] = {"goal": [self.origin[0] - 5.0, self.origin[1] - 5.0], "state": h.state,
-                              "reason": h.reason, "t_reply_s": round(time.time() - t0, 3),
-                              "nav2": (h.result or {}).get("error_name"),
-                              "pass": h.state == "failed" and h.reason == "no_path"}
-        print(f"[unreachable] outside_map {out['outside_map']}", flush=True)
-        variants = [v for k, v in out.items() if isinstance(v, dict) and "pass" in v
-                    and not (k == "pocket" and "reason" in v and "no disconnected" in str(v.get("reason")))]
-        out["pass"] = bool(variants) and all(v["pass"] for v in variants) and any(
-            v.get("reason") == "no_path" for v in variants)
+            out["furniture"] = {**self._unreachable_goal("furniture", fg[0], fg[1], ("goal_in_obstacle",)),
+                                "object": fg[3]}
+        out["outside_map"] = self._unreachable_goal("outside_map", self.origin[0] - 5.0, self.origin[1] - 5.0,
+                                                    ("goal_in_obstacle",))
+        # a goal 0.2 m from a wall (inside the inscribed zone) is snapped by both backends, not refused
+        rp = [r for r in self.house.get("room_points", []) if r.get("ok")]
+        near = None
+        if rp:
+            ys, xs = np.nonzero((self.edt > 0.17) & (self.edt < 0.23))
+            X = self.origin[0] + (xs + 0.5) * self.res
+            Y = self.origin[1] + (ys + 0.5) * self.res
+            i = int(np.argmin(np.hypot(X - rp[0]["x"], Y - rp[0]["y"])))
+            near = (float(X[i]), float(Y[i]))
+        if near:
+            chk = self._bridge({"op": "goal_check", "x": near[0], "y": near[1]})
+            from body.nav_grid import NavGrid
+            g = NavGrid.from_arrays(self.occ.astype(np.uint8), self.res, self.origin, robot_radius=0.25)
+            ar = g.plan((p.x, p.y), near)
+            out["near_wall_snap"] = {"goal": [round(near[0], 3), round(near[1], 3)],
+                                     "clearance_m": round(self._clear(*near), 3), "bridge": chk,
+                                     "astar_ok": ar.ok, "astar_goal_snapped": ar.goal_snapped,
+                                     "pass": bool(chk.get("ok") and chk.get("snapped") and (chk.get("snap_m") or 1) <= 0.5
+                                                  and ar.ok and ar.goal_snapped is not None)}
+            print(f"[unreachable] near_wall_snap {out['near_wall_snap']}", flush=True)
+        self.phase("unreachable", t0, time.time())
+        variants = [v for v in out.values() if isinstance(v, dict) and "pass" in v]
+        out["pass"] = bool(variants) and all(v["pass"] for v in variants)
         return out
 
     def cancel(self) -> dict:
@@ -408,7 +495,8 @@ class Nav2Test:
     def stuck(self) -> dict:
         """FAKE ONLY (uses P1 spawn_obstacle, physics only, NOT in the map): block a doorway on the planned path.
         Nav2's progress checker fails the controller (FAILED_TO_MAKE_PROGRESS), the BT recovers (clear costmaps,
-        wait 2 s, replan the same path), gives up; the body retries once, then fails with reason 'stuck'."""
+        wait 2 s, replan the same path), gives up; the body retries once (after an escape step when the clearance is
+        below the inflation radius), then fails with reason 'stuck'. The obstacle stays: run this test last."""
         from scipy import ndimage
         d = ndimage.distance_transform_edt(~self.occ) * self.res
         far = self._far_room_point()
@@ -431,8 +519,9 @@ class Nav2Test:
         r = h.result or {}
         out = {"obstacle": [round(best[0], 3), round(best[1], 3), round(r_obs, 3)], "goal": [far["x"], far["y"]],
                "state": h.state, "reason": h.reason, "nav2": (r.get("nav2") or {}).get("error_name"),
-               "nav2_retries": r.get("nav2_retries"), "recoveries": r.get("replans"),
-               "duration_s": round(t1 - t0, 2)}
+               "nav2_retries": r.get("nav2_retries"), "replans": r.get("replans"),
+               "nav2_recoveries": r.get("nav2_recoveries"), "stuck_events": r.get("stuck_events"),
+               "escapes": r.get("escapes"), "duration_s": round(t1 - t0, 2)}
         out["pass"] = h.state == "failed" and h.reason == "stuck"
         self.runs.append({"kind": "stuck", "t0": t0, "t1": t1, "goal": {"x": far["x"], "y": far["y"]},
                           "plan": pl.get("path"), "id": h.id, "state": h.state, "obstacle": out["obstacle"]})
@@ -669,6 +758,8 @@ def main(argv=None) -> int:
     ap.add_argument("--goal-timeout", type=float, default=150.0)
     ap.add_argument("--force-stand", action="store_true")
     ap.add_argument("--label", default="FAKE P1 + FAKE deploy")
+    ap.add_argument("--goal-plan", choices=["std", "passage"], default="std",
+                    help="passage: 8 goals, 6 through the narrow passage of procthor-train-38 (fake P1 reset_robot)")
     a = ap.parse_args(argv)
     t = Nav2Test(a)
     metrics = {"label": a.label, "p1_is_fake": "FAKE" in a.label, "t_start": time.time(),

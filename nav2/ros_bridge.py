@@ -19,9 +19,16 @@ ROS side:
   frames: base_link = the pelvis projected onto the floor plane (x, y, yaw only; roll/pitch/height dropped)
   action clients navigate_to_pose, compute_path_to_pose; /speed_limit; service lifecycle_manager_navigation/is_active
 
-goto = ComputePathToPose pre-check (so no_path / goal_in_obstacle come back synchronously, with the plan) then
-NavigateToPose with the same goal (goal yaw = the path's arrival heading when the caller gives none; goal snapped to the
-path end when the planner's tolerance moved it). Nav2 error codes map to the body's failure reasons (REASONS below).
+goto = goal check like the body's A* (a goal closer than 0.25 m to an obstacle, unknown or outside the map is moved to
+the nearest free cell within 0.5 m, else goal_in_obstacle; so both backends report the same reason), then a
+ComputePathToPose pre-check (so no_path comes back synchronously, with the plan), then NavigateToPose with the same
+goal (goal yaw = the path's arrival heading when the caller gives none; goal snapped to the path end when the planner's
+tolerance moved it). Nav2 error codes map to the body's failure reasons (REASONS below). Every reply echoes the
+request's `rid` (the body's DEALER client matches replies by it). A failed goal's `status` carries an `escape` hint
+(clearance, and a short straight step away from the walls when the clearance is below the inflation radius).
+
+ROS domain: one per port-offset block, 42 + offset // 100 (nav2/up.sh; WL_ROS_DOMAIN_ID overrides). up.sh refuses to
+start when a wl_ros_bridge already exists on the domain, and this bridge reports not-ready if it sees another one.
 """
 
 from __future__ import annotations
@@ -110,6 +117,9 @@ class Goal:
         self.feedback: dict = {}
         self.plan: dict = {}
         self.snapped = False
+        self.requested = (x, y)
+        self.goal_check: dict | None = None
+        self.escape: dict | None = None
         self.t_start = time.time()
         self.t_active = self.t_end = None
         self.cmd_fwd = 0
@@ -122,7 +132,8 @@ class Goal:
         return {"id": self.id, "state": self.state, "reason": self.reason, "error_code": self.error_code,
                 "error_name": self.error_name, "error_msg": self.error_msg,
                 "goal": {"x": self.x, "y": self.y, "yaw": self.yaw, "yaw_requested": self.yaw_req,
-                         "snapped": self.snapped},
+                         "snapped": self.snapped, "requested": list(self.requested)},
+                "goal_check": self.goal_check, "escape": self.escape,
                 "speed_limit": self.speed, "feedback": self.feedback, "cmd_vel_forwarded": self.cmd_fwd,
                 "cmd_vel_rejected": self.cmd_rej, "t_start": self.t_start, "t_active": self.t_active,
                 "t_end": self.t_end,
@@ -175,6 +186,7 @@ class Bridge(Node):
         self.active: Goal | None = None
         self.stats = collections.Counter()
         self.body_last_error = None
+        self.duplicate_bridge: str | None = None   # another wl_ros_bridge on our ROS domain (would mix /cmd_vel, /tf)
         # body DEALER (only used from the executor thread): IMMEDIATE + tiny HWM + NOBLOCK -> never queue stale cmds
         self.dealer = self.zctx.socket(zmq.DEALER)
         self.dealer.setsockopt(zmq.LINGER, 0)
@@ -368,7 +380,23 @@ class Bridge(Node):
                 delay = min(5.0, delay * 1.5)
 
     # -- Nav2 health ---------------------------------------------------------------------------------
+    def _check_duplicates(self) -> None:
+        try:
+            n = sum(1 for name, ns in self.get_node_names_and_namespaces() if name == self.get_name())
+        except Exception:  # noqa: BLE001
+            return
+        if n > 1 and self.duplicate_bridge is None:
+            self.duplicate_bridge = (f"{n} wl_ros_bridge nodes on ROS_DOMAIN_ID={os.environ.get('ROS_DOMAIN_ID')}: "
+                                     "another stack shares this domain (its /cmd_vel, /tf, /odom, /map and "
+                                     "navigate_to_pose would mix with ours); not ready")
+            self.log("ERROR " + self.duplicate_bridge)
+        elif n <= 1 and self.duplicate_bridge is not None:
+            self.log("the other wl_ros_bridge left the domain")
+            self.duplicate_bridge = None
+
     def _check_nav2(self) -> None:
+        if self.stats["nav2_checks"] % 5 == 0:
+            self._check_duplicates()
         if self.nav2_active and self.stats["nav2_checks"] % 10:
             self.stats["nav2_checks"] += 1
             return
@@ -392,6 +420,8 @@ class Bridge(Node):
         fut.add_done_callback(done)
 
     def ready(self) -> tuple[bool, str]:
+        if self.duplicate_bridge:
+            return False, self.duplicate_bridge
         if self.map_info is None:
             return False, "no map yet (P1 get_occupancy)"
         age = time.monotonic() - self.pose_mono if self.pose_mono else float("inf")
@@ -532,50 +562,134 @@ class Bridge(Node):
         self.goal_event(g, "result")
 
     # -- escape hint (humanoid replacement for Nav2's BackUp) -------------------------------------------
-    def escape_hint(self, x: float, y: float) -> dict:
-        """Nav2 cannot plan from inside the inscribed zone (START_OCCUPIED). Find the shortest straight step (16
-        directions, <= 0.6 m) to a point with clearance >= inscribed + margin; wl-body walks it slowly (SLOW_WALK
-        0.2 m/s, facing held) and re-sends the goal. Numpy only, local 2.4 m window of the raw map."""
-        if self.map_occ is None:
-            return {"needed": False, "error": "no map"}
+    def _clear_fn(self, x: float, y: float, window_m: float):
+        """clearance(P) (m) for points near (x, y): distance to the nearest blocked/unknown cell centre minus half a
+        cell, from the raw map cells within +-window_m of (x, y) (numpy only, a few ms; exact for clearances up to
+        window_m - |P - (x, y)|). Outside the map = 0."""
         res, x0, y0 = self.map_geo
-        need = self.a.inscribed_radius + self.a.escape_margin
         occ = self.map_occ
         H, W = occ.shape
-        ix, iy = int((x - x0) / res), int((y - y0) / res)
-        w = int(1.2 / res)
-        ys, xs = np.nonzero(occ[max(0, iy - w):min(H, iy + w + 1), max(0, ix - w):min(W, ix + w + 1)])
-        if not len(xs):
-            return {"needed": False, "clearance": None}
-        O = np.stack([x0 + (xs + max(0, ix - w) + 0.5) * res, y0 + (ys + max(0, iy - w) + 0.5) * res], axis=1)
+        ix, iy = int(math.floor((x - x0) / res)), int(math.floor((y - y0) / res))
+        w = int(math.ceil(window_m / res))
+        ya, yb, xa, xb = max(0, iy - w), min(H, iy + w + 1), max(0, ix - w), min(W, ix + w + 1)
+        if ya >= yb or xa >= xb:
+            return lambda P: np.zeros(len(P))
+        ys, xs = np.nonzero(occ[ya:yb, xa:xb])
+        O = np.stack([x0 + (xs + xa + 0.5) * res, y0 + (ys + ya + 0.5) * res], axis=1)
 
         def clear(P):
-            return np.sqrt(((P[:, None, :] - O[None, :, :]) ** 2).sum(-1)).min(1) - res / 2
+            P = np.asarray(P, dtype=float).reshape(-1, 2)
+            ixs = np.floor((P[:, 0] - x0) / res).astype(int)
+            iys = np.floor((P[:, 1] - y0) / res).astype(int)
+            inside = (ixs >= 0) & (ixs < W) & (iys >= 0) & (iys < H)
+            if not len(O):
+                c = np.full(len(P), float(window_m))
+            else:
+                c = np.sqrt(((P[:, None, :] - O[None, :, :]) ** 2).sum(-1)).min(1) - res / 2
+            return np.where(inside, c, 0.0)
+        return clear
 
+    def escape_hint(self, x: float, y: float, below: float | None = None) -> dict:
+        """Humanoid replacement for Nav2's BackUp: the shortest straight step (16 directions, <= 0.6 m) away from the
+        walls. Needed when the clearance is below `below` (default: just above the inscribed radius, where Nav2 cannot
+        plan: START_OCCUPIED; for a 'stuck' goal the body asks with the inflation radius). Target clearance: inscribed
+        + margin inside the inscribed zone, else min(below, clearance + 0.08); if no step reaches it, the step with the
+        best clearance gain (>= 0.03 m). wl-body walks it slowly (SLOW_WALK 0.2 m/s, facing held), then re-sends."""
+        if self.map_occ is None:
+            return {"needed": False, "error": "no map"}
+        ins = self.a.inscribed_radius
+        below = ins + 0.01 if below is None else float(below)
+        clear = self._clear_fn(x, y, 1.2)
         c0 = float(clear(np.array([[x, y]]))[0])
-        if c0 >= self.a.inscribed_radius + 0.01:
-            return {"needed": False, "clearance": round(c0, 3)}
+        inscribed = c0 < ins + 0.01
+        if c0 >= below:
+            return {"needed": False, "clearance": round(c0, 3), "inscribed": False, "below": below}
+        need = ins + self.a.escape_margin if inscribed else max(ins + self.a.escape_margin, min(below, c0 + 0.08))
         th = np.arange(16) * (2 * np.pi / 16)
         st = np.arange(0.05, 0.61, 0.05)
         P = np.stack([x + np.outer(np.cos(th), st), y + np.outer(np.sin(th), st)], -1)   # 16 x S x 2
         C = clear(P.reshape(-1, 2)).reshape(len(th), len(st))
-        best = None
+        best, gain = None, None
         for k in range(len(th)):
-            ok = np.nonzero(C[k] >= need)[0]
-            if not len(ok):
-                continue
-            j = int(ok[0])
-            if C[k, :j + 1].min() < min(c0, 0.12) - 1e-6:      # never step through something closer than now
-                continue
-            cand = (float(st[j]), -float(C[k, j]), k, j)
-            if best is None or cand < best:
-                best = cand
-        if best is None:
-            return {"needed": True, "clearance": round(c0, 3), "dir": None}
-        s_, _, k, j = best
-        return {"needed": True, "clearance": round(c0, 3), "dir": [float(np.cos(th[k])), float(np.sin(th[k]))],
-                "dist": round(s_, 3), "clearance_after": round(float(C[k, j]), 3),
+            for j in range(len(st)):
+                if C[k, :j + 1].min() < min(c0, 0.12) - 1e-6:      # never step through something closer than now
+                    break
+                if C[k, j] >= need:
+                    cand = (float(st[j]), -float(C[k, j]), k, j)
+                    if best is None or cand < best:
+                        best = cand
+                    break
+                g = (float(C[k, j]) - c0, -float(st[j]), k, j)
+                if g[0] >= 0.03 and (gain is None or g > gain):
+                    gain = g
+        out = {"needed": True, "clearance": round(c0, 3), "inscribed": inscribed, "below": below,
+               "need": round(need, 3), "dir": None}
+        if best is not None:
+            k, j = best[2], best[3]
+        elif gain is not None:
+            k, j = gain[2], gain[3]
+            out["partial"] = True
+        else:
+            return out
+        return {**out, "dir": [float(np.cos(th[k])), float(np.sin(th[k]))], "dist": round(float(st[j]), 3),
+                "clearance_after": round(float(C[k, j]), 3),
                 "target": [round(float(P[k, j, 0]), 3), round(float(P[k, j, 1]), 3)]}
+
+    # -- goal check (same rule as the body's A*, body/nav_grid.py plan()) ---------------------------------------
+    def goal_check(self, x: float, y: float) -> dict:
+        """The body A*'s goal rule, replicated so both go_to backends give the same reason for the same goal
+        (body/nav_grid.py NavGrid.plan with robot_radius 0.25, plan_res 0.10): cells closer than 0.25 m (centre to
+        centre) to a blocked or unknown cell are blocked; the goal's coarse cell (0.10 m grid, clamped into the map)
+        or its fine cell blocked (or outside the map) -> the nearest free coarse cell within goal_snap_m (0.5 m),
+        else goal_in_obstacle. A goal between 0.25 m and Nav2's inscribed radius (0.30 m) is left to Smac's 0.25 m
+        tolerance (the goal then snaps to the path end). Without this check a goal inside furniture was
+        NO_VALID_PATH (no_path) on Nav2 but goal_in_obstacle on A*, and a goal outside the map GOAL_OUTSIDE_MAP."""
+        if self.map_occ is None:
+            return {"ok": True, "checked": False, "x": x, "y": y, "snapped": False}
+        res, x0, y0 = self.map_geo
+        occ = self.map_occ
+        H, W = occ.shape
+        r = max(self.a.goal_free_clearance, 0.5 * res)
+        R = self.a.goal_snap_m
+        k = max(1, int(round(self.a.goal_plan_res / res)))
+        c = k // 2
+        cH, cW = len(range(c, H, k)), len(range(c, W, k))
+        iy, ix = int(math.floor((y - y0) / res)), int(math.floor((x - x0) / res))
+        gcy = min(max(int(round((iy - c) / k)), 0), cH - 1)
+        gcx = min(max(int(round((ix - c) / k)), 0), cW - 1)
+        rmax = int(math.ceil(R / (k * res)))
+        cys = np.arange(max(0, gcy - rmax), min(cH, gcy + rmax + 1))
+        cxs = np.arange(max(0, gcx - rmax), min(cW, gcx + rmax + 1))
+        CY, CX = np.meshgrid(cys, cxs, indexing="ij")
+        FY, FX = CY * k + c, CX * k + c                              # fine cells sampled by the coarse grid
+        inside = 0 <= iy < H and 0 <= ix < W
+        # obstacles (blocked / unknown cell centres) near the candidates; clearance = centre-to-centre distance
+        m = int(math.ceil((R + r) / res)) + 2 * k
+        fy0, fx0 = int(gcy * k + c), int(gcx * k + c)
+        ya, yb, xa, xb = max(0, fy0 - m), min(H, fy0 + m + 1), max(0, fx0 - m), min(W, fx0 + m + 1)
+        oy, ox = np.nonzero(occ[ya:yb, xa:xb])
+        O = np.stack([ox + xa, oy + ya], axis=1).astype(float)
+
+        def clear_cells(fx, fy):
+            q = np.stack([np.ravel(fx), np.ravel(fy)], axis=1).astype(float)
+            if not len(O):
+                return np.full(len(q), np.inf)
+            return np.sqrt(((q[:, None, :] - O[None, :, :]) ** 2).sum(-1)).min(1) * res
+
+        blocked = (clear_cells(FX, FY) < r).reshape(CY.shape)
+        goal_free = inside and float(clear_cells(np.array([ix]), np.array([iy]))[0]) >= r
+        j = (gcy - cys[0], gcx - cxs[0])
+        info = {"outside_map": not inside, "snap_radius_m": R, "need_clearance_m": round(r, 3)}
+        if not blocked[j] and goal_free:
+            return {"ok": True, "checked": True, "x": x, "y": y, "snapped": False, **info}
+        d2 = (CY - gcy) ** 2 + (CX - gcx) ** 2
+        d2 = np.where(blocked, np.iinfo(np.int64).max, d2)
+        b = np.unravel_index(int(np.argmin(d2)), d2.shape)
+        if blocked[b] or math.sqrt(d2[b]) * k * res > R + 1e-9:
+            return {"ok": False, "reason": "goal_in_obstacle", **info}
+        sx, sy = x0 + (FX[b] + 0.5) * res, y0 + (FY[b] + 0.5) * res
+        return {"ok": True, "checked": True, "x": float(sx), "y": float(sy), "snapped": True,
+                "snap_m": round(float(math.hypot(sx - x, sy - y)), 3), **info}
 
     # -- REP (body) -----------------------------------------------------------------------------------
     def _rep_loop(self) -> None:
@@ -587,12 +701,17 @@ class Bridge(Node):
             if not s.poll(200):
                 continue
             raw = s.recv()
+            req = {}
             try:
                 req = json.loads(raw)
                 a = {**req, **(req.get("args") or {})}
                 rep = self._op(str(req.get("op")), a)
             except Exception as e:  # noqa: BLE001
                 rep = {"ok": False, "error": f"internal: {e!r}"}
+                self.stats["op_errors"] += 1
+                self.log(f"op {req.get('op') if isinstance(req, dict) else '?'} failed: {e!r}")
+            if isinstance(req, dict) and req.get("rid") is not None:
+                rep = {**rep, "rid": req["rid"]}          # the body's DEALER client matches replies by rid
             s.send(json.dumps(rep, default=str).encode())
         s.close(0)
 
@@ -611,6 +730,11 @@ class Bridge(Node):
             g = self.goals.get(str(a.get("id")))
             if g is None:
                 return {"ok": False, "state": "unknown", "error": "unknown goal id"}
+            if g.state == "failed" and g.escape is None and g.t_active is not None:
+                with self.lock:
+                    pose = self.pose
+                if pose is not None:          # where Nav2 gave up: how close to the walls (body: escape / retry)
+                    g.escape = self.escape_hint(pose[0], pose[1], below=self.a.inflation_radius)
             return {"ok": True, **g.brief()}
         if op == "cancel":
             return self._cancel(str(a.get("id")))
@@ -628,7 +752,9 @@ class Bridge(Node):
                 pose = self.pose
             if pose is None:
                 return {"ok": False, "error": "no pose"}
-            return {"ok": True, "pose": pose, **self.escape_hint(pose[0], pose[1])}
+            return {"ok": True, "pose": pose, **self.escape_hint(pose[0], pose[1], below=a.get("below"))}
+        if op == "goal_check":
+            return {**self.goal_check(float(a["x"]), float(a["y"]))}
         if op == "reload_map":
             return {"ok": True, "map": self.load_map()}
         if op == "stats":
@@ -694,8 +820,22 @@ class Bridge(Node):
             prev.done_ev.wait(float(a.get("preempt_wait_s", 3.0)))
         with self.lock:
             pose = self.pose
-        plan = self._plan_blocking(x, y, pose[2] if yaw is None else yaw, float(a.get("plan_timeout_s", 5.0)))
-        g = Goal(gid, x, y, yaw, speed)
+        chk = self.goal_check(x, y)
+        if not chk.get("ok"):
+            g = Goal(gid, x, y, yaw, speed)
+            g.state, g.reason, g.error_name = "failed", "goal_in_obstacle", "GOAL_BLOCKED"
+            g.error_msg = (f"goal clearance {chk.get('clearance')} m and no free cell within "
+                           f"{chk.get('snap_radius_m')} m" + (" (outside the map)" if chk.get("outside_map") else ""))
+            g.goal_check, g.t_end = chk, time.time()
+            with self.lock:
+                self.goals[gid] = g
+            self.goal_event(g, "goal_check_failed")
+            return {"ok": False, "reason": "goal_in_obstacle", "error_name": "GOAL_BLOCKED", "error_msg": g.error_msg,
+                    "goal_check": chk}
+        gx, gy = chk["x"], chk["y"]
+        plan = self._plan_blocking(gx, gy, pose[2] if yaw is None else yaw, float(a.get("plan_timeout_s", 5.0)))
+        g = Goal(gid, gx, gy, yaw, speed)
+        g.requested, g.goal_check, g.snapped = (x, y), chk, bool(chk.get("snapped"))
         if not plan.get("ok"):
             g.state, g.reason = "failed", plan.get("reason")
             g.error_code, g.error_name, g.error_msg = plan.get("error_code"), plan.get("error_name"), \
@@ -706,9 +846,9 @@ class Bridge(Node):
             if plan.get("reason") == "start_in_obstacle" and pose is not None:
                 extra["escape"] = self.escape_hint(pose[0], pose[1])
             self.goal_event(g, "plan_failed", plan=plan, **extra)
-            return {"ok": False, **{k: v for k, v in plan.items() if k != "ok"}, **extra}
+            return {"ok": False, **{k: v for k, v in plan.items() if k != "ok"}, **extra, "goal_check": chk}
         end = plan["end"]
-        if math.hypot(end[0] - x, end[1] - y) > 0.05:          # planner tolerance moved the goal: go where it can
+        if math.hypot(end[0] - gx, end[1] - gy) > 0.05:        # planner tolerance moved the goal: go where it can
             g.x, g.y, g.snapped = end[0], end[1], True
         if yaw is None:
             g.yaw = plan["arrive_yaw"] if plan.get("arrive_yaw") is not None else pose[2]
@@ -726,8 +866,9 @@ class Bridge(Node):
             return {"ok": False, "reason": "nav2_unavailable", "detail": "NavigateToPose goal not acknowledged"}
         if g.state == "failed":
             return {"ok": False, "reason": g.reason or "nav2_rejected", "detail": "NavigateToPose rejected the goal"}
-        return {"ok": True, "id": gid, "state": g.state, "plan": g.plan,
-                "goal": {"x": g.x, "y": g.y, "yaw": g.yaw, "snapped": g.snapped, "yaw_from_path": yaw is None}}
+        return {"ok": True, "id": gid, "state": g.state, "plan": g.plan, "goal_check": chk,
+                "goal": {"x": g.x, "y": g.y, "yaw": g.yaw, "snapped": g.snapped, "yaw_from_path": yaw is None,
+                         "requested": [x, y]}}
 
     def _cancel(self, gid: str) -> dict:
         g = self.goals.get(gid)
@@ -772,6 +913,12 @@ def main(argv=None) -> int:
     ap.add_argument("--planner-id", default="GridBased")
     ap.add_argument("--inscribed-radius", type=float, default=0.30, help="= costmap robot_radius (escape hint)")
     ap.add_argument("--escape-margin", type=float, default=0.07)
+    ap.add_argument("--inflation-radius", type=float, default=0.45,
+                    help="= costmap inflation_radius: a failed goal's escape hint is 'needed' below this clearance")
+    ap.add_argument("--goal-snap-m", type=float, default=0.5, help="goal check: snap radius (body A*: 0.5)")
+    ap.add_argument("--goal-free-clearance", type=float, default=0.25,
+                    help="goal check: a goal needs this clearance (= the body A*'s robot_radius, body/config.py)")
+    ap.add_argument("--goal-plan-res", type=float, default=0.10, help="goal check: = the body A*'s plan_res")
     ap.add_argument("--lifecycle-manager", default="lifecycle_manager_navigation")
     ap.add_argument("--cmd-vel-stamped", action="store_true", help="subscribe TwistStamped (Nav2 Kilted default)")
     a = ap.parse_args(argv)
