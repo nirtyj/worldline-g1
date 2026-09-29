@@ -312,7 +312,8 @@ class Runtime:
     def _on_robot_event(self, ev: dict[str, Any]) -> None:
         kind = ev.get("type")
         now = self.clock.now()
-        fields = {k: v for k, v in ev.items() if k != "type"}
+        # EventLog-backed sinks add their own "t"; the trace and the fused state stamp their own time
+        fields = {k: v for k, v in ev.items() if k not in ("type", "t", "priority")}
         if kind == "safety_event":
             self.tracer.log("safety_event", **fields)
             self.state.record("safety_event", now, priority=0, **fields)

@@ -328,7 +328,7 @@ async def test_a_fall_is_a_safety_event_that_pauses_and_says_so_once():
     try:
         await run_until(rt, lambda: any(e.tool_name == "navigate" and not e.finished for e in rt.history),
                         what="walking")
-        robot.emit({"type": "safety_event", "kind": "fell"})
+        robot.emit({"type": "safety_event", "kind": "fell", "t": 1.23})     # EventLog-shaped: carries its own t
         ack = "I've lost my balance; I'm stopping until I'm steady."
         await keep_running(rt, lambda: rt.task.paused and ack in robot.said, what="paused and said")
         robot.emit({"type": "capability_changed", "capability": "manipulation", "detail": "policy server down"})
