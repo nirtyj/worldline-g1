@@ -118,6 +118,7 @@ VALIDATION = _r("validation", {
     "no_surface_here": "navigate to a surface first",
     "target_not_here": "navigate to the target first",
     "goal_not_understood": "write the goal in one of the listed forms",
+    "place_failed_twice": "try another surface or tell the user",
     # CAPABILITY
     "nav_unhealthy": "navigation is unavailable; tell the user",
     "policy_unavailable": "the manipulation policy is unavailable; tell the user",

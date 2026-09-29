@@ -418,6 +418,13 @@ def _place_rules(a: dict[str, Any], v: ValidationContext) -> Verdict | None:
         kps = ((v.map.get("surfaces") or {}).get(tgt) or {}).get("keypoints") or []
         go = kps[0] if kps else tgt
         return _reject(Stage.STATE, "target_not_here", f"you are at {at}; navigate to {go} first", a)
+    # C13d (rule 7, [WL]): two failed places on this target in this generation -> stop retrying
+    failed = [e for e in v.history if e.tool_name == "manipulate" and e.action == "place"
+              and e.generation == v.task.intent_version and e.status in ("failed", "timed_out")
+              and e.args.get("target") == a["target"]]
+    if len(failed) >= 2:
+        return _reject(Stage.STATE, "place_failed_twice",
+                       f"two places on {a['target']} have failed; try another surface or tell the user", a)
     # C13c goal parses
     g = a.get("goal")
     if g and v.layout_parse is not None and v.layout_parse(str(g)) is None:

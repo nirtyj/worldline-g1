@@ -76,7 +76,9 @@ def summarize(tool: str, status: str, data: dict[str, Any], *, action: str | Non
         kind = d.get("kind") or action
         if status == "succeeded":
             if kind == "reposition":
-                return f"repositioned {float(d.get('walked_m') or 0.0):.2f} m to the reach stance{tag}; check reachability again"
+                how = f" ({tag[2:]})" if tag else ""
+                return (f"repositioned {float(d.get('walked_m') or 0.0):.2f} m to the reach stance{how}; "
+                        f"check reachability again")
             looked = d.get("look") or {}
             seen = f"; looked: {_sees(looked)}" if looked else ""
             return (f"arrived at {d.get('at') or loc} ({_m(d.get('path_len_m') or d.get('walked_m'))}, "

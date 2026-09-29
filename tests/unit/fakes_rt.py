@@ -459,6 +459,9 @@ class PolicyBrain:
         self.acked = False
         self.done_said = False
         self.searched: list[str] = []
+        self.tried: list[str] = []
+        self.failures = 0
+        self.absent: set[str] = set()
 
     async def classify(self, utt: Any, ctx: Any) -> str:
         t = utt.text.lower()
@@ -488,7 +491,7 @@ class PolicyBrain:
         m = ctx.map
         user = m["people"]["user"]
         want = self.want
-        if want is None or ctx.paused:
+        if want is None or ctx.paused or ctx.own_goal:
             return self._call("wait_and_observe", timeout_s=0)
         if not self.acked:
             self.acked = True
@@ -506,11 +509,18 @@ class PolicyBrain:
                 return self._call("wait_and_observe", timeout_s=0)
         held = next((oid for oid in mine if str(b["objects"][oid]["where"]).startswith("hand:")), None)
         at = b["robot"]["at"]
+        last_manip = next((e for e in reversed(ctx.history) if e.tool == "manipulate" and e.status != "rejected"), None)
+        if last_manip is not None and last_manip.status in ("failed", "timed_out"):
+            self.failures += 1
+            if self.failures >= 2:
+                self.want = None                              # rule 7: tell the user, don't loop
+                return self._call("speak", text=f"The {last_manip.action} didn't work ({last_manip.data.get('reason')}).")
         if held:
             if at != user["keypoint"]:
                 return self._call("navigate", location="user")
             return self._call("manipulate", action="place", object_type=want, target="user")
-        known = [oid for oid in mine if b["objects"][oid]["where"] in m["surfaces"]]
+        known = [oid for oid in mine if b["objects"][oid]["where"] in m["surfaces"]
+                 and b["objects"][oid]["where"] not in self.absent]
         if known:
             oid = known[0]
             surf = b["objects"][oid]["where"]
@@ -525,13 +535,32 @@ class PolicyBrain:
                     return self._call("manipulate", action="pick", object_type=want)
                 if d.get("reason") == "needs_reposition":
                     return self._call("navigate", location="reach_stance")
+                if d.get("reason") in ("not_seen_here", "not_found"):
+                    self.absent.add(surf)                     # stale belief (e.g. memory): keep searching
+                    self.searched.append(surf)
+                    return self._search(ctx) or self._give_up(want)
+                sug = d.get("suggest_location")
+                if sug and sug != "reach_stance" and sug != at and sug not in self.tried:
+                    self.tried.append(sug)
+                    return self._call("navigate", location=sug)
+                self.want = None                              # give up once, then stay quiet
                 return self._call("speak", text=f"I can't reach it ({d.get('reason')}).")
             return self._call("check_reachability", object_type=want)
-        # search: surfaces not looked at yet, in map order
+        return self._search(ctx) or self._give_up(want)
+
+    def _search(self, ctx: Any) -> ToolCall | None:
+        """Surfaces not looked at yet (this session), in map order."""
+        b, m = ctx.belief, ctx.map
         for s, info in m["surfaces"].items():
-            if s not in b["looked"] and s not in self.searched and info["keypoints"][0] not in b["looked"]:
+            looked = b["looked"].get(s) or b["looked"].get(info["keypoints"][0])
+            fresh = looked is not None and looked.get("source") != "memory"
+            if not fresh and s not in self.searched:
                 self.searched.append(s)
                 return self._call("navigate", location=info["keypoints"][0])
+        return None
+
+    def _give_up(self, want: str) -> ToolCall:
+        self.want = None
         return self._call("speak", text=f"I couldn't find the {want}.")
 
 
