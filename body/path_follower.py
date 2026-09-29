@@ -9,7 +9,8 @@ Phases: align (turn in place toward the path if the first heading error > 50 deg
 SLOW_WALK, facing = direction to the lookahead point, speed ramps down with sqrt(2 a d)) -> settle -> approach (up to
 2 short holonomic corrections at v_min with facing held) -> final_turn (optional goal yaw) -> check.
 Stuck: commanded to move but < stuck_min_progress_m over stuck_window_s -> IDLE, add a virtual obstacle ahead,
-re-plan (max_replans), else failed/stuck. Cross-track > 0.6 m -> re-plan.
+re-plan (max_replans), else failed/stuck; when that obstacle leaves no route, it is dropped and the mapped route is
+tried again. Cross-track > 0.6 m -> re-plan.
 """
 
 from __future__ import annotations
@@ -147,7 +148,18 @@ class GoToMotion(Motion):
         try:
             self._plan(pose)
         except MotionError as e:
-            return f"{why}_then_{e.reason}"
+            if obstacle_xy is None or e.reason not in ("no_path", "start_in_obstacle"):
+                return f"{why}_then_{e.reason}"
+            # the stuck guess (an unmapped obstacle ahead) closed the last route the map has: a narrow doorway where
+            # SONIC's sway rubs a door frame (H40 kitchen -> living room, 2026-09-29 m1_drive_test). Drop that guess
+            # and try the mapped route again; a real blockage gets stuck again and ends `stuck` after max_replans.
+            self.nav.pop_virtual()
+            try:
+                self._plan(pose)
+            except MotionError as e2:
+                return f"{why}_then_{e2.reason}"
+            self.plans[-1]["virtual_dropped"] = {"at": [round(float(obstacle_xy[0]), 3),
+                                                        round(float(obstacle_xy[1]), 3)], "why": e.reason}
         self.ctx.emit(self.id, "progress", {"phase": "replanned", "why": why, "plan": self.plans[-1],
                                             "replans": self.replans})
         return None

@@ -164,6 +164,14 @@ class NavGrid:
             self.virtual = []
             self._recompute()
 
+    def pop_virtual(self) -> tuple[float, float, float] | None:
+        """Remove the newest virtual obstacle (x, y, r) and return it (None when there is none)."""
+        if not self.virtual:
+            return None
+        v = self.virtual.pop()
+        self._recompute()
+        return v
+
     # -- coordinates ---------------------------------------------------------------------------
     def world_to_cell(self, x: float, y: float) -> tuple[int, int]:
         return int(math.floor((y - self.origin[1]) / self.res)), int(math.floor((x - self.origin[0]) / self.res))

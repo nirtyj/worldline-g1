@@ -73,3 +73,66 @@ def test_ray_free_distance():
     g = grid()
     d = g.ray_free_distance(5.0, 1.5, 0.0, max_d=8.0)   # toward +x in the living room, stops at sofa/wall
     assert 3.0 < d < 5.0
+
+
+def test_pop_virtual():
+    g = grid()
+    assert g.pop_virtual() is None
+    base = g.plan((5.0, 1.5), (5.0, 4.5))
+    g.add_virtual_obstacle(5.0, 3.0, 0.8)
+    assert g.pop_virtual() == (5.0, 3.0, 0.8) and not g.virtual
+    assert g.plan((5.0, 1.5), (5.0, 4.5)).length == pytest.approx(base.length, rel=1e-6)
+
+
+class _Mux:
+    last_facing_w = None
+
+    def hold(self, facing_w, owner=None):
+        self.held = facing_w
+
+    def set(self, cmd):
+        self.cmd = cmd
+
+
+class _Ctx:
+    def __init__(self, nav):
+        from body.config import BodyConfig
+        self.cfg, self.nav, self.mux, self.events = BodyConfig(), nav, _Mux(), []
+
+    def get_nav(self):
+        return self.nav
+
+    def emit(self, op_id, kind, data):
+        self.events.append((kind, data))
+
+
+def _pose(x, y, yaw=0.0):
+    from body.wire import Pose
+    return Pose({"base_pos": [x, y, 0.78], "yaw": yaw}, 0.0)
+
+
+def test_stuck_guess_that_closes_the_last_route_is_dropped():
+    """A stuck in a doorway puts a virtual obstacle into the doorway; when no other route is open that guess is
+    dropped and the mapped route is planned again (H40 kitchen -> living room: `stuck_then_no_path` before)."""
+    from body.path_follower import GoToMotion
+    g = grid()
+    g.add_virtual_obstacle(4.0, 4.5, 0.6)              # the other door (y 4-5 in the x=4 wall) is closed already
+    ctx = _Ctx(g)
+    m = GoToMotion("go-1", {"x": 5.5, "y": 1.5}, ctx)
+    m.start(_pose(2.5, 1.5))
+    g.add_virtual_obstacle(4.0, 4.5, 0.6)              # start() clears the virtual set: close the other door again
+    m._plan(_pose(2.5, 1.5))
+    assert m._replan(_pose(3.6, 1.5), "stuck", (3.95, 1.5)) is None
+    assert m.plans[-1]["virtual_dropped"]["why"] == "no_path"
+    assert g.virtual == [(4.0, 4.5, 0.6)]              # only the stuck guess went
+    assert any(k == "progress" and d.get("phase") == "replanned" for k, d in ctx.events)
+
+
+def test_stuck_guess_kept_when_another_route_exists():
+    from body.path_follower import GoToMotion
+    g = grid()
+    ctx = _Ctx(g)
+    m = GoToMotion("go-2", {"x": 5.5, "y": 1.5}, ctx)
+    m.start(_pose(2.5, 1.5))
+    assert m._replan(_pose(3.6, 1.5), "stuck", (3.95, 1.5)) is None
+    assert "virtual_dropped" not in m.plans[-1] and len(g.virtual) == 1
