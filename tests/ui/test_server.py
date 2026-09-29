@@ -255,3 +255,78 @@ def test_reset_rejects_unknown_profile():
                 await hub.session.stop()
             hub.close()
     run(go())
+
+
+def test_system1_gets_head_frames_through_the_gate_and_observations_reach_the_runtime(monkeypatch):
+    """The System 1 couplings (PLAN 8.2, 8.4): state updates, gated head frames with the keypoint the robot
+    stands at, an observe call whose items go to runtime.add_observations. A fake System 1, no network."""
+    import ui.server as srv
+
+    monkeypatch.setattr(srv, "S1_OBSERVE_EVERY_S", 0.3)
+
+    class FakeS1:
+        status = "ready"
+
+        def __init__(self, on_status):
+            self.frames, self.updates, self.said = [], [], []
+
+        async def run(self):
+            await asyncio.sleep(3600)
+
+        async def update(self, ctx):
+            self.updates.append(ctx)
+
+        async def frame(self, jpeg, where):
+            self.frames.append((jpeg, where))
+
+        async def observe(self):
+            return [{"what": "a door left open", "where": "start", "confidence": 0.8}]
+
+        async def robot_said(self, text):
+            self.said.append(text)
+
+        async def route(self, text):
+            return {"kind": "request", "confidence": 0.9}
+
+    class Gate:
+        def __init__(self):
+            self.calls = []
+
+        def decide(self, frame, pose, now, expected=False, stationary=None):
+            from types import SimpleNamespace
+            self.calls.append((pose, expected, stationary))
+            return SimpleNamespace(send=True, reason="new view")
+
+        def reset(self):
+            pass
+
+        def summary(self):
+            return "sent 1"
+
+    async def go():
+        tap = FakeTap()
+        tap.put("head", JPEG_A, {"seq": 1})
+        built = {}
+        deps = make_deps(built)
+        deps.system1 = FakeS1
+        gate = Gate()
+        deps.frame_gate = lambda: gate
+        monkeypatch.setattr(srv, "_decode_rgb", lambda jpeg: [[0]])
+        hub = Hub("procthor-train-40", "sonic", deps=deps, cameras=TapCameras(tap), system1="x")
+        await hub.reset("procthor-train-40", "agent", "gemini-3.8-flash", profile="sonic")
+        observed = []
+        built["runtime"].add_observations = lambda items, source: observed.append((items, source))
+        hub.start_system1()
+        await asyncio.sleep(1.2)
+        tap.put("head", JPEG_B, {"seq": 2})
+        await asyncio.sleep(1.2)
+        s1 = hub.system1
+        await hub.session.stop()
+        return s1, gate, observed
+
+    s1, gate, observed = run(go())
+    assert [f[0] for f in s1.frames][:2] == [JPEG_A, JPEG_B] and s1.frames[0][1] == "start"
+    assert s1.updates and s1.updates[0]["at"] == "start"
+    assert gate.calls and gate.calls[0][0] == (1.0, 1.5, 90.0, 15.0), "the robot's own pose (telemetry) feeds the gate"
+    assert gate.calls[0][2] is True, "not moving -> stationary"
+    assert observed and observed[0][1] == "system1" and observed[0][0][0]["what"] == "a door left open"
