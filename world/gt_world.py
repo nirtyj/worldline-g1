@@ -470,7 +470,8 @@ class GTWorld:
         """World position of a palm (P1.5 link poses); None where the world has no palm poses."""
         return None
 
-    def enable_camera(self, camera: str, on: bool, *, consumer: str = "runtime", ttl_s: float | None = None) -> dict:
+    def enable_camera(self, camera: str, on: bool, *, consumer: str = "runtime", ttl_s: float | None = None,
+                      hz: float | None = None) -> dict:
         """Render a P1 camera only while someone needs it (OD1: ego_view protects RTF)."""
         raise NotSupported("enable_camera")
 

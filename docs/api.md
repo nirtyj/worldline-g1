@@ -108,9 +108,9 @@ button only (band on in sim, then `shutdown_control`; the deploy exits).
 | `sim_health()` | `world.sim_health.SimHealth {state, rtf, detail, source, since_s, age_s}` |
 | `planar_speed()` | m/s from the GT pose (robot/ never reads the body's copy of gt.pose) |
 | `camera_pose(camera=)`, `camera_model(camera)` | `head` (the profile's perception camera) or `ego_view` (GR00T's, Arena's G1 head camera); on Isaac from the real torso link (P1.5) when there is no view override |
-| `detections(camera="head", ..., method=None)` | `method=None`: GT geometry (`gt-geometric`), every caller; `method="best"`: the most faithful source: on Isaac, P1's instance-id segmentation of the live view (P1.6, cached 0.2 s, falls back to the geometry and counts it in `seg_stats`). The observation service's glances and scans ask for `best` |
+| `detections(camera="head", ..., method=None)` | `method=None`: GT geometry (`gt-geometric`), every caller; `method="best"`: the most faithful source: on Isaac, P1's instance-id segmentation of the live view (P1.6, cached 0.2 s, falls back to the geometry and counts it in `seg_stats`). It stalls P1's physics 15-35 ms per call (p1_m2b.md §13), so only the observation service's explicit glances and scan views ask for it; periodic glance records, perception and reachability stay geometric. On the dev box it agreed with the geometry on 66 % of 50 views, and the render supported P1 in each inspected disagreement |
 | `palm_position(arm)` | (x, y, z) from P1.5 link poses, else None; `grasp_state()` then also gives `palm_dist_m` |
-| `enable_camera(camera, on, consumer=, ttl_s=)` | P1's `camera` op (OD1: render `ego_view` only while a session needs it); NotSupported elsewhere |
+| `enable_camera(camera, on, consumer=, ttl_s=, hz=)` | P1's `camera` op (OD1: render `ego_view` only while a session needs it; P1 keeps `hz` across off/on, so pass it); NotSupported elsewhere |
 | `drain_events()` | P1 `gt.event`s since the last call |
 | `capabilities()` (SimControl) | `attach`, `detach`, `object_poses`, `link_poses`, `segmentation`, `enable_camera`, `reset_scene`, `move_object`, `detections:head`, `detections:ego_view`, `p1_contract`, `cameras` |
 | `reset_scene(variant, poses=, robot=)`, `move_object(id, center)` | P1.7 fixture ops |

@@ -159,9 +159,9 @@ def test_detections_best_uses_p1_segmentation(m2b):
         # the ego camera is off: P1 answers camera_off and the geometry stands in (counted)
         ego = w.detections(camera="ego_view", method="best")
         assert all(d.method == "gt-geometric" for d in ego) and "camera_off" in w.seg_stats["last_error"]
-        rep = w.enable_camera("ego_view", True, consumer="man-000001", ttl_s=10)
+        rep = w.enable_camera("ego_view", True, consumer="man-000001", ttl_s=10, hz=30)
         assert rep["on"] is True and m2b.cameras["ego_view"]["on"]
-        assert m2b.requests[-1]["ttl_s"] == 10
+        assert m2b.requests[-1]["ttl_s"] == 10 and m2b.requests[-1]["hz"] == 30
         ego = w.detections(camera="ego_view", method="best")
         assert ego and ego[0].method == "fake-segmentation"
         w.enable_camera("ego_view", False, consumer="man-000001")

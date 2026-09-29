@@ -418,13 +418,18 @@ class IsaacGTWorldModel(GTWorld):
         return out
 
     # ------------------------------------------------------------------ cameras (P1.4 / OD1)
-    def enable_camera(self, camera: str, on: bool, *, consumer: str = "runtime", ttl_s: float | None = None) -> dict:
+    def enable_camera(self, camera: str, on: bool, *, consumer: str = "runtime", ttl_s: float | None = None,
+                      hz: float | None = None) -> dict:
+        """P1's `camera` op (p1_m2b.md §5.4). P1 keeps a camera's rate across off/on, so a consumer that needs one
+        passes `hz` (GR00T: 30); `ttl_s` drops a consumer that stops repeating the enable."""
         if "camera" not in self._ops:
             raise NotSupported("P1 has no `camera` op (p1_m2b.md §5.4)")
         name = P1_CAMERA.get(self.camera_model(camera).name, camera)
         args: dict[str, Any] = {"name": name, "on": bool(on), "consumer": consumer}
         if ttl_s is not None:
             args["ttl_s"] = float(ttl_s)
+        if hz is not None and on:
+            args["hz"] = float(hz)
         return self._ok(self.rpc.call("camera", timeout_s=2.0, **args), "camera")
 
     def set_render_rates(self, head_hz: float, ego_hz: float) -> None:
