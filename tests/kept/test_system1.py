@@ -5,7 +5,7 @@ attribute name fails here rather than in the live server. System 1 opens two
 sessions: the router (tool "route") and the observer (tool "observe"); the fake
 client hands out prepared sessions by which tool the session declares.
 
-    .venv-thor/bin/python -m unittest tests.test_system1
+    .venv-rt/bin/python -m pytest tests/kept/test_system1.py
 """
 
 from __future__ import annotations

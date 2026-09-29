@@ -37,6 +37,7 @@ class Directive:
     confidence: float = 1.0
     supersedes: str | None = None
     reply: str | None = None      # yes / no, when it answers the robot's yes/no question
+    replaces_task: bool | None = None   # System 1's "the current task is over" (stored, not rendered)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -75,7 +76,8 @@ class RobotObservationAdapter:
     """Turn a robot's telemetry/perception API into observation frames.
 
     ``telemetry`` and ``perception`` are optional to keep scripted test robots
-    and the baseline compatible.  The fallbacks use the older robot API.
+    compatible.  The fallbacks use the older robot API. On the G1 the telemetry
+    also carries ``body{mode, lease, upright, rtf, carry, halt_epoch}``.
     """
 
     def __init__(self, robot: Any, source: str = "robot-adapter") -> None:
@@ -104,6 +106,7 @@ class RobotObservationAdapter:
                 "grippers": grippers,
                 "active_skills": [],
                 "health": {"ok": True},
+                "body": {},
             }
 
         perception_fn = getattr(self.robot, "perception", None)
@@ -113,11 +116,17 @@ class RobotObservationAdapter:
         return ObservationFrame(next(self._seq), round(now, 3), self.source, robot_state, perception)
 
 
+# Keys that change on every sample without meaning anything: timestamps, and the G1 stack's
+# health jitter (RTF, message ages). They never make a sample "changed".
+VOLATILE_KEYS = {"t", "observed_at", "rtf", "rtf_1s", "rtf_10s", "gdebug_age_ms", "planner_age_ms", "age_s",
+                 "latency_ms", "sim_t", "wall_t"}
+
+
 def _stable(value: Any) -> Any:
-    """Remove volatile timestamps before comparing two fused samples."""
+    """Remove volatile timestamps and health jitter before comparing two fused samples."""
 
     if isinstance(value, Mapping):
-        return {k: _stable(v) for k, v in value.items() if k not in {"t", "observed_at"}}
+        return {k: _stable(v) for k, v in value.items() if k not in VOLATILE_KEYS}
     if isinstance(value, (list, tuple)):
         return [_stable(v) for v in value]
     if isinstance(value, set):

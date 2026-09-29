@@ -1,6 +1,6 @@
 """brains/frame_gate.py: which frames System 1 gets.
 
-    .venv-thor/bin/python -m unittest tests.test_frame_gate
+    .venv-rt/bin/python -m pytest tests/kept/test_frame_gate.py
 """
 
 from __future__ import annotations

@@ -1,0 +1,33 @@
+[project]
+name = "worldline-g1"
+version = "0.2.0"
+description = "Worldline's runtime on a Unitree G1 in Isaac Sim, walking with GEAR-SONIC (PLAN.md)"
+requires-python = ">=3.11"
+# P5 wl-runtime (py3.11). api/ itself is stdlib only (imported by py3.11 and py3.12 processes).
+dependencies = [
+    "numpy>=2",
+    "pillow",
+    "pyzmq",
+    "msgpack",
+    "websockets",
+    "pyyaml",
+    "google-genai==2.25.0",
+    "typesafe_sdk==0.7.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+# Run from the repo root: `.venv-rt/bin/python -m pytest tests/unit tests/contract tests/kept`
+pythonpath = ["."]
+testpaths = ["tests/unit", "tests/contract", "tests/kept"]
+markers = [
+    "asyncio: an async test, run with asyncio.run by tests/*/conftest.py",
+    "live: needs real API keys and network (opt-in: -m live)",
+    "box: needs the GPU box and the live stack (opt-in: -m box)",
+]
+addopts = "-m 'not live and not box'"

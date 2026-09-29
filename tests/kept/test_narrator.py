@@ -1,7 +1,7 @@
 """The chat's progress lines (agent/narrator.py) and the runtime's filter for System 1
 observations that only repeat what it just confirmed (Runtime._echoes_belief).
 
-    .venv-thor/bin/python -m unittest tests.test_narrator
+    .venv-rt/bin/python -m pytest tests/kept/test_narrator.py
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ class NarratorTest(unittest.TestCase):
     def test_carrying_it_is_not_looking_for_it(self):
         self.ask("put the spatula on counter 1b")
         self.b.objects["spatula_1"].where = Fact("hand:right", "look", 95.0, True)
-        self.n.row({"type": "started", "tool": "navigate", "args": {"to": "counter_1b"}})
+        self.n.row({"type": "started", "tool": "navigate", "args": {"location": "counter_1b"}})   # G1: to -> location
         self.assertIn("Heading to the counter, with the spatula", lines(self.n))
 
     def test_a_real_find_still_says_found(self):

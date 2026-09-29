@@ -68,6 +68,14 @@ TARGET_WORDS = sorted(VOLATILE_TYPES | {
     "towel", "blanket", "shoe", "bag", "wallet", "charger", "remote", "toy", "medicine", "water"})
 
 
+def set_vocabulary(types) -> list[str]:
+    """Add the registry's object types and the fixed pickupable vocabulary to TARGET_WORDS
+    (PLAN 8.5). Ids stay <snake_type>_<n>: Jev can't copy free text out of a message."""
+    global TARGET_WORDS
+    TARGET_WORDS = sorted(set(TARGET_WORDS) | {str(t) for t in types if t})
+    return TARGET_WORDS
+
+
 def _word(object_id: str) -> str:
     """'cell_phone_2' -> 'cell_phone'."""
     head, _, tail = object_id.rpartition("_")

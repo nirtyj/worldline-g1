@@ -1,6 +1,9 @@
 """The plumbing every model-backed brain shares: tool schemas, one forced tool
 call per decision, argument filtering, and latency/token stats.
 
+Tool schemas come from api/tools.py (the only definition), enums filled by
+argument name once per session and frozen (PLAN 5.2, Invariant 9).
+
 A brain subclasses ModelBrain and supplies the prompt and the context:
 
     class MyBrain(ModelBrain):
@@ -13,11 +16,14 @@ Change prompts and context in the brain (agent/model.py), not here.
 
 from __future__ import annotations
 
+import json
 import os
 import statistics
 from typing import Any
 
-from brains.interface import KINDS, TOOLS, BrainInput, ToolCall
+from api.tools import TOOL_SPECS, UNKNOWN_TOOL_FALLBACK, SchemaContext, ToolCall, coerce_args, json_schemas
+from api.types import PROFILES
+from brains.interface import KINDS, BrainInput
 
 from .client import LLMError, make_client, provider_for
 
@@ -42,30 +48,45 @@ observation reports something about the world that may affect the task
 Call classify with the kind of the latest utterance."""
 
 
-def tool_schemas(ctx: BrainInput) -> list[dict[str, Any]]:
-    """The robot's tools as JSON schemas, with allowed values filled in from the
-    map (keypoints) and belief (object ids)."""
-    keypoints = sorted(ctx.map["keypoints"])
-    object_ids = sorted((ctx.belief.get("objects") or {}).keys())
-    out = []
-    for name, spec in TOOLS.items():
-        props: dict[str, Any] = {}
-        required: list[str] = []
-        for arg, a in spec["args"].items():
-            schema = {k: v for k, v in a.items() if k in ("type", "description", "enum")}
-            if arg == "to":
-                schema["enum"] = keypoints
-            elif arg == "object" and object_ids:
-                schema["enum"] = object_ids
-            props[arg] = schema
-            if not a.get("optional"):
-                required.append(arg)
-        if name == "wait":
-            props["reason"] = {"type": "string", "description": "Why, in a few words."}
-        params: dict[str, Any] = {"type": "object", "properties": props}
-        if required:
-            params["required"] = required
-        out.append({"name": name, "description": spec["description"], "parameters": params})
+def schema_context(ctx: Any) -> SchemaContext:
+    """The session's frozen SchemaContext (BrainInput.tools_ctx), else one derived from the map."""
+    sc = getattr(ctx, "tools_ctx", None)
+    if isinstance(sc, SchemaContext):
+        return sc
+    m = getattr(ctx, "map", None) or {}
+    slots = getattr(ctx, "profile", None) or PROFILES["lite"].slots()
+    return SchemaContext.from_map(m, m.get("skill_types") or [], slots)
+
+
+def provider_of(client: Any) -> str:
+    name = type(client).__name__ if client is not None else ""
+    return {"AnthropicClient": "anthropic", "GeminiClient": "gemini", "OpenAIClient": "openai"}.get(name, "neutral")
+
+
+def tool_schemas(ctx: Any, provider: str = "neutral") -> list[dict[str, Any]]:
+    """The robot's tools as JSON schemas (api.tools.json_schemas), enums filled by argument name
+    from the session's SchemaContext: locations, surfaces and the registry's object types."""
+    return json_schemas(schema_context(ctx), provider)  # type: ignore[arg-type]
+
+
+def extra_calls(use: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Calls beyond the first in one reply (Anthropic content blocks, OpenAI tool_calls)."""
+    raw = getattr(use, "raw", None) or {}
+    out: list[tuple[str, dict[str, Any]]] = []
+    blocks = raw.get("content") if isinstance(raw, dict) else None
+    if isinstance(blocks, list):
+        uses = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+        out = [(b.get("name", ""), dict(b.get("input") or {})) for b in uses[1:]]
+    choices = raw.get("choices") if isinstance(raw, dict) else None
+    if isinstance(choices, list) and choices:
+        calls = ((choices[0] or {}).get("message") or {}).get("tool_calls") or []
+        for c in calls[1:]:
+            fn = c.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                args = {}
+            out.append((fn.get("name", ""), dict(args) if isinstance(args, dict) else {}))
     return out
 
 
@@ -105,6 +126,8 @@ class ModelBrain:
         self.tokens_in = 0
         self.tokens_out = 0
         self.errors = 0
+        self._tools: list[dict[str, Any]] = []
+        self._tools_key: Any = None
 
     # Override these two in a brain.
     def render(self, ctx: BrainInput) -> str:
@@ -114,7 +137,17 @@ class ModelBrain:
         return f"LATEST UTTERANCE\n{utterance.text}\n\nCall classify."
 
     def tools(self, ctx: BrainInput) -> list[dict[str, Any]]:
-        return tool_schemas(ctx)
+        """Frozen per session (Invariant 9): rendered once per schema_rev and reused byte for byte."""
+        sc = schema_context(ctx)
+        key = (sc.schema_rev, sc.locations, sc.surfaces, sc.skill_types, tuple(sorted(sc.slots.items())),
+               sc.include_look)
+        if self._tools_key != key:
+            self._tools_key = key
+            self._tools = tool_schemas(ctx, provider_of(self.client))
+        return self._tools
+
+    def system_for(self, ctx: BrainInput) -> str:
+        return self.system
 
     async def _call(self, system: str, text: str, tools: list[dict[str, Any]]):
         try:
@@ -133,12 +166,19 @@ class ModelBrain:
         return kind if kind in KINDS else "chitchat"
 
     async def next_action(self, ctx: BrainInput) -> ToolCall:
-        use = await self._call(self.system, self.render(ctx), self.tools(ctx))
-        if use.name not in TOOLS:
-            return ToolCall("wait", reason=f"model called unknown tool {use.name!r}")
-        args = {k: v for k, v in use.args.items() if k in TOOLS[use.name]["args"]}
-        reason = use.args.get("reason") if use.name == "wait" else (use.text or None)
-        return ToolCall(use.name, args, reason=reason)
+        use = await self._call(self.system_for(ctx), self.render(ctx), self.tools(ctx))
+        include_look = schema_context(ctx).include_look
+        known = set(TOOL_SPECS) | ({"look"} if include_look else set())
+        if use.name not in known:
+            # An unknown tool name becomes wait_and_observe(timeout_s=10, reason=<model text>) (PLAN 5.2).
+            return ToolCall(UNKNOWN_TOOL_FALLBACK, {"timeout_s": 10.0,
+                                                   "reason": (use.text or f"model called unknown tool {use.name!r}")[:200]},
+                            reason=f"model called unknown tool {use.name!r}")
+        args = coerce_args(use.name, use.args, include_look)
+        reason = args.get("reason") if use.name == "wait_and_observe" else (use.text or None)
+        # More than one call in a reply: keep the first; the harness rejects the rest (doc 21).
+        extra = [ToolCall(n, coerce_args(n, a, include_look)) for n, a in extra_calls(use)]
+        return ToolCall(use.name, args, reason=reason, extra=extra)
 
     def stats(self) -> dict[str, Any]:
         lat = sorted(self.latencies)

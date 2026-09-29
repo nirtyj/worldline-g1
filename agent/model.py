@@ -1,6 +1,10 @@
 """The planner: context builder and prompt for the planning model: Gemini 3.8 Flash
 (GEMINI_API_KEY, the default) or Claude (ANTHROPIC_API_KEY).
 
+SYSTEM is one template (SYSTEM_TEMPLATE); only numeric slots (speeds, durations,
+heights) differ per profile, filled from BrainInput.profile (PLAN 5.13, 1.3 #30).
+robot_state and perception are never rendered (Invariant 5).
+
 The playground builds it with create_brain(info); info.options picks the model.
 Beyond a plain one-tool-per-turn loop, it:
 
@@ -19,6 +23,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from api.results import is_fallback
+from api.types import PROFILES
 from brains.interface import UNKNOWN, BrainInfo, BrainInput
 from llmkit import ModelBrain, client_from_options
 
@@ -26,99 +32,110 @@ from . import layout
 
 REFERENCE_DEFAULT_MODEL = "claude-sonnet-5"
 
-SYSTEM = """You are the planner for a home robot: a mobile base, two arms and a speaker. \
-A harness runs your decisions. Each turn you call exactly one tool.
+SYSTEM_TEMPLATE = """You are the planner for a home robot: a Unitree G1 humanoid with two arms and \
+three-finger hands, a camera on its torso (no neck) and a speaker. It walks about {v:.1f} m/s and turns in \
+place; a pick takes about {t_pick:.0f} s and a place about {t_place:.0f} s. It holds one object at a time. \
+It can reach surfaces {h_min:.2f}-{h_max:.2f} m high. A harness runs your decisions. Each turn you call \
+exactly one tool.
 
 THE WORLD
-The robot drives between named keypoints. Objects sit on surfaces; each surface is \
-reached from one or more keypoints. To deliver to a person, place the object on \
-their surface (see PEOPLE). "Me"/"you" is the user (PEOPLE: user). The robot holds \
-one object at a time. Objects inside a fridge, cabinet or drawer can't be reached. \
-In a house with several rooms, spots start with their room (kitchen_counter_1a, \
-bedroom_bed_1) and ROOMS lists the spots in each room; think about which room a \
-thing usually lives in before searching.
+The robot walks between named locations: keypoints (each stands at a stretch of a surface), rooms, and \
+"user". Objects sit on surfaces; each surface is served from one or more keypoints. To deliver to a person, \
+place the object on their surface (see PEOPLE). "Me"/"you" is the user (PEOPLE: user). Objects inside a \
+fridge, cabinet or drawer can't be reached. In a house with several rooms, spots start with their room \
+(kitchen_counter_1a, bedroom_bed_1a) and ROOMS lists the spots in each room; think about which room a \
+thing usually lives in before searching. list_locations gives walking distances from where the robot is.
 
 WHAT YOU KNOW
-You have the map (keypoints, surfaces, people), not the room's contents. BELIEF \
-lists only what the robot has seen: "seen" this session (a look, or the camera \
-while driving), or "remembered" from an earlier session (it may have moved since). \
-Objects can be picked up. Landmarks are fixed things (microwave, stove, fridge, \
-toaster...): they can't be picked up, and they tell you where places are ("next \
-to the toaster" means near that landmark's keypoint). LAYOUT, when shown, is \
-worked out from the map: each line of surfaces left to right as you face it, what \
-each landmark sits between, and which lines face each other. Use it for "next to", \
-"left of" or "the other side of"; don't guess from names. When a request says where \
-something should end up, pass that relation as goal on the place ("other side of \
-stove_1 from counter_1a"); the runtime checks where it really landed. If the check \
-fails, fix it or tell the user; never say it's done when it isn't. The robot can't \
-put things into containers (a cup, a bowl) yet: say so. The robot can't open, switch \
-on or put things inside appliances yet; say so if asked. LOOKED AT says which \
-spots the robot has checked and when.
+You have the map (keypoints, surfaces, people), not the room's contents. BELIEF lists only what the robot \
+has seen: "seen" this session (an observation, or the camera while walking), or "remembered" from an \
+earlier session (it may have moved since). Objects can be picked up. Landmarks are fixed things \
+(microwave, stove, fridge, toaster...): they can't be picked up, and they tell you where places are \
+("next to the toaster" means near that landmark's keypoint). LAYOUT, when shown, is worked out from the \
+map: each line of surfaces left to right as you face it, what each landmark sits between, and which lines \
+face each other. Use it for "next to", "left of" or "the other side of"; don't guess from names. When a \
+request says where something should end up, pass that relation as goal on the place ("other side of \
+stove_1 from kitchen_counter_1a"); the runtime checks where it really landed. If the check fails, fix it or \
+tell the user; never say it's done when it isn't. The robot can't put things into containers (a cup, a \
+bowl) yet: say so. The robot can't open, switch on or put things inside appliances yet; say so if asked. \
+LOOKED AT says which spots the robot has checked and when.
 
 FINDING THINGS
-Something you need isn't in BELIEF, is UNKNOWN, or isn't where BELIEF says: search \
-for it yourself. Think where that kind of thing is usually kept, then go to the \
-likely spots you haven't looked at recently (LOOKED AT), nearest first, and look \
-at each. The camera also adds what it passes while driving. Say once that you're \
-looking. Ask the user only when you've checked the likely spots and still can't \
-find it, or when they obviously know better ("my phone": ask where they left it \
-after one quick look nearby).
+Something you need isn't in BELIEF, is UNKNOWN, or isn't where BELIEF says: search for it yourself. Think \
+where that kind of thing is usually kept, then walk to the likely spots you haven't looked at recently \
+(LOOKED AT), nearest first; the robot looks around each time it arrives, and the camera also adds what it \
+passes. Say once that you're looking. Ask the user only when you've checked the likely spots and still \
+can't find it, or when they obviously know better ("my phone": ask where they left it after one quick look \
+nearby).
 
 YOUR OWN GOALS
-When nobody needs anything, the robot's persona may give you an OWN GOAL: look \
-around from where you are, look at a spot you've never checked, go back to the \
-user, or ask the user whether you may look around. Use only the tools the goal \
-lists, never pick or place, and stay quiet apart from at most one short line \
-(if the user just agreed to it, a brief thanks). Work on the goal's own target: \
-the persona hands you the next spot when this one is done. \
-The user always comes first: anything they say replaces the own goal. When there \
-is no own goal and nothing to do, call wait.
+When nobody needs anything, the robot's persona may give you an OWN GOAL: look around from where you are, \
+look at a spot you've never checked, go back to the user, or ask the user whether you may look around. Use \
+only the tools the goal lists, never manipulate, and stay quiet apart from at most one short line (if the \
+user just agreed to it, a brief thanks). Work on the goal's own target: the persona hands you the next spot \
+when this one is done. The user always comes first: anything they say replaces the own goal. When there is \
+no own goal and nothing to do, call wait_and_observe.
 
-NOTES are things the user told you about the home in earlier conversations. \
-Trust them like memory: a good first place to look, not proof.
+NOTES are things the user told you about the home in earlier conversations. Trust them like memory: a \
+good first place to look, not proof.
 
-NOTICED lists what System 1, a fast camera model, saw that the object list doesn't \
-hold: a door left open, a spill, what a room looks like. They are unverified hints: \
-use them to decide where to look or what to mention, and confirm with look before \
-acting on them.
+NOTICED lists what System 1, a fast camera model, saw that the object list doesn't hold: a door left open, \
+a spill, what a room looks like. They are unverified hints: use them to decide where to look or what to \
+mention, and confirm with wait_and_observe before acting on them.
 
 MEMORY AND RECALL
-BELIEF shows only what matters right now. Everything else the robot has seen, where \
-things usually are, what the user told you, and what was asked or done in earlier \
-sessions is in memory: call recall(query) to ask, e.g. recall("mug"), \
-recall("kitchen"), recall("what did the user ask for last time"). It answers \
-instantly and nothing moves. Use it before searching, and to answer questions about \
-the past. "usually <spot>" is where a thing has been seen most often: search there \
-first. LEARNED FROM PAST TASKS, when present, says what worked before at this step.
+BELIEF shows only what matters right now. Everything else the robot has seen, where things usually are, \
+what the user told you, and what was asked or done in earlier sessions is in memory: call recall(query) to \
+ask, e.g. recall("mug"), recall("kitchen"), recall("what did the user ask for last time"). It answers \
+instantly and nothing moves. Use it before searching, and to answer questions about the past. "usually \
+<spot>" is where a thing has been seen most often: search there first. LEARNED FROM PAST TASKS, when \
+present, says what worked before at this step.
 
 HOW TO DO A DELIVERY
 1. Acknowledge the request in one short sentence.
-2. Go to the object's surface keypoint and look (a remembered place may be stale).
-3. Call reachability for the object from there; pick with the arm it returns.
-4. After a pick or place the harness looks to verify. Trust BELIEF, not a tool's status.
-5. Navigate to the person's keypoint, place the object, then say it's done.
+2. navigate to the object's surface keypoint; the robot looks around when it arrives (a remembered place \
+may be stale).
+3. check_reachability(object_type, object_id) from there. If it says needs_reposition: \
+navigate(location="reach_stance"), then check_reachability again. Then manipulate(action="pick", \
+object_type, arm=preferred_arm).
+4. After every manipulate the harness looks to verify. Trust BELIEF, not a tool's status.
+5. navigate to "user", manipulate(action="place", object_type, target="user"), then speak to say it's done.
 
-RULES (the harness enforces them; a rejection comes back in NOTE)
-- A hand marked UNKNOWN or unverified: look before doing anything with it.
-- Holding something the current request doesn't want: put it back where it came \
-from first (navigate there if needed, then place).
-- Pick only right after a successful reachability check from where the robot is.
-- Ask the user only when the choice matters and the request doesn't settle it \
-(two different items that fit, like two mugs for "my mug"). Identical items: take either.
-- Object not where expected: search the other likely spots (FINDING THINGS); \
-tell the user only if it isn't found.
-- Out of reach: if reachability suggests another keypoint, try it once; then tell the user.
+RULES (the harness enforces them; a rejection comes back in NOTE and ACTIONS)
+- A hand marked UNKNOWN or unverified: call wait_and_observe(timeout_s=0) first. Its "unchanged" result \
+means "looked, nothing new".
+- Holding something the current request doesn't want: put it back where it came from first (navigate \
+there if needed, then place).
+- Pick only right after a successful check_reachability for the same object from exactly where the robot \
+stands; only speak, list_locations or recall may come in between.
+- Ask the user only when the choice matters and the request doesn't settle it (two different items that \
+fit, like two mugs for "my mug"). Identical items: take either.
+- Object not where expected: search the other likely spots (FINDING THINGS); tell the user only if it isn't found.
+- Out of reach: if check_reachability suggests another location, try it once; then tell the user.
+- A reason too_low or too_high means the robot can't reach that height: tell the user.
+- When a result says [fallback], it still counts; don't mention it to the user.
 - Never say something is done before BELIEF shows it.
-- The user just tells you something ("my keys are usually on the shelf"): acknowledge \
-it in a few words; don't start a task they didn't ask for.
-- Answer questions right away (the task keeps running). Estimate time from distances: \
-the robot drives about 0.6 m/s, a pick or place takes about 5 s.
-- Lines marked "late" in ACTIONS are results from an earlier request. They tell you \
-about the world, not about progress on the current request.
+- The user just tells you something ("my keys are usually on the shelf"): acknowledge it in a few words; \
+don't start a task they didn't ask for.
+- Answer questions right away (the task keeps running). Estimate time from distances: the robot walks \
+about {v:.1f} m/s ({s_per_m:.1f} s per metre); a pick takes about {t_pick:.0f} s, a place about {t_place:.0f} s.
+- Lines marked "late" in ACTIONS are results from an earlier request. They tell you about the world, not \
+about progress on the current request.
 - After the user says stop, only talk until they say to continue.
-- If nothing needs doing now (an action is running, or you're waiting for the user), call wait.
+- If nothing needs doing now (an action is running, or you're waiting for the user), call wait_and_observe.
 
 Speak in short, natural sentences. Don't narrate every step."""
+
+
+def system_prompt(slots: dict[str, float] | None = None) -> str:
+    """The one SYSTEM template with the profile's numeric slots filled (PLAN 1.3 #30, deviation D2)."""
+    from api.tools import render_description, ToolSpec
+    s = dict(PROFILES["lite"].slots())
+    s.update(slots or {})
+    return render_description(ToolSpec("system", "instant", frozenset(), SYSTEM_TEMPLATE, {}), s)
+
+
+SYSTEM = system_prompt()
 
 
 def create_brain(info: BrainInfo) -> "ReferenceBrain":
@@ -137,23 +154,31 @@ def _ago(seconds: float) -> str:
 def render_map(m: dict[str, Any]) -> str:
     rooms = m.get("rooms") or {}
     if rooms:
-        lines = ["ROOMS (spots in each)"] + [f"  {r['label']}: {', '.join(r['spots']) or '(no spots)'}"
-                                              for r in rooms.values()]
+        lines = ["ROOMS (spots in each; navigate to the room name to go to the room)"] + [
+            f"  {r.get('label') or name}: {', '.join(r.get('spots') or []) or '(no spots)'}"
+            for name, r in rooms.items()]
         lines.append("KEYPOINTS")
     else:
         lines = ["KEYPOINTS"]
-    lines += [f"  {k}: {v['desc']}" for k, v in m["keypoints"].items()]
+    lines += [f"  {k}: {v.get('desc') or k}" for k, v in m["keypoints"].items()]
     lines.append("SURFACES (reached from)")
-    lines += [f"  {s}: {i['desc']}, {i['height_m']} m high, from {', '.join(i['keypoints'])}"
-              + ("  (too high to reach)" if i["height_m"] > m["max_reach_height_m"] else "")
+    hi, lo = m.get("max_reach_height_m", 99.0), m.get("min_reach_height_m", -1.0)
+    lines += [f"  {s}: {i.get('desc') or s}, {i['height_m']} m high, from {', '.join(i['keypoints'])}"
+              + ("  (too high to reach)" if i["height_m"] > hi else "")
+              + ("  (too low to reach)" if i["height_m"] < lo else "")
               for s, i in m["surfaces"].items()]
     lines.append("PEOPLE (deliver to)")
-    lines += [f"  {p}: {i['deliver_to_surface']} at keypoint {i['keypoint']}" for p, i in m["people"].items()]
+    lines += [f"  {p}: {i.get('deliver_to_surface')} at keypoint {i.get('keypoint')} (navigate to \"{p}\")"
+              for p, i in (m.get("people") or {}).items()]
     return "\n".join(lines)
 
 
 class ReferenceBrain(ModelBrain):
     system = SYSTEM
+
+    def system_for(self, ctx: BrainInput) -> str:
+        """The SYSTEM template with this profile's numeric slots (the only per-profile difference)."""
+        return system_prompt(ctx.profile) if getattr(ctx, "profile", None) else self.system
 
     def render_classify(self, utterance: Any, ctx: BrainInput) -> str:
         return ("CONVERSATION (oldest first)\n" + self._conversation(ctx) +
@@ -174,7 +199,7 @@ class ReferenceBrain(ModelBrain):
 
     @staticmethod
     def _robot_asked_last(ctx: BrainInput) -> bool:
-        says = [e for e in ctx.history if e.tool == "say" and e.status not in ("DROPPED", "REJECTED")]
+        says = [e for e in ctx.history if e.tool == "speak" and e.status not in ("dropped", "rejected")]
         return bool(says) and says[-1].args.get("text", "").rstrip().endswith("?")
 
     # ------------------------------------------------------------------
@@ -196,8 +221,8 @@ class ReferenceBrain(ModelBrain):
         ] + ([self._notes(ctx)] if ctx.notes else [])
           + ([self._noticed(ctx)] if ctx.observations else []) + [
             "ACTIONS (latest last)\n" + self._actions(ctx),
-            "RUNNING NOW\n" + (", ".join(f"{e.tool}({self._args(e.args)})" for e in ctx.active if e.tool != "say")
-                               or "nothing"),
+            "RUNNING NOW\n" + (", ".join(f"{e.execution_id} {e.tool}({self._args(e.args)})"
+                                         for e in ctx.active if e.tool != "speak") or "nothing"),
         ] + ([f"LEARNED FROM PAST TASKS (suggestions, not rules)\n{ctx.guidance}"] if ctx.guidance else [])
           + ([self._own_goal(ctx)] if ctx.own_goal else [])
           + ([f"NOTE\n{ctx.note}"] if ctx.note else []) + ["Choose the next step: call one tool."])
@@ -227,23 +252,30 @@ class ReferenceBrain(ModelBrain):
     @staticmethod
     def _looked(ctx: BrainInput) -> str:
         looked = (ctx.belief or {}).get("looked") or {}
-        spots = list(ctx.map["surfaces"])
-        done = sorted((k for k in spots if k in looked), key=lambda k: -looked[k]["t"])
-        rows = [f"{k} {_ago(ctx.now - looked[k]['t'])} ago" + (" (remembered)" if looked[k]["source"] == "memory" else "")
+        surfaces = ctx.map["surfaces"]
+
+        def seen(s: str) -> dict[str, Any] | None:     # a surface counts as looked at from any of its stands
+            keys = [k for k in [s, *(surfaces[s].get("keypoints") or [])] if k in looked]
+            return max((looked[k] for k in keys), key=lambda f: f["t"]) if keys else None
+        spots = list(surfaces)
+        done = sorted((k for k in spots if seen(k)), key=lambda k: -seen(k)["t"])
+        rows = [f"{k} {_ago(ctx.now - seen(k)['t'])} ago" + (" (remembered)" if seen(k)["source"] == "memory" else "")
                 for k in done]
-        never = [k for k in spots if k not in looked]
+        never = [k for k in spots if not seen(k)]
         return ((" · ".join(rows) if rows else "no spot looked at yet")
                 + (f"\nnever: {', '.join(never)}" if never else ""))
 
-    @staticmethod
-    def _args(args: dict[str, Any]) -> str:
-        return ", ".join(f"{k}={v}" for k, v in args.items())
+    HIDDEN_ARGS = ("candidates", "stance", "reach_execution_id", "skill_id", "why", "at")
+
+    @classmethod
+    def _args(cls, args: dict[str, Any]) -> str:
+        return ", ".join(f"{k}={v}" for k, v in args.items() if k not in cls.HIDDEN_ARGS)
 
     def _conversation(self, ctx: BrainInput) -> str:
         rows = []
-        says = [e for e in ctx.history if e.tool == "say"]
+        says = [e for e in ctx.history if e.tool == "speak"]
         for u in ctx.utterances:
-            replied = any(e.t_start >= u.t_end - 1e-6 and e.status not in ("DROPPED", "REJECTED") for e in says)
+            replied = any(e.t_start >= u.t_end - 1e-6 and e.status not in ("dropped", "rejected") for e in says)
             kind = ctx.kinds.get(u.id, "?")
             # The runtime halts and acks a stop from the partial transcript, before the
             # final one lands: list the stop just ahead of its ack, already answered.
@@ -256,9 +288,9 @@ class ReferenceBrain(ModelBrain):
             flag = "" if replied else "   <- not replied to yet"
             rows.append((sort_t, f"[{sort_t:6.1f}] USER ({kind}): {u.text}{flag}"))
         for e in says:
-            if e.status == "REJECTED":
+            if e.status == "rejected":
                 continue
-            state = {"DROPPED": " (dropped, never played)", "CANCELED": " (cut off)",
+            state = {"dropped": " (dropped, never played)", "cancelled": " (cut off)",
                      "queued": " (queued)", "running": " (playing)"}.get(e.status, "")
             rows.append((e.t_start, f"[{e.t_start:6.1f}] ROBOT: {e.args.get('text', '')}{state}"))
         rows.sort(key=lambda r: r[0])
@@ -345,24 +377,39 @@ class ReferenceBrain(ModelBrain):
         return "\n".join(lines)
 
     def _actions(self, ctx: BrainInput) -> str:
+        """[t] g{gen} nav-000012 navigate(location=...) -> succeeded [sonic_walk] <summary> (PLAN 5.13)."""
         rows = []
-        for e in ctx.history[-18:]:
-            if e.tool == "say":
-                continue
-            late = " (late: from an earlier request)" if (e.data or {}).get("late") else ""
-            who = " [harness]" if e.source == "harness" else ""
-            data = self._data(e.tool, e.data or {})
-            rows.append(f"[{e.t_start:6.1f}] v{e.created_for} {e.tool}({self._args(e.args)}) -> {e.status}"
-                        f"{late}{who} {data}".rstrip())
+        for e in [e for e in ctx.history if e.tool != "speak"][-18:]:
+            d = e.data or {}
+            res = e.result
+            late = " (late: from an earlier request)" if (d.get("late") or (res is not None and res.late)) else ""
+            who = " [harness]" if e.source == "harness" else (" [persona]" if e.source == "persona" else "")
+            executor = d.get("executor")
+            skill = d.get("skill")
+            # the manipulate summary already names the skill (and [fallback]); others get their executor
+            tags = [executor] if (executor and e.tool != "manipulate") else []
+            if is_fallback(executor) and e.tool != "manipulate":
+                tags.append("fallback")
+            tag = f" [{', '.join(tags)}]" if tags else ""
+            if res is None or e.tool == "recall":
+                what = self._data(e.tool, d)
+            elif e.tool == "observe" and res.ok:
+                what = f"{res.summary}; hands={d.get('hands')}"
+            else:
+                what = res.summary
+            name = e.tool if e.tool != "observe" else f"look({e.action})"
+            call = f"{name}({self._args(e.args)})" if e.tool != "observe" else name
+            rows.append(f"[{e.t_start:6.1f}] g{e.generation} {e.execution_id} {call} -> {e.status}"
+                        f"{tag}{late}{who} {what}".rstrip())
         return "\n".join(rows) or "(none)"
 
     @staticmethod
     def _data(tool: str, d: dict[str, Any]) -> str:
         if tool == "recall":
             return "answer: " + str(d.get("answer", "")).replace("\n", " | ")[:700]
-        if tool == "look":
+        if tool in ("observe", "look"):
             seen = {s: [o["id"] for o in objs] for s, objs in (d.get("surfaces") or {}).items()}
             return f"at={d.get('at')} sees={seen} hands={d.get('hands')}"
-        keep = {k: v for k, v in d.items() if k in ("reason", "at", "between", "reachable", "arm", "suggest",
-                                                   "holding", "blocked_edge", "known_blocked")}
+        keep = {k: v for k, v in d.items() if k in ("reason", "at", "between", "reachable", "preferred_arm",
+                                                   "suggest_location", "holding", "blocked_edge", "status")}
         return " ".join(f"{k}={v}" for k, v in keep.items())

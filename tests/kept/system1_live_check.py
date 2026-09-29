@@ -1,7 +1,11 @@
 """A real Gemini Live session through brains/system1.py: labels and latency for a few messages,
-then one observation from a camera frame. Uses GEMINI_API_KEY from .env (a few cents).
+then one observation from a camera frame. Uses GEMINI_API_KEY (a few cents). Opt-in only;
+unit tests never call it.
 
-    .venv-thor/bin/python -m tests.system1_live_check [path/to/frame.png|jpg]
+    .venv-rt/bin/python -m tests.kept.system1_live_check [path/to/frame.png|jpg]
+
+Keys are read, in order, from $WORLDLINE_ENV, <repo>/.env, then ~/.config/ludo-g1/secrets.env
+(PLAN 4.1). ludo-runtime/.env is never read.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from pathlib import Path
 
 from brains.system1 import MODEL, ROUTE_TIMEOUT_S, SystemOne
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MESSAGES = [
     ("Bring me the mug from the kitchen.", "request"),
     ("stop", "stop"),
@@ -30,11 +34,26 @@ MESSAGES = [
 ]
 
 
+def env_files() -> list[Path]:
+    """Where keys come from, first wins (os.environ.setdefault)."""
+    out = []
+    if os.environ.get("WORLDLINE_ENV"):
+        out.append(Path(os.environ["WORLDLINE_ENV"]).expanduser())
+    out.append(ROOT / ".env")
+    out.append(Path("~/.config/ludo-g1/secrets.env").expanduser())
+    return [p for p in out if "ludo-runtime" not in str(p.resolve())]
+
+
 def load_env() -> None:
-    for line in (ROOT / ".env").read_text().splitlines():
-        if "=" in line and not line.lstrip().startswith("#"):
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip().removeprefix("export ").strip(), v.strip().strip("'\""))
+    for path in env_files():
+        try:
+            text = path.read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip().removeprefix("export ").strip(), v.strip().strip("'\""))
 
 
 def jpeg_from(path: Path) -> bytes:
@@ -88,6 +107,7 @@ async def main(frame_path: Path | None) -> int:
 
 
 if __name__ == "__main__":
-    default = ROOT.parent / ".playwright-mcp" / "thor_frame1.png"
-    arg = Path(sys.argv[1]) if len(sys.argv) > 1 else (default if default.exists() else None)
+    frames = sorted((ROOT / "runs" / "frames").glob("g1_*.jpg"))      # captured G1 head frames (PLAN 8.6)
+    default = frames[0] if frames else None
+    arg = Path(sys.argv[1]) if len(sys.argv) > 1 else default
     raise SystemExit(asyncio.run(main(arg)))

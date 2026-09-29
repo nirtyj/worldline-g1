@@ -4,10 +4,10 @@ After the Procedural Graphs idea (Lu et al., 2026): procedural knowledge kept as
 (step, relation, step) edges instead of being left implicit in a long history.
 
   nodes   abstract steps with their outcome: "navigate:ok", "look", "verify",
-          "reachability:not_seen_here", "pick:ok", "place:ok", "say", "ask",
-          "recall", "rejected:pick" ...
+          "check_reachability:not_seen_here", "manipulate:pick:ok", "manipulate:place:ok",
+          "speak", "ask", "recall", "rejected:manipulate" ...
   edges   "a -> b": how often b followed a in tasks that ended well (ok) or not (fail)
-  rules   short learned triplets, e.g. {"after": "place:ok", "then": "say", "why": ...},
+  rules   short learned triplets, e.g. {"after": "manipulate:place:ok", "then": "speak", "why": ...},
           proposed by a model that compares failed tasks with successful ones.
           A rule is used only once it is "kept": it has to survive a scenario-suite
           run without making the results worse (eval/evolve.py).
@@ -20,7 +20,7 @@ lines of guidance for the step it is at; the runtime's rules still decide.
 
     graph = ProceduralGraph.load()
     graph.learn(load_episodes())              # recount from every episode on disk
-    graph.guidance(["navigate:ok", "reachability:not_seen_here"])   # -> text or ""
+    graph.guidance(["navigate:ok", "check_reachability:not_seen_here"])   # -> text or ""
 
 Command line (see eval/evolve.py for the whole loop):
     python -m agent.procedures learn          # recount and print the graph
@@ -34,30 +34,47 @@ import argparse
 import asyncio
 import collections
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 from .episodes import load_episodes
 
-STORE = Path(__file__).resolve().parents[1] / "runs" / "procedures.json"
+STORE = Path(os.environ.get("WORLDLINE_RUNS") or Path(__file__).resolve().parents[1] / "runs") / "procedures.json"
 MIN_SUPPORT = 2          # an edge needs this many tasks behind it before it is suggested
 
 
 def step_of(row: dict[str, Any]) -> str | None:
-    """A trace row as an abstract step, or None if it isn't one."""
+    """A trace row as an abstract step, or None if it isn't one.
+
+    check_reachability:ok|<reason>, manipulate:pick:ok|<status>, navigate:ok|<status>,
+    look (the robot looked: an arrival scan or wait_and_observe), verify (a harness check
+    after a manipulate or a cancel), speak / ask, recall, list_locations, rejected:<tool>."""
     t = row.get("type")
     if t == "result":
-        skill, status, d = row.get("skill"), row.get("status"), row.get("data") or {}
-        if skill == "reachability":
-            return "reachability:ok" if d.get("reachable") else f"reachability:{d.get('reason') or 'no'}"
-        if skill == "look":
-            return "verify" if row.get("source") == "harness" else "look"
-        return f"{skill}:{'ok' if status == 'SUCCEEDED' else status.lower()}"
+        tool, status, d = row.get("tool") or row.get("skill"), str(row.get("status") or ""), row.get("data") or {}
+        ok = status == "succeeded"
+        if tool == "check_reachability":
+            return "check_reachability:ok" if d.get("reachable") else f"check_reachability:{d.get('reason') or 'no'}"
+        if tool in ("observe", "look"):
+            why = str(row.get("why") or "")
+            if why == "wait_and_observe":
+                return None                          # the wait_and_observe row itself is the step
+            if why == "arrival" or row.get("source") != "harness":
+                return "look"
+            return "verify"
+        if tool == "wait_and_observe":
+            return "look"
+        if tool == "manipulate":
+            return f"manipulate:{row.get('action') or d.get('action') or 'pick'}:{'ok' if ok else status}"
+        if tool in ("recall", "list_locations"):
+            return tool
+        return f"{tool}:{'ok' if ok else status}"
     if t == "rejected":
         return f"rejected:{row.get('tool')}"
     if t == "say_queued":
-        return "ask" if str(row.get("text", "")).rstrip().endswith("?") else "say"
+        return "ask" if str(row.get("text", "")).rstrip().endswith("?") else "speak"
     if t == "recall":
         return "recall"
     if t in ("stop", "correction"):
@@ -83,13 +100,14 @@ def tasks_of(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if r.get("type") == "delivered":
             cur["ok"] = True
-        elif (r.get("type") == "result" and r.get("skill") == "place" and r.get("status") == "SUCCEEDED"
+        elif (r.get("type") == "result" and r.get("tool") == "manipulate" and r.get("action") == "place"
+              and r.get("status") == "succeeded"
               and deliver_to is None and not any(x.get("type") == "delivered" for x in rows)):
             cur["ok"] = True              # an older episode without delivery events: a good place counts
         step = step_of(r)
         if step:
             cur["steps"].append(step)
-            if step.split(":")[0] in ("navigate", "pick", "place"):
+            if step.split(":")[0] in ("navigate", "manipulate"):
                 cur["physical"] = True
     if cur is not None:
         out.append(cur)
@@ -97,8 +115,8 @@ def tasks_of(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class ProceduralGraph:
-    def __init__(self, data: dict[str, Any] | None = None, path: Path = STORE) -> None:
-        self.path = path
+    def __init__(self, data: dict[str, Any] | None = None, path: Path | None = None) -> None:
+        self.path = STORE if path is None else path
         d = data or {}
         self.nodes: dict[str, int] = dict(d.get("nodes") or {})
         self.edges: dict[str, dict[str, int]] = dict(d.get("edges") or {})
@@ -107,7 +125,8 @@ class ProceduralGraph:
         self.learned_wall: float | None = d.get("learned_wall")
 
     @classmethod
-    def load(cls, path: Path = STORE) -> "ProceduralGraph":
+    def load(cls, path: Path | None = None) -> "ProceduralGraph":
+        path = STORE if path is None else path
         try:
             return cls(json.loads(path.read_text()), path)
         except (OSError, ValueError):
@@ -187,9 +206,9 @@ PROPOSE_TOOL = {
         "required": ["after", "then", "why"]}}}, "required": ["rules"]},
 }
 PROPOSE_SYSTEM = """You improve a home robot's procedures. You get step traces of tasks that failed, \
-tasks that succeeded slowly, and tasks that succeeded quickly. Steps look like navigate:ok, look, \
-verify (an automatic look after a pick or place), reachability:not_seen_here, pick:ok, place:ok, say, \
-ask, recall, rejected:pick. Propose at most three rules of the form "after <step>, <do this>" that \
+tasks that succeeded slowly, and tasks that succeeded quickly. Steps look like navigate:ok, look (the \
+robot looked around), verify (an automatic look after a pick or place), check_reachability:not_seen_here, \
+manipulate:pick:ok, manipulate:place:ok, speak, ask, recall, rejected:manipulate. Propose at most three rules of the form "after <step>, <do this>" that \
 would have prevented the failures or removed the wasted steps of the slow tasks, without hurting the \
 quick ones. Use step names exactly as they appear. Only propose rules the traces support; if there is \
 nothing to fix, propose nothing."""

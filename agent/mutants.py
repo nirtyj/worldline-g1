@@ -1,18 +1,21 @@
 """Mutants: the reference runtime with one safeguard removed each.
 
 Run one (the server's reset message takes it in `agent`) to see what the safeguard
-buys: the same conversation goes wrong in a specific, visible way.
+buys: the same conversation goes wrong in a specific, visible way. Same seven
+mutants as on THOR, on the new tool names (PLAN 4.4).
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import Any
 
-from brains.interface import ToolCall
+from api.tools import ToolCall
 
 from .harness import Runtime
-from .skills import run_goal
+from .skills import run_execution
+from .validate import Verdict, validate
 
 
 class NoDropSpeech(Runtime):
@@ -41,7 +44,8 @@ class ForgetCancelledGrasp(Runtime):
         arms: set[str] = set()
         while True:
             for h in self._canceled:
-                arms |= {r[4:] for r in h.resources if r.startswith("arm:")}
+                if h.skill == "manipulate" and h.args.get("arm"):
+                    arms.add(h.args["arm"])
             pending = [h.task for h in self._canceled if h.task is not None and not h.task.done()]
             if not pending:
                 break
@@ -57,32 +61,30 @@ class ForgetCancelledGrasp(Runtime):
             if self.belief.holding[arm].source == "cancel":
                 self.belief.set_hand(arm, None, "assumed", self.clock.now(), verified=True)
 
-    def _finish(self, h, e, out) -> None:
-        super()._finish(h, e, out)
+    def _finish(self, h, e, res) -> None:
+        super()._finish(h, e, res)
         cancelled = h.cancel_requested or h.created_for < self.task.intent_version
-        if h.skill in ("pick", "place") and cancelled:
+        if h.skill == "manipulate" and cancelled and h.args.get("arm"):
             self.belief.set_hand(h.args["arm"], None, "assumed", self.clock.now(), verified=True)
 
 
 class TrustSuccess(Runtime):
-    """No verification look after pick and place: a reported success is believed."""
+    """No verification glance after a manipulate: a reported success is believed."""
 
     async def _body(self, h, e) -> None:
-        if h.skill in ("pick", "place"):
-            out = await run_goal(self.robot, self.clock, h.skill, h.args, 40.0, on_goal=self._binder(h))
-            self._finish(h, e, out)
-            arm, oid = h.args["arm"], h.args["object"]
-            if out.ok and not h.cancel_requested and h.created_for == self.task.intent_version:
-                if h.skill == "pick":
+        if h.skill == "manipulate":
+            res = await run_execution(self.robot, self.clock, e, 60.0, on_handle=self._binder(h))
+            self._finish(h, e, res)
+            arm = h.args.get("arm")
+            oid = res.data.get("object_id") or h.args.get("object_id")
+            if res.ok and not h.cancel_requested and h.created_for == self.task.intent_version and arm:
+                if e.action == "pick":
                     self.belief.set_hand(arm, oid, "skill", self.clock.now(), verified=True)
-                    ob = self.belief.objects.get(oid)
-                    if ob is not None:
-                        ob.where.verified = True
                 else:
                     self.belief.set_hand(arm, None, "skill", self.clock.now(), verified=True)
-                    ob = self.belief.objects.get(oid)
-                    if ob is not None:
-                        ob.where.verified = True
+                ob = self.belief.objects.get(oid) if oid else None
+                if ob is not None:
+                    ob.where = dataclasses.replace(ob.where, verified=True)
             self._wake(f"{h.skill} finished")
             return
         await super()._body(h, e)
@@ -90,16 +92,15 @@ class TrustSuccess(Runtime):
 
 class NoWaitForChunk(Runtime):
     """Cancel on correction, but don't wait for the cancelled actions to finish
-    before starting new ones."""
+    before starting new ones: no reconcile gate, and a busy body is ignored."""
 
     def _reconciling(self) -> bool:
         return False
 
-    def _check(self, call: ToolCall) -> tuple[bool, str]:
-        ok, why = super()._check(call)
-        if not ok and why.startswith("already running"):
-            return True, ""                  # the cancelled action "is gone"
-        return ok, why
+    def _check(self, call: ToolCall) -> Verdict:
+        v = self._vctx()
+        v.history = [e for e in self.history if e.finished or "body" not in e.resources]   # "it is gone"
+        return validate(call, v)
 
 
 class CancelOnEverything(Runtime):

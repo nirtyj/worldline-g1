@@ -10,13 +10,12 @@ version) is recorded as an unverified hint, never as progress.
 from __future__ import annotations
 
 import asyncio
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from brains.interface import UNKNOWN
-
-ARMS = ("left", "right")
+from api.observation import in_frustum
+from api.results import envelope_status
+from api.types import ARMS, UNKNOWN
 
 
 @dataclass
@@ -61,13 +60,14 @@ class LandmarkBelief:
     pos: tuple[float, float] | None = None
 
 
-def in_view(view: dict[str, Any], pos: tuple[float, float]) -> bool:
-    """Was this spot inside one of a look's views (heading, field of view, range)?"""
-    dx, dz = pos[0] - view["x"], pos[1] - view["z"]
-    if math.hypot(dx, dz) > view.get("range", 1.5) - 0.1:
-        return False
-    off = (math.degrees(math.atan2(dx, dz)) - view["yaw"] + 180) % 360 - 180
-    return abs(off) <= view.get("fov", 90) / 2 - 5
+def in_view(view: dict[str, Any], pos: tuple[float, ...], h: float | None = None) -> bool:
+    """Was this spot inside one of an observation's views?
+
+    The 2-D test (heading, field of view, range) is Worldline's. When the view has
+    ``vfov``/``cam_h`` and a height is known (``h`` or ``pos[2]``), the elevation must
+    also be inside the vertical field of view (api/observation.in_frustum, PLAN 5.10):
+    out-of-frame spots are never asserted absent."""
+    return in_frustum(view, pos, h)
 
 
 class BeliefState:
@@ -126,14 +126,17 @@ class BeliefState:
             self.hints[arm] = hint
         self._bump()
 
-    def apply_look(self, data: dict[str, Any], t: float,
-                   surface_xy: dict[str, tuple[float, float]] | None = None) -> None:
-        """A look is ground truth for what the camera saw and for both hands.
+    def apply_observation(self, data: dict[str, Any], t: float,
+                          surface_xy: dict[str, tuple[float, float]] | None = None,
+                          surface_h: dict[str, float] | None = None) -> None:
+        """An observation (glance or scan) is ground truth for what the camera saw and for both hands.
 
-        Something believed to be somewhere the camera pointed, but not seen, is
-        UNKNOWN (look_absent). Somewhere it didn't point stays as it was: not
-        checked isn't the same as missing."""
+        Something believed to be somewhere a view covered (inside its 3-D frustum), but
+        not seen, is UNKNOWN (look_absent). Somewhere no view covered stays as it was:
+        not checked isn't the same as missing. A glance reports no views, so it never
+        marks anything absent."""
         at = data.get("at")
+        views = data.get("views")
         if at is not None:
             self.robot_at = Fact(at, "look", t, True)
             self.between = None
@@ -151,13 +154,15 @@ class BeliefState:
                 ob.type, ob.brand, ob.color = v.get("type", ob.type), v.get("brand"), v.get("color")
                 ob.where = Fact(surface, "look", t, True)
                 ob.x, ob.depth, ob.seen_from = v.get("x"), v.get("depth"), at
-                if v.get("pos"):
-                    ob.pose = {"x": v["pos"][0], "z": v["pos"][1]}
+                pos = v.get("pos")
+                if pos:
+                    ob.pose = {"x": pos[0], "z": pos[1]}
+                    if len(pos) > 2 and pos[2] is not None:
+                        ob.pose["h"] = pos[2]
         for lm in data.get("landmarks") or []:
             self.landmarks[lm["id"]] = LandmarkBelief(lm["id"], lm.get("label", lm.get("type", "")),
                                                       Fact(lm.get("near"), "look", t, True),
-                                                      tuple(lm["pos"]) if lm.get("pos") else None)
-        views = data.get("views")
+                                                      tuple(lm["pos"][:2]) if lm.get("pos") else None)
         for oid, ob in self.objects.items():
             where = ob.where.value
             if oid in seen_ids or not isinstance(where, str) or where == UNKNOWN or where.startswith("hand"):
@@ -165,25 +170,37 @@ class BeliefState:
             if views is None:                 # a robot that doesn't report its views: the old rule
                 gone = where in (data.get("surfaces") or {})
             else:
-                pos = (ob.pose["x"], ob.pose["z"]) if ob.pose else (surface_xy or {}).get(where)
-                gone = pos is not None and any(in_view(v, pos) for v in views)
+                if ob.pose and ob.pose.get("x") is not None:
+                    pos = (ob.pose["x"], ob.pose["z"])
+                    h = ob.pose.get("h")
+                else:
+                    pos = (surface_xy or {}).get(where)
+                    h = None
+                if h is None:
+                    h = (surface_h or {}).get(where)
+                gone = pos is not None and any(in_view(v, pos, h) for v in views)
             if gone:
                 ob.where = Fact(UNKNOWN, "look_absent", t, False)
         for arm, oid in (data.get("hands") or {}).items():
+            if arm not in self.holding:
+                continue
             self.holding[arm] = Fact(oid, "look", t, True)
             self.hints.pop(arm, None)
             if oid is not None:
                 ob = self.objects.get(oid)
                 if ob is not None:
                     ob.where = Fact(f"hand:{arm}", "look", t, True)
-        # Objects we believed were in a hand that the look shows empty.
+        # Objects we believed were in a hand that the observation shows empty.
         for oid, ob in self.objects.items():
             where = str(ob.where.value)
             if where.startswith("hand:"):
                 arm = where.split(":", 1)[1]
-                if self.holding[arm].value != oid:
+                if arm in self.holding and self.holding[arm].value != oid:
                     ob.where = Fact(UNKNOWN, "look_absent", t, False)
         self._bump()
+
+    # the THOR-era name
+    apply_look = apply_observation
 
     def apply_perception(self, perception: dict[str, Any], robot: dict[str, Any],
                          t: float, source: str) -> None:
@@ -203,6 +220,8 @@ class BeliefState:
             item = dict(raw)
             confidence = float(item.get("confidence", 0.0))
             where = item.get("where") or UNKNOWN
+            # G1: the world model reports "hand:<arm>" directly (two hands can be closed at once).
+            # The old one-closed-gripper rule stays as the fallback for a bare "hand".
             if where == "hand" and len(closed) == 1:
                 where = f"hand:{closed[0]}"      # the camera sees it held; the closed gripper says which
             verified = confidence >= 0.5
@@ -256,7 +275,7 @@ class BeliefState:
             self._bump()
 
     def apply_navigate(self, status: str, data: dict[str, Any], t: float) -> None:
-        if status == "SUCCEEDED":
+        if envelope_status(status) == "succeeded":
             self.set_pose(data.get("at"), None, "odometry", t)
         else:
             self.set_pose(data.get("at"), data.get("between"), "odometry", t)
@@ -338,16 +357,17 @@ class TaskState:
 
 @dataclass
 class ActionHandle:
-    """A running body or sense action."""
-    entry_id: int
-    created_for: int                 # the intent_version this action serves
-    skill: str
+    """A running execution, as the harness tracks it. Wraps the service's ExecutionHandle."""
+    entry_id: str                    # the execution_id
+    created_for: int                 # the generation (intent_version) this action serves
+    skill: str                       # the tool name
     args: dict[str, Any]
-    resources: frozenset[str]        # {"base"}, {"arm:right"}, {"sense"}
+    resources: frozenset[str]        # {"body"}, {"sense"}, {"sense", "body"} (a scan), {"wait"}
     task: asyncio.Task | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
-    goal: Any = None                 # the sim Goal, for skills that are single goals
+    handle: Any = None               # the api ExecutionHandle, once started
     source: str = "brain"
+    cancel_reason: str | None = None
 
     @property
     def done(self) -> bool:
@@ -357,13 +377,18 @@ class ActionHandle:
     def cancel_requested(self) -> bool:
         return self.cancel_event.is_set()
 
-    def cancel(self) -> None:
-        """Request a cancel. The skill stops at its next safe point; await ``task``."""
+    @property
+    def goal(self) -> Any:            # the THOR-era name
+        return self.handle
+
+    def cancel(self, reason: str = "cancelled") -> None:
+        """Request a cancel. The service stops at its next safe point; await ``task``."""
         if self.done or self.cancel_event.is_set():
             return
+        self.cancel_reason = reason
         self.cancel_event.set()
-        if self.goal is not None:
-            self.goal.cancel()
+        if self.handle is not None:
+            self.handle.cancel(reason)
 
 
 class TraceLog:

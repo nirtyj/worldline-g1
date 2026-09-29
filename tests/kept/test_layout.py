@@ -4,7 +4,7 @@ The fixture is Kitchen 10 (FloorPlan10), where "move the spatula to the other si
 the stove" went to the wrong counter: counter 1 runs along one wall as
 fridge · toaster · counter_1b · counter_1a · stove · counter_2, facing the sink run.
 
-    .venv-thor/bin/python -m unittest tests.test_layout
+    .venv-rt/bin/python -m pytest tests/kept/test_layout.py
 """
 
 from __future__ import annotations
@@ -145,9 +145,10 @@ class GoalCheckTest(unittest.TestCase):
         self.assertEqual((rows[0]["ok"], rt._note, rt._goal_missed), (True, None, set()))
 
     def test_goal_is_optional_for_the_planner(self):
+        # G1 port (PLAN 5.11): place is manipulate(action="place", ...); goal stays optional.
         ctx = SimpleNamespace(map={"keypoints": {"a": {}}}, belief={"objects": {"x_1": {}}})
-        place = next(t for t in tool_schemas(ctx) if t["name"] == "place")["parameters"]
-        self.assertEqual((place["required"], "goal" in place["properties"]), (["object", "arm"], True))
+        place = next(t for t in tool_schemas(ctx) if t["name"] == "manipulate")["parameters"]
+        self.assertEqual((place["required"], "goal" in place["properties"]), (["action", "object_type"], True))
 
 
 if __name__ == "__main__":

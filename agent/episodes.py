@@ -15,11 +15,12 @@ tool answers "what did we do" from these, and the procedural graph
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1] / "runs" / "episodes"
+ROOT = Path(os.environ.get("WORLDLINE_RUNS") or Path(__file__).resolve().parents[1] / "runs") / "episodes"
 
 KEEP = {
     "session_start", "heard", "classified", "decision", "started", "result", "rejected",
@@ -27,11 +28,15 @@ KEEP = {
     "unprompted_say_dropped", "persona_goal", "persona_goal_end", "note_saved",
     "place_learned", "delivered", "recall", "decision_limit", "rejection_limit", "brain_error",
     "observation",
+    # G1 / Ludi API additions (PLAN 4.4)
+    "tool_result", "rejection", "visual_observation", "goal_check", "body_mode", "safety_event", "stale_result",
+    "late_result", "resume", "capability_changed",
 }
 
 
 class EpisodeLog:
-    def __init__(self, scene: str | None, root: Path = ROOT) -> None:
+    def __init__(self, scene: str | None, root: Path | None = None) -> None:
+        root = ROOT if root is None else root                  # looked up at call time (tests relocate it)
         self.path = (root / scene / f"{time.strftime('%Y%m%d-%H%M%S')}.jsonl") if scene else None
         self._f: Any = None
 
@@ -50,8 +55,9 @@ class EpisodeLog:
             self._f = None
 
 
-def load_episodes(scene: str | None = None, root: Path = ROOT, limit: int = 200) -> list[list[dict[str, Any]]]:
+def load_episodes(scene: str | None = None, root: Path | None = None, limit: int = 200) -> list[list[dict[str, Any]]]:
     """Past sessions, oldest first: all scenes when ``scene`` is None."""
+    root = ROOT if root is None else root
     if not root.exists():
         return []
     files = sorted((root / scene).glob("*.jsonl") if scene else root.glob("*/*.jsonl"),

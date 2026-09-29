@@ -41,8 +41,8 @@ LEVELS = ("off", "quiet", "medium", "optimize")
 IDLE_S = 8.0            # quiet this long before the persona starts a goal
 CHAIN_S = 1.5           # ...or this long right after finishing one
 REFRESH_S = 300.0       # a look older than this is worth repeating
-GOAL_TIMEOUT_S = 75.0   # give up on a goal after this long
-STUCK_S = 10.0          # ...or when nothing has happened for this long
+GOAL_TIMEOUT_S = 150.0  # give up on a goal after this long (a humanoid walks about 0.4 m/s)
+STUCK_S = 20.0          # ...or when nothing has happened for this long
 RETRY_AFTER_S = 300.0   # don't retry a target that failed for this long
 ANSWER_WAIT_S = 30.0    # no reply to "can I look around?" this long means no
 
@@ -119,7 +119,7 @@ class Persona:
                             "You've just arrived somewhere you haven't mapped. In one short sentence, say "
                             "what kind of room this looks like (from the landmarks and objects in BELIEF) "
                             "and ask the user if you may take a quick look around. Then wait for their answer.",
-                            ("say",)))
+                            ("speak",)))
             else:
                 self.permission = "granted"       # mostly mapped already: nothing to ask
                 roam = True
@@ -132,24 +132,26 @@ class Persona:
                 seen = looked.get(spot)
                 if seen is None:
                     out.append((3.0 - 0.1 * d, "map", spot,
-                                f"Look at {spot}: you have never looked there. Go there and look, "
-                                f"so you know what's on it and around it.", ("navigate", "look", "say")))
+                                f"Look at {spot}: you have never looked there. Go there (the robot looks "
+                                f"around when it arrives), so you know what's on it and around it.",
+                                ("navigate", "wait_and_observe", "speak")))
                 elif now - seen.t > REFRESH_S:
                     age = now - seen.t
                     out.append((1.5 + min(age / 1200, 1.0) - 0.05 * d, "refresh", spot,
                                 f"Look at {spot} again: your last look there was {_ago(age)} ago "
-                                f"and things may have moved.", ("navigate", "look", "say")))
+                                f"and things may have moved.", ("navigate", "wait_and_observe", "speak")))
             user = (map_.get("people") or {}).get("user", {}).get("keypoint")
             if user and here != user and now - self._failed.get(user, -1e9) >= RETRY_AFTER_S:
                 out.append((1.0, "ready", user,
                             f"Go back to {user}, next to the user, so you're close by for their next request.",
-                            ("navigate", "say")))
+                            ("navigate", "speak")))
         if self.acts and here is not None and not roam and self.permission != "waiting":
             seen = looked.get(here)
             if (seen is None or now - seen.t > REFRESH_S) and now - self._failed.get(here, -1e9) >= RETRY_AFTER_S:
                 out.append((2.0, "glance", here,
                             f"Look around from where you are ({here}) without moving, so you know "
-                            f"what's here. Don't navigate.", ("look",)))
+                            f"what's here: call wait_and_observe(timeout_s=0). Don't navigate.",
+                            ("wait_and_observe",)))
         out.sort(key=lambda g: -g[0])
         self.last = [(round(s, 2), dr, tg) for s, dr, tg, _, _ in out[:6]]
         return out
@@ -174,6 +176,7 @@ class Persona:
         if g.drive == "ask":
             return g.said
         if g.drive == "ready":
+            # g.target is the RESOLVED user keypoint (people.user.keypoint), never the alias "user"
             return belief.robot_at.value == g.target
         looked = belief.looked.get(g.target)
         return looked is not None and looked.source != "memory" and looked.t >= g.t_start

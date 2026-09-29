@@ -104,7 +104,8 @@ knowing from the frames since the last OBSERVE: something that changed, somethin
 (something on the floor, a spill, an open door or drawer), or a person. Don't list furniture, and \
 don't repeat objects already in STATE's in_view. Call observe with an empty list when nothing is \
 worth saying. Name only what you can clearly see; if a small object could be one of several things, \
-describe it ("a small green round object") instead of guessing what it is.
+describe it ("a small green round object") instead of guessing what it is. \
+The robot's own arms, hands and anything they hold may appear at the edges of the frame; never report them.
   what        one short sentence ("the fridge door is open")
   where       the keypoint of the frame it is in (from its FRAME line), or ""
   confidence  0 to 1

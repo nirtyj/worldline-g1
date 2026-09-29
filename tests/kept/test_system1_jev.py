@@ -1,7 +1,7 @@
 """System 1 with Jev labelling (brains/system1_jev.py), against a fake Jev client that returns
 the SDK's own response type, and the fake Gemini Live sessions from tests/test_system1.py.
 
-    .venv-thor/bin/python -m unittest tests.test_system1_jev
+    .venv-rt/bin/python -m pytest tests/kept/test_system1_jev.py
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typesafe_sdk import Choice, Noul, SystemOneResponse, TypeSafeAuthentication
 
 from brains.interface import KINDS, System1
 from brains.system1_jev import JevSystemOne, create
-from tests.test_system1 import FakeClient, FakeSession, observes
+from tests.kept.test_system1 import FakeClient, FakeSession, observes
 
 
 def response(kind: str = "request", p: float = 0.9, answer: str = "none", replaces: float = 0.2,

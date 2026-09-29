@@ -29,13 +29,15 @@ from __future__ import annotations
 
 import collections
 import json
+import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
 from brains.interface import UNKNOWN
 
-ROOT = Path(__file__).resolve().parents[1] / "runs" / "memory"
+ROOT = Path(os.environ.get("WORLDLINE_RUNS") or Path(__file__).resolve().parents[1] / "runs") / "memory"
 SECTIONS = ("objects", "landmarks", "looked", "notes", "observations")
 MAX_NOTES = 30
 MAX_OBSERVATIONS = 40
@@ -49,6 +51,31 @@ VOLATILE_TYPES = {
     "laptop", "basket_ball", "baseball_bat", "tennis_racket", "teddy_bear", "alarm_clock", "cd", "box",
     "butter_knife", "knife", "fork", "spoon", "spatula", "ladle", "salt_shaker", "pepper_shaker",
 }
+
+
+def load_vocab(path: Path | None = None) -> set[str]:
+    """The fixed pickupable vocabulary (config/vocab/pickupable_types.yaml, PLAN 1.3 #10), read with a
+    tiny parser (a ``types:`` list of ``- name`` lines) so the runtime needs no YAML library."""
+    path = path or Path(__file__).resolve().parents[1] / "config" / "vocab" / "pickupable_types.yaml"
+    out: set[str] = set()
+    try:
+        in_types = False
+        for line in path.read_text().splitlines():
+            if re.match(r"^types\s*:", line):
+                in_types = True
+                continue
+            if in_types:
+                m = re.match(r"^\s*-\s*([a-z0-9_]+)", line)
+                if m:
+                    out.add(m.group(1))
+                elif line.strip() and not line.startswith((" ", "\t", "#")):
+                    in_types = False
+    except OSError:
+        pass
+    return out
+
+
+VOLATILE_TYPES = VOLATILE_TYPES | load_vocab()     # THOR snake_case, the same names
 
 
 def volatility(kind: str, history: list[dict[str, Any]]) -> str:
@@ -70,7 +97,8 @@ def usual_place(history: list[dict[str, Any]]) -> str | None:
 
 
 class SpatialMemory:
-    def __init__(self, scene: str | None, root: Path = ROOT) -> None:
+    def __init__(self, scene: str | None, root: Path | None = None) -> None:
+        root = ROOT if root is None else root                  # looked up at call time (tests relocate it)
         self.path = root / f"{scene}.json" if scene else None
         self.data: dict[str, dict[str, dict[str, Any]]] = {k: {} for k in SECTIONS}
         if self.path and self.path.exists():

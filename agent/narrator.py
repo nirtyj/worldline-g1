@@ -43,6 +43,10 @@ class Narrator:
         self._last_pass_t = -1e9
         self._out: list[tuple[str, str]] = []
         self._heard: dict[str, str] = {}
+        self.executors = dict(map_.get("executors") or {})
+        self._walk_said = False
+        self.surfaces = map_.get("surfaces") or {}
+        self.user_kp = ((map_.get("people") or {}).get("user") or {}).get("keypoint")
 
     # ------------------------------------------------------------------ helpers
     def _spot(self, name: str | None) -> str:
@@ -135,49 +139,75 @@ class Narrator:
                 found = found if len(found) < 100 else found[:97] + "…"
             self._say("memory", f"Checking memory for “{r.get('query')}”: {found}")
         elif t == "started":
-            tool = r.get("tool")
-            if tool == "navigate":
-                to = a.get("to")
+            tool, action = r.get("tool"), r.get("action")
+            if tool == "navigate" and action == "reposition":
+                self._say("arm", "Stepping into reach")
+            elif tool == "navigate":
+                to = a.get("location")
                 self.heading, self.passed = to, {self._spot(to), self._spot(self.at)}   # names already said
+                if self.target is None and self.wanted:            # seen since the request came in
+                    self.target = self._guess_target(self.wanted)
                 why = ""
                 ob = self.belief.objects.get(self.target) if self.target else None
-                if to == self.deliver_to and self.target and self._held(self.target):
+                if to == self.deliver_to_kp() and self.target and self._held(self.target):
                     why = f", to bring you {self._thing(self.target)}"
                 elif self.target and self._held(self.target):          # carrying it somewhere else
                     why = f", with {self._thing(self.target)}"
-                elif ob is not None and ob.where.value == to:
+                elif ob is not None and ob.where.value in (to, self._surface_of(to)):
                     why = f", where {'memory says' if ob.where.source == 'memory' else 'I saw'} {self._thing(self.target)} is"
-                elif ob is not None and ob.usual == to:
+                elif ob is not None and ob.usual is not None and ob.usual in (to, self._surface_of(to)):
                     why = f", where {self._thing(self.target)} usually is"
                 elif self.wanted:
                     why = f", to look for the {self.wanted}"
                 self._say("move", f"Heading to {self._spot(to)}{why}")
-            elif tool == "look":
-                self._say("look", "Looking around" + (f" for the {self.wanted}" if self.wanted else ""))
-            elif tool == "pick":
-                self._say("arm", f"Picking up {self._thing(a.get('object'))}")
-            elif tool == "place":
-                self._say("arm", f"Putting {self._thing(a.get('object'))} down")
-            elif tool == "reachability":
-                self._say("arm", f"Checking I can reach {self._thing(a.get('object'))}")
+                ex = self.executors.get("navigate")
+                if ex == "sonic_walk" and not self._walk_said:
+                    self._walk_said = True
+                    self._say("move", "Walking (SONIC)")
+                elif ex == "kinematic_nav" and not self._walk_said:
+                    self._walk_said = True
+                    self._say("move", "[fallback] moving without a gait (kinematic)")
+            elif tool == "manipulate":
+                thing = self._thing(a.get("object_id") or a.get("object_type"))
+                skill = str(a.get("skill_id") or "")
+                if action == "place":
+                    self._say("arm", f"Putting {thing} down")
+                else:
+                    self._say("arm", f"Picking up {thing}")
+                if skill.startswith("groot."):
+                    self._say("arm", "Grasping with GR00T")
+                elif skill and ("script" in skill or "attach" in skill):
+                    self._say("arm", "[fallback] attaching")
+            elif tool == "check_reachability":
+                self._say("arm", f"Checking I can reach {self._thing(a.get('object_id') or a.get('object_type'))}")
         elif t == "result":
-            skill, status, d = r.get("skill"), r.get("status"), r.get("data") or {}
-            if skill == "navigate" and status == "SUCCEEDED":
+            tool, status, d = r.get("tool") or r.get("skill"), r.get("status"), r.get("data") or {}
+            action = r.get("action")
+            if tool == "navigate" and status == "succeeded" and action != "reposition":
                 self.heading, self.at = None, d.get("at")
                 self._say("move", f"At {self._spot(d.get('at'))}")
-            elif skill == "navigate" and status in ("ABORTED", "CANCELED"):
+            elif tool == "navigate" and status in ("failed", "cancelled", "timed_out"):
                 self.heading = None
                 if d.get("reason") != "halted":                  # a stop was already reported
-                    self._say("move", f"Stopped on the way ({_nice(str(d.get('reason') or status.lower()))})")
-            elif skill == "look" and r.get("source") != "harness":
+                    self._say("move", f"Stopped on the way ({_nice(str(d.get('reason') or status))})")
+            elif tool in ("observe", "look") and (r.get("source") != "harness"
+                                                  or r.get("why") in ("arrival", "wait_and_observe")):
                 saw = [s for s in d.get("saw") or [] if s != self.target]
                 if saw:
                     names = sorted({self._kind(s) for s in saw})
                     self._say("look", "I see here: " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0]))
-            elif skill in ("pick", "place") and status != "SUCCEEDED":
-                self._say("problem", f"The {skill} didn't work ({_nice(str(d.get('reason') or status.lower()))})")
-            elif skill == "reachability" and not d.get("reachable"):
-                self._say("problem", f"Can't reach it from here ({_nice(str(d.get('reason') or 'no'))})")
+            elif tool == "manipulate" and status != "succeeded":
+                self._say("problem", f"The {action or 'grasp'} didn't work ({_nice(str(d.get('reason') or status))})")
+            elif tool == "check_reachability" and not d.get("reachable"):
+                if d.get("reason") == "needs_reposition":
+                    self._say("arm", "Almost in reach; stepping closer")
+                else:
+                    self._say("problem", f"Can't reach it from here ({_nice(str(d.get('reason') or 'no'))})")
+        elif t == "safety_event":
+            kind = r.get("kind")
+            self._say("stop", "Fell" if kind == "fell" else f"Safety stop ({_nice(str(kind))})")
+        elif t == "body_mode" and r.get("mode") in ("FAULT", "ESTOP"):
+            self._say("stop", f"Body {str(r.get('mode')).lower()}")
         elif t == "place_learned":
             oid, place, was = r.get("object"), str(r.get("place") or ""), str(r.get("was") or "")
             if oid == self.target:
@@ -204,6 +234,8 @@ class Narrator:
             self.target = self.wanted = None
         elif t == "rejected":
             self._say("problem", f"Rethinking: {r.get('tool')} wasn't allowed ({r.get('why')})")
+        elif t == "stale_result" or t == "late_result":
+            pass                                           # world information, not progress: no line
         elif t == "observation":
             self._say("look", f"Noticed: {r.get('text')}")
         elif t == "persona_goal":
@@ -216,6 +248,19 @@ class Narrator:
             self._say("own", f"Nothing to do, so on my own: {own}")
         elif t == "step_waiting":
             self._say("think", "Waiting for Step before the next decision")
+
+    def deliver_to_kp(self) -> str | None:
+        """The keypoint the robot delivers from (the user's), or the surface name on THOR-shaped maps."""
+        return self.user_kp or self.deliver_to
+
+    def _surface_of(self, kp: str | None) -> str | None:
+        """The surface a keypoint serves (kitchen_counter_1a -> kitchen_counter_1), else the keypoint itself."""
+        if not kp:
+            return None
+        for s, info in self.surfaces.items():
+            if kp in (info.get("keypoints") or []):
+                return s
+        return kp
 
     def _held(self, oid: str) -> bool:
         ob = self.belief.objects.get(oid)

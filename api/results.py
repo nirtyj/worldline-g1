@@ -25,8 +25,9 @@ EnvelopeStatus = Literal["succeeded", "failed", "cancelled", "timed_out", "rejec
 ENVELOPE_STATUSES: tuple[str, ...] = ("succeeded", "failed", "cancelled", "timed_out", "rejected")
 ResultSource = Literal["brain", "harness", "persona"]
 
-# Executors that are STEPPING STONES (PLAN 12.2): labelled [fallback] everywhere.
-STEPPING_STONE_EXECUTORS: tuple[str, ...] = ("kinematic_nav", "kinematic_attach", "sonic_arm_script")
+# Executors that are STEPPING STONES (PLAN 12.2): labelled [fallback] everywhere. "lite" is the
+# pure-Python profile: everything physical there is a stand-in (PLAN 2.1, L0).
+STEPPING_STONE_EXECUTORS: tuple[str, ...] = ("kinematic_nav", "kinematic_attach", "sonic_arm_script", "lite")
 NAV_EXECUTORS: tuple[str, ...] = ("sonic_walk", "kinematic_nav", "lite")
 MANIP_EXECUTORS: tuple[str, ...] = ("groot_sonic", "sonic_arm_script", "kinematic_attach", "lite")
 
