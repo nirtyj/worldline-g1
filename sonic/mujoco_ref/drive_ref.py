@@ -67,6 +67,10 @@ class Driver:
         self.results: list[dict] = []
         self.trace_f = open(self.out / "drive_trace.jsonl", "w")
         self.dbg_f = open(self.out / "deploy_g1_debug.jsonl", "w")
+        self.p1_falls = 0
+        self.fall_watch_on = False
+        if a.p1:
+            threading.Thread(target=self._p1_fall_watch, daemon=True).start()
         threading.Thread(target=self._keepalive, daemon=True).start()
         threading.Thread(target=self._debug_reader, daemon=True).start()
         threading.Thread(target=self._tracer, daemon=True).start()
@@ -86,14 +90,77 @@ class Driver:
         with self.pub_lock:
             self.pub.send(msg)
 
-    def sim(self, op, **kw):
+    def _req(self, msg: dict) -> dict:
         with self.ctl_lock:
             try:
-                self.ctl.send(json.dumps({"op": op, **kw}).encode())
+                self.ctl.send(json.dumps(msg).encode())
                 return json.loads(self.ctl.recv())
             except zmq.Again:
                 self._new_ctl()
-                raise RuntimeError(f"sim control socket timeout on {op}")
+                raise RuntimeError(f"sim control socket timeout on {msg.get('op')}")
+
+    def sim(self, op, **kw):
+        if not self.a.p1:
+            return self._req({"op": op, **kw})
+        return self._p1_op(op, **kw)
+
+    # ---------------------------------------------------------------- wl-isaac (P1) backend
+    # Same scenario against P1's REP API (docs/contracts/m1.md §1.6) instead of sim_ref.py's control socket:
+    #   ping -> ping; pose -> get_pose (+ body-frame angular velocity, fall counter); band -> band {on, ramp_s};
+    #   band_length -> no-op (P1's band already holds the pelvis at floor + 0.80 m, feet on the floor, m1.md §1.7);
+    #   stats -> get_stats (P1 samples lowcmd once per physics step, so the 500 Hz message rate is not observable).
+    # Falls: P1 does not auto-reset like MuJoCo (mj_resetData). To keep collecting data after a fall, a watcher
+    # emulates it: reset_robot at the current x, y, yaw (band on, logged by P1 as a root write), 2 s hold, band
+    # release with a 1 s ramp. Characterisation only; the M1 drive test never does this.
+    def _p1_op(self, op, **kw):
+        if op == "ping":
+            return self._req({"op": "ping"})
+        if op == "pose":
+            r = self._req({"op": "get_pose"})
+            if not r.get("ok", True) or "base_quat_wxyz" not in r:
+                return r
+            w, x, y, z = r["base_quat_wxyz"]
+            wx, wy, wz = r.get("base_ang_vel_w", [0.0, 0.0, 0.0])
+            # omega_b = R^T omega_w (R from the wxyz quaternion)
+            R = [[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                 [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                 [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]]
+            r["base_ang_vel_b"] = [R[0][i] * wx + R[1][i] * wy + R[2][i] * wz for i in range(3)]
+            r["falls"] = self.p1_falls
+            r["ok"] = True
+            return r
+        if op == "band":
+            return self._req({"op": "band", "on": bool(kw["on"]), "ramp_s": 0.0 if kw["on"] else 1.0})
+        if op == "band_length":
+            return {"ok": True, "noop": "P1 band anchor is floor + 0.80 m"}
+        if op == "stats":
+            st = self._req({"op": "get_stats"})
+            return {"ok": True, "lowcmd_hz_2s": None, "lowcmd_leg_target_change_hz_2s": st.get("lowcmd_leg_change_hz"),
+                    "lowcmd_mode_machine": -1, "rtf": st.get("rtf_10s") or 0.0, "p1": st}
+        if op == "quit":
+            return {"ok": True}
+        return self._req({"op": op, **kw})
+
+    def _p1_fall_watch(self):
+        while not self.stop_flag:
+            time.sleep(0.05)
+            if not self.fall_watch_on:
+                continue
+            try:
+                r = self._req({"op": "get_pose"})
+            except Exception:
+                continue
+            if not r.get("fallen"):
+                continue
+            self.p1_falls += 1
+            self.log("p1_fall", pelvis_z=round(r.get("pelvis_z", 0.0), 3), n=self.p1_falls)
+            try:
+                self._req({"op": "reset_robot", "x": r["base_pos"][0], "y": r["base_pos"][1], "yaw": r["yaw"], "band": True})
+                time.sleep(2.0)
+                self._req({"op": "band", "on": False, "ramp_s": 1.0})
+                time.sleep(1.5)
+            except Exception as e:
+                self.log("p1_reset_error", error=repr(e))
 
     def pose(self):
         return self.sim("pose")
@@ -223,13 +290,17 @@ class Driver:
         time.sleep(a.release_after)
         pz = self.pose()["pelvis_z"]
         self.sim("band", on=False)
+        if a.p1:
+            time.sleep(1.2)  # P1 ramps the band out over 1 s
+            self.fall_watch_on = True
         self.falls_at_release = self.pose()["falls"]
         self.log("band_released", pelvis_z=round(pz, 3), band_lower=a.band_lower)
         time.sleep(3.0)
         dbg_rate = self.debug_count / max(1e-3, time.time() - self.debug_first_t)
         self.check("g1_debug_rate", 40 <= dbg_rate <= 60, hz=round(dbg_rate, 1))
         st = self.sim("stats")
-        self.check("lowcmd_rate", st["lowcmd_hz_2s"] > 300 and 35 <= st["lowcmd_leg_target_change_hz_2s"] <= 65,
+        self.check("lowcmd_rate", (st["lowcmd_hz_2s"] is None or st["lowcmd_hz_2s"] > 300)
+                   and 35 <= (st["lowcmd_leg_target_change_hz_2s"] or 0) <= 65,
                    msg_hz=st["lowcmd_hz_2s"], leg_target_change_hz=st["lowcmd_leg_target_change_hz_2s"],
                    mode_machine=st["lowcmd_mode_machine"], rtf=round(st["rtf"], 3))
         return True
@@ -395,6 +466,7 @@ def base_args() -> argparse.ArgumentParser:
     ap.add_argument("--strafe-min-m", type=float, default=0.5)
     ap.add_argument("--long-stand-secs", type=float, default=0.0)
     ap.add_argument("--send-stop", action="store_true")
+    ap.add_argument("--p1", action="store_true", help="drive against wl-isaac (P1 REP API on --ctl-port) instead of sim_ref.py")
     return ap
 
 

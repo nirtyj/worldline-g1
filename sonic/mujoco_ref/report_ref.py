@@ -164,6 +164,10 @@ def main(run: Path):
             ax_.axvspan(a - t0, b - t0, color="green", alpha=0.07)
     for tw, e in cmd_ev:
         axs[1].axvline(tw - t0, c="crimson", lw=0.4)
+    if any(e["event"] == "command_stop_sent" for e in events):
+        for ax_ in axs:  # after command{stop} the deploy exits and the unpowered robot collapses (expected, not a fall)
+            ax_.axvline(t_stop - t0, c="k", ls="--", lw=0.8)
+        axs[0].text(t_stop - t0, 1.05, " command stop:\n deploy exits", fontsize=7, va="top")
     fig.suptitle("SONIC deploy in MuJoCo reference loop (green = planner walking command active)")
     fig.savefig(rep / "timeseries.png", dpi=110, bbox_inches="tight")
     print(json.dumps({k: metrics[k] for k in ("pass", "rtf_sim_over_wall", "lowcmd_msg_hz_after_band", "deploy_loop_latency",

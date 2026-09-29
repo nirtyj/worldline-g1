@@ -56,8 +56,10 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown option $1";;
   esac
 done
-LOGF="${LOGF:-$LOG_ROOT/$SESSION.log}"
 PIDF="$LOG_ROOT/$SESSION.pid"
+LOGPATHF="$LOG_ROOT/$SESSION.logpath"   # start records the log path here so status/stop find a custom --log
+if [[ -z "$LOGF" && "$CMD" != start && "$CMD" != fg && -s "$LOGPATHF" ]]; then LOGF=$(cat "$LOGPATHF"); fi
+LOGF="${LOGF:-$LOG_ROOT/$SESSION.log}"
 
 deploy_args() {
   printf '%q ' "$DEPLOY_BIN" "$IFACE" \
@@ -97,7 +99,7 @@ inner_cmd() {
   local ts; ts=$(date -Is)
   local pre=""; [[ -n "$TASKSET" ]] && pre="taskset -c $TASKSET "
   cat <<EOF
-cd $(printf %q "$DEPLOY_DIR") && echo "=== start $ts iface=$IFACE zmq=$ZMQ_HOST:$ZMQ_PORT out=$ZMQ_OUT_PORT ===" >> $(printf %q "$LOGF") && echo \$\$ > $(printf %q "$PIDF") && exec > >(stdbuf -oL tee -a $(printf %q "$LOGF")) 2>&1 && export LD_LIBRARY_PATH=$(printf %q "$(deploy_ld_path)") TensorRT_ROOT=$(printf %q "$TensorRT_ROOT") && exec ${pre}$(deploy_args)
+cd $(printf %q "$DEPLOY_DIR") && echo "=== start $ts iface=$IFACE zmq=$ZMQ_HOST:$ZMQ_PORT out=$ZMQ_OUT_PORT ===" >> $(printf %q "$LOGF") && echo \$\$ > $(printf %q "$PIDF") && echo $(printf %q "$LOGF") > $(printf %q "$LOGPATHF") && exec > >(stdbuf -oL tee -a $(printf %q "$LOGF")) 2>&1 && export LD_LIBRARY_PATH=$(printf %q "$(deploy_ld_path)") TensorRT_ROOT=$(printf %q "$TensorRT_ROOT") && exec ${pre}$(deploy_args)
 EOF
 }
 
@@ -153,7 +155,7 @@ case "$CMD" in
   status)
     if pid=$(running_pid); then
       echo "running pid=$pid etime=$(ps -o etime= -p "$pid" | tr -d ' ') cpu=$(ps -o %cpu= -p "$pid" | tr -d ' ')% session=$SESSION log=$LOGF"
-      tail -5 "$LOGF"
+      tail -5 "$LOGF" 2>/dev/null || true
     else
       echo "not running (session $SESSION)"; exit 1
     fi
