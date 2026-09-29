@@ -14,7 +14,8 @@ Checks, in THOR's order (thor/robot.py:434-459) so prompts and eval semantics ca
        - no -> a free stance within approach_max_m that satisfies both? -> needs_reposition (+ stance, world pose
          and delta, suggest_location="reach_stance"); none -> too_far (+ suggest_location: the stand of the same
          furniture from which it is in reach, else its surface)
-       - yes but farther than arm_reach_m from the nearer shoulder -> out_of_workspace (the IK stand-in)
+       - yes but farther than arm_reach_m from the nearer shoulder (the IK stand-in) -> needs_reposition when a
+         nearby stance reaches it, else out_of_workspace
   8. hand_full            max_held (1) objects already held
   9. no_skill             no loaded skill handles pick of this type (with the preferred arm)
 
@@ -45,7 +46,7 @@ class G1Workspace:
     reach_lat_max_m: float = 0.40
     either_deadband_m: float = 0.10
     stance_fwd_m: tuple[float, float] = (0.30, 0.45)
-    stance_lat_m: tuple[float, ...] = (0.0, 0.10, -0.10, 0.15, -0.15)
+    stance_lat_m: tuple[float, ...] = (0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15)
     stance_clearance_m: float = 0.25
     stance_margin_m: float = 0.02       # a reposition lands within a few cm: keep the stance inside the reach
     max_held: int = 1
@@ -142,7 +143,7 @@ class ReachabilityModel:
         ws = self.ws
         st = dict(getattr(skill, "stance", None) or {})
         fwds = [float(st["stand_off_m"])] if "stand_off_m" in st else \
-            [ws.stance_fwd_m[0] + i * 0.05 for i in range(int(round((ws.stance_fwd_m[1] - ws.stance_fwd_m[0]) / 0.05)) + 1)]
+            [ws.stance_fwd_m[0] + i * 0.02 for i in range(int(round((ws.stance_fwd_m[1] - ws.stance_fwd_m[0]) / 0.02)) + 1)]
         lats = [float(st.get("lateral_m", 0.0))] if "stand_off_m" in st else list(ws.stance_lat_m)
         to_obj = math.atan2(obj_xy[1] - p.y, obj_xy[0] - p.x)
         yaws = [p.yaw]
@@ -267,6 +268,12 @@ class ReachabilityModel:
             return res(reason="too_far", visible=is_vis, oid=oid, suggest_location=sug if sug != at else None,
                        **common)
         if self.shoulder_dist(fwd, lat, z) > self.ws.arm_reach_m:
+            # in the window but beyond the arm from here: a nearby stance may fix it (a reposition), else no pose
+            # near here can reach it
+            stance = self.find_stance((x, y), skill, z)
+            if stance is not None:
+                return res(reason="needs_reposition", visible=is_vis, oid=oid, suggest_location="reach_stance",
+                           stance=stance, skill_id=getattr(skill, "skill_id", None), **common)
             return res(reason="out_of_workspace", visible=is_vis, oid=oid, **common)
         # 8. hands
         held = [v for v in self.world.hands().values() if v]

@@ -162,9 +162,10 @@ class GTWorld:
 
     def free_spot(self, surface: str, object_id: str, near=None,
                   within: Callable[[float, float, float], bool] | None = None):
-        """A free place for object_id on this stretch (THOR's `_place_points` rings, thor/world.py:95-104):
-        the object's footprint must not overlap another object's (2 cm margin), and `within(x, y, z)` (the reach
-        test from the current pose) must hold. Returns the object's centre (x, y, z) resting on the top."""
+        """A free place for object_id on this stretch: THOR's `_place_points` rings (thor/world.py:95-104), or,
+        with `near` (the robot's pose), a dense grid nearest the robot first. The object's footprint must stay on
+        the stretch and not overlap another object's (2 cm margin), and `within(x, y, z)` (the reach test from the
+        current pose) must hold. Returns api Pose3D of the object's centre resting on the top."""
         from api.types import Pose3D
         s = self.map.surfaces.get(surface)
         spec = self.map.objects.get(object_id)
@@ -176,10 +177,18 @@ class GTWorld:
             box = self._boxes[object_id]
             ex, ey, ez = (box[1][i] - box[0][i] for i in range(3))
             others = [b for oid, b in self._boxes.items() if oid != object_id and oid not in self._held]
-            pts = _place_points(s.half)
-            if near is not None:
-                # nearest the robot first, as a person would put it down in front of themself
+            if near is None:
+                pts = _place_points(s.half)
+            else:
+                # a G1 reaches ~0.1-0.2 m past the edge: a dense 4 cm grid over the stretch, nearest the robot
+                # first (THOR's sparse rings rarely land inside a humanoid's reach)
+                mx = max(0.0, s.half[0] - ex / 2 - 0.02)
+                my = max(0.0, s.half[1] - ey / 2 - 0.02)
+                xs = sorted({max(-mx, min(mx, i * 0.04)) for i in range(-int(mx / 0.04) - 1, int(mx / 0.04) + 2)})
+                ys = sorted({max(-my, min(my, j * 0.04)) for j in range(-int(my / 0.04) - 1, int(my / 0.04) + 2)})
+                pts = [(dx, dy) for dx in xs for dy in ys]
                 pts.sort(key=lambda d: math.hypot(s.center[0] + d[0] - near[0], s.center[1] + d[1] - near[1]))
+                pts = pts[:600]
             for dx, dy in pts:
                 cx, cy = s.center[0] + dx, s.center[1] + dy
                 cz = s.z_top + ez / 2 + 0.005

@@ -21,9 +21,11 @@ Naming (so the planner prompt and eval keep their words):
   landmarks  non-pickupable LANDMARK_TYPES: fridge_1, stove_1 (all burners one), tv_1; `near` = the nearest
              keypoint IN THE SAME ROOM (THOR drift fixed, PLAN §4.4).
 
-Stand points (G1): 0.45-0.60 m from the stretch's front edge, facing the edge normal (so layout's 4-axis facing
+Stand points (G1): 0.35-0.50 m from the stretch's front edge, facing the edge normal (so layout's 4-axis facing
 holds), free with >= 0.30 m clearance, in the furniture's room, reachable from the spawn, >= 0.5 m from other
-stands. If nothing qualifies, a relaxed pass allows up to 1.0 m and 0.25 m clearance (`stand_relaxed`); otherwise
+stands. (PLAN §7.1 said 0.45-0.60; with the G1 workspace's reach_fwd_m <= 0.55 from the pelvis that leaves only
+0.10 m of the surface within reach from the keypoint, and place never repositions, so the band moved 10 cm in;
+M3.5 re-tunes both together.) If nothing qualifies, a relaxed pass allows up to 1.0 m and 0.25 m clearance (`stand_relaxed`); otherwise
 the stretch is skipped (listed in `skipped`, like THOR).
 
 Coordinates: everything inside StaticMap is Isaac world (x, y, yaw rad); `lookup_keypoints()` converts to
@@ -47,7 +49,7 @@ LETTERS = "abcdefgh"
 @dataclass(frozen=True)
 class MapParams:
     segment_m: float = 1.0                  # PLAN §7.1 (THOR 1.3)
-    stand_off_m: tuple[float, float] = (0.45, 0.60)
+    stand_off_m: tuple[float, float] = (0.35, 0.50)  # PLAN §7.1 says 0.45-0.60; see the module docstring
     stand_off_relaxed_m: float = 1.0
     stand_step_m: float = 0.05
     lateral_max_m: float = 0.30
@@ -67,6 +69,7 @@ class MapParams:
     max_reach_height_m: float = 1.20
     min_reach_height_m: float = 0.55
     grid_step: float = 0.25                 # UI / RobotMap lattice
+    user_max_stand_off_m: float = 0.45      # the delivery surface must be placeable from its stand
     room_keypoints: bool = True
 
     @classmethod
@@ -289,9 +292,14 @@ def build_static_map(scene: SceneData, grid: WorldGrid, params: MapParams | None
     landmarks = _name_landmarks(scene, keypoints)
     edges = _edges(grid, keypoints)
     if user_surface not in surfaces:
+        # THOR's rule (the surface whose stand is nearest the start), restricted to surfaces a G1 can place on
+        # from their stand: a regular stand-off and a height inside the reach band
         user_surface = None
-        if surfaces:
-            user_surface = min(surfaces.values(), key=lambda s: math.dist(s.stand, (sx, sy))).name
+        good = [s for s in surfaces.values() if not s.relaxed and s.stand_off_m <= p.user_max_stand_off_m + 1e-6
+                and p.min_reach_height_m <= s.height <= p.max_reach_height_m]
+        pool = good or list(surfaces.values())
+        if pool:
+            user_surface = min(pool, key=lambda s: math.dist(s.stand, (sx, sy))).name
     return StaticMap(scene=scene_key or scene.house_id, house_id=scene.house_id, params=p, floor_z=scene.floor_z,
                      rooms=rooms, surfaces=surfaces, keypoints=keypoints, landmarks=landmarks, objects=objects,
                      things=list(scene.items), edges=edges, user_surface=user_surface, grid=grid, alias=alias,

@@ -14,7 +14,7 @@ workspace:                      # PLAN §6.4 G1Workspace (object positions in th
   reach_lat_max_m: 0.40
   either_deadband_m: 0.10       # |lateral| below this -> preferred_arm "either"
   stance_fwd_m: [0.30, 0.45]    # where a reposition puts the object (forward of the pelvis)
-  stance_lat_m: [0.0, 0.10, -0.10, 0.15, -0.15]
+  stance_lat_m: [0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15]
   stance_clearance_m: 0.25      # the body's robot radius
   stance_margin_m: 0.02         # stances keep this much inside arm_reach_m (arrival error)
   max_held: 1                   # one object at a time (Worldline rule; two hands, one object)
@@ -74,7 +74,7 @@ cameras:                        # GT perception camera models (world/perception.
 
 mapgen:                         # world/mapgen.py MapParams (PLAN §7.1 table)
   segment_m: 1.0
-  stand_off_m: [0.45, 0.60]
+  stand_off_m: [0.35, 0.50]     # PLAN: 0.45-0.60; moved in so place spots <= 0.20 m past the edge are reachable
   stand_off_relaxed_m: 1.0
   stand_min_sep_m: 0.5
   stand_clearance_m: 0.30
