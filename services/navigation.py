@@ -79,6 +79,8 @@ class NavConfig:
     approach_timeout_s: float = 35.0       # the body's approach op (B.6 live: p50 11 s, p90 20-22 s)
     approach_tol_m: float = 0.05           # B.6 contract tolerance (p90 4.0 / 3.9 cm live)
     approach_tol_deg: float = 5.0
+    approach_goal_clearance_m: float = 0.12   # the body's approach refuses a goal closer to an obstacle (raw map)
+    approach_path_clearance_m: float = 0.05   # ... and a segment passing closer than this
     approach_max_m: float = 0.40
     timeout_k: float = 1.8
     timeout_base_s: float = 12.0
@@ -239,6 +241,20 @@ class NavigationService:
         except Exception:  # noqa: BLE001
             return False
 
+    def _stance_line_ok(self, p: Any, sx: float, sy: float, approach: bool) -> bool:
+        """The approach op's own map rule (contract §3.13: the goal 0.12 m and the segment 0.05 m of raw clearance),
+        so the runtime refuses what the body would refuse and sends what it accepts: a reach stance stands closer
+        to the furniture than A*'s inflated free space. The INTERIM go_to needs that free space."""
+        g = self.map.grid
+        if not approach:
+            return bool(g.is_free(sx, sy) and g.segment_free((p.x, p.y), (sx, sy)))
+        c = self.cfg
+        if g.clearance(sx, sy) < c.approach_goal_clearance_m or g.is_outside(sx, sy):
+            return False
+        n = max(2, int(math.hypot(sx - p.x, sy - p.y) / 0.02) + 1)
+        return all(g.clearance(p.x + (sx - p.x) * k / (n - 1), p.y + (sy - p.y) * k / (n - 1))
+                   >= c.approach_path_clearance_m for k in range(n))
+
     def reposition_timeout_s(self) -> float:
         return self.cfg.approach_timeout_s if self.uses_approach() else self.cfg.reposition_timeout_s
 
@@ -378,7 +394,7 @@ class NavigationService:
             return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor, t0=t0,
                                 kind="reposition", final_err_m=round(d, 3),
                                 extra={**extra, "detail": f"stance {d:.2f} m away > approach_max_m"})
-        if not self.map.grid.is_free(sx, sy) or not self.map.grid.segment_free((p.x, p.y), (sx, sy)):
+        if not self._stance_line_ok(p, sx, sy, approach):
             return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor, t0=t0,
                                 kind="reposition", final_err_m=round(d, 3),
                                 extra={**extra, "detail": "no straight free line to the stance"})

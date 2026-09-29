@@ -181,3 +181,64 @@ async def test_scan_approach_and_fences():
         e = q.get_nowait()
         types.add(e.get("type") if e.get("type") != "body_event" else f"body_event:{e.get('topic')}")
     assert "body_mode" in types and "stale_result" in types, types
+
+
+async def test_scripted_pick_carry_and_place_live():
+    """R.1 live, independent of the reachability model's stance: navigate to the alarm clock's stand, reposition
+    (approach) so the object sits where the body's B.7 pick was measured (0.34 m ahead, 0.18 m to the right arm's
+    side), pick through ManipulationService with sonic_arm_script (arm_script phases + P1 attach, STEPPING STONE),
+    walk it to the user's surface with CarryLock, place it. Writes $WL_BOX_OUT/scripted_pick.json."""
+    clock = clock_for("sonic")
+    robot = make_backend("sonic", clock)
+    world = robot.world
+    em = ExecutionManager(clock)
+    oid = os.environ.get("WL_BOX_OBJECT", "alarm_clock_1")
+    o = world.object(oid)
+    assert o is not None and o.where in world.static_map().surfaces, (oid, getattr(o, "where", None))
+    m = robot.lookup_keypoints()
+    kp = m["surfaces"][o.where]["keypoints"][0]
+    out: dict = {"object": oid, "surface": o.where, "keypoint": kp}
+
+    async def run(tool, args, action=None, timeout=None):
+        ex = em.create(tool, args, generation=1, control_epoch=0, action=action)
+        t = timeout or robot.timeout_s(tool, args) + 10
+        r = await clock.wait_for(robot.start(ex).result(), t)
+        out.setdefault("results", []).append({"tool": tool, "action": action, "status": r.status,
+                                              "reason": r.data.get("reason"), "summary": r.summary,
+                                              "executor": r.data.get("executor")})
+        return r
+
+    r = await run("navigate", {"location": kp}, "keypoint")
+    assert r.status == "succeeded", r.summary
+    p = world.robot_pose()
+    x, y, _ = o.pos
+    fwd, lat = float(os.environ.get("WL_BOX_FWD", "0.34")), -0.18                  # the right arm's side
+    c, s = math.cos(p.yaw), math.sin(p.yaw)
+    st = {"x": x - (c * fwd - s * lat), "y": y - (s * fwd + c * lat), "yaw": p.yaw}
+    out["stance"] = {k: round(v, 3) for k, v in st.items()}
+    r = await run("navigate", {"location": "reach_stance", "anchor": kp, "stance": st}, "reposition", 60.0)
+    assert r.data.get("reposition_op") == "approach", r.data
+    await asyncio.sleep(1.0)
+    pick = await run("manipulate", {"action": "pick", "object_type": o.type, "object_id": oid, "arm": "right"},
+                     "pick", 40.0)
+    out["pick"] = {k: pick.data.get(k) for k in ("status", "reason", "executor", "skill", "phases", "gt_gate",
+                                                 "carry_lock", "verify", "grasp_w", "carry_b", "detail", "attempts",
+                                                 "duration_s", "base_shift_m")}
+    ok_pick = pick.status == "succeeded"
+    if ok_pick:
+        user = m["people"]["user"]
+        r = await run("navigate", {"location": user["keypoint"]}, "keypoint")
+        out["carry_walk_held"] = world.hands().get("right") == oid
+        place = await run("manipulate", {"action": "place", "object_type": o.type, "object_id": oid, "arm": "right",
+                                         "target": user["deliver_to_surface"]}, "place", 40.0)
+        out["place"] = {k: place.data.get(k) for k in ("status", "reason", "executor", "phases", "place_w", "spot",
+                                                       "palm_to_place_m", "detail", "duration_s", "surface")}
+        o2 = world.object(oid)
+        out["final_where"] = o2.where if o2 else None
+    out["falls"] = bool(world.robot_pose().fallen)
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "scripted_pick.json").write_text(json.dumps(out, indent=1, default=str))
+    print(json.dumps({"pick": out["pick"].get("status") or pick.status, "reason": pick.data.get("reason"),
+                      "final_where": out.get("final_where")}))
+    assert ok_pick, (pick.summary, pick.data.get("detail"))
+    assert out["final_where"] == m["people"]["user"]["deliver_to_surface"], out.get("place")

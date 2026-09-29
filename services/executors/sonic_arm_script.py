@@ -68,6 +68,9 @@ class ArmScriptConfig:
     carry_clear_m: float = 0.12          # ... but the palm at least this far above the support's top (the tuck
                                          # pulls back at the current height, then goes to it: it clears the edge)
     place_above_m: float = 0.05          # lower: the palm this far above the resting object's top
+    max_ik_err_m: float = 0.03           # pregrasp / grasp / lower: accept an IK goal this close (the body's default
+                                         # 0.02 refused a grasp 2.2 cm off after SONIC stepped the pelvis back 12 cm
+                                         # during the pregrasp, live); the GT gate below judges where the palm got
     pregrasp_settle_s: float = 1.2       # the body's defaults are 2.5 s for pregrasp / grasp / lower (palm-error
     grasp_settle_s: float = 2.0          # windows); shorter here so a pick fits the skill's time budget
     lower_settle_s: float = 1.5
@@ -186,13 +189,43 @@ class SonicArmScriptExecutor:
             p = None
         return None if p is None else tuple(float(v) for v in p)   # type: ignore[return-value]
 
-    def _carry(self) -> dict:
+    def _carry_now(self) -> dict:
         fn = getattr(self.body, "arm_state", None)
         try:
             c = dict(((fn() if callable(fn) else {}) or {}).get("carry") or {})
         except Exception:  # noqa: BLE001
             c = {}
         return {k: c.get(k) for k in ("engaged", "carry_arm", "closure", "palm_err_m", "kind") if k in c}
+
+    async def _carry(self, wait_s: float = 0.8) -> dict:
+        """body.state.arm.carry once the body reports it (body.state is published at 5 Hz, so right after the carry
+        phase it may still show the script running)."""
+        t_end = time.monotonic() + wait_s
+        c = self._carry_now()
+        while not c.get("engaged") and time.monotonic() < t_end:
+            await asyncio.sleep(0.1)
+            c = self._carry_now()
+        return c
+
+    def _closer_spot(self, job: ManipJob, fwd_max: float = 0.38):
+        """A free spot on the target inside the arm script's own envelope (pelvis frame: 0.18-fwd_max m ahead, on the
+        arm's side within 0.25 m), nearest the robot first; None if there is none. Used when the service's spot is
+        out of the arm's IK reach (the service judges reach with the workspace model, the body with its IK)."""
+        fn = getattr(self.world, "free_spot", None)
+        if not callable(fn) or not job.target:
+            return None
+        p = self.world.robot_pose()
+        c, s = math.cos(p.yaw), math.sin(p.yaw)
+        side = 1.0 if job.arm == "left" else -1.0
+
+        def within(x: float, y: float, z: float) -> bool:
+            dx, dy = x - p.x, y - p.y
+            fwd, lat = c * dx + s * dy, -s * dx + c * dy
+            return 0.18 <= fwd <= fwd_max and -0.08 <= side * lat <= 0.25
+        try:
+            return fn(job.target, job.object_id, near=p, within=within)
+        except Exception:  # noqa: BLE001
+            return None
 
     async def _stance(self) -> tuple[str, str] | None:
         t_end = time.monotonic() + self.cfg.stance_settle_s
@@ -327,7 +360,8 @@ class SonicArmScriptExecutor:
         zc0 = (z0 + z1) / 2
         extra: dict[str, Any] = {"grasp_w": _r(list(grasp_w)), "support_top_m": _r(support_top)}
         # pregrasp, grasp
-        res, why = await self._phase(job, handle, phases, "pregrasp", target_w=grasp_w, settle_s=c.pregrasp_settle_s)
+        res, why = await self._phase(job, handle, phases, "pregrasp", target_w=grasp_w, settle_s=c.pregrasp_settle_s,
+                                     max_ik_err_m=c.max_ik_err_m)
         if why is not None:
             return self._stop_outcome(why, job, "pregrasp", phases, t_run, **extra)
         if res.get("state") != "succeeded":
@@ -335,7 +369,7 @@ class SonicArmScriptExecutor:
             return self._outcome("failed", r, job, "pregrasp", phases, t_run,
                                  f"pregrasp {res.get('state')}: {(res.get('data') or {}).get('reason')}", **extra)
         res, why = await self._phase(job, handle, phases, "grasp", target_w=grasp_w, closure=c.closure,
-                                     settle_s=c.grasp_settle_s)
+                                     settle_s=c.grasp_settle_s, max_ik_err_m=c.max_ik_err_m)
         if why is not None:
             return self._stop_outcome(why, job, "grasp", phases, t_run, **extra)
         if res.get("state") != "succeeded":
@@ -399,7 +433,7 @@ class SonicArmScriptExecutor:
         held = self._holding(job)
         rose = None if o2 is None else float(o2.pos[2]) - zc0
         extra["verify"] = {"held_by": job.arm if held else None, "rose_m": _r(rose)}
-        extra["carry_lock"] = self._carry()
+        extra["carry_lock"] = await self._carry()
         phases.append({"phase": "verify", "ok": bool(held and rose is not None and rose >= c.min_lift_m)})
         if not held:
             return self._outcome("failed", "grasp_failed", job, "verify", phases, t_run,
@@ -427,7 +461,18 @@ class SonicArmScriptExecutor:
         phases.append({"phase": "stance_check", "ok": why is None})
         if why is not None:
             return self._outcome("failed", why[0], job, "stance_check", phases, t_run, why[1], **extra)
-        res, why = await self._phase(job, handle, phases, "lower", target_w=place_w, settle_s=c.lower_settle_s)
+        res, why = await self._phase(job, handle, phases, "lower", target_w=place_w, settle_s=c.lower_settle_s,
+                                     max_ik_err_m=c.max_ik_err_m)
+        if why is None and res.get("state") != "succeeded" and \
+                (res.get("data") or {}).get("reason") == "ik_unreachable":
+            spot2 = self._closer_spot(job)                   # the service's spot is beyond the arm: a closer one
+            if spot2 is not None:
+                sx, sy, sz = float(spot2.x), float(spot2.y), float(spot2.z)
+                place_w = (sx, sy, sz + half_h + c.place_above_m)
+                extra.update(spot_retry={"from": extra["spot"], "to": _r([sx, sy, sz])}, place_w=_r(list(place_w)),
+                             spot=_r([sx, sy, sz]))
+                res, why = await self._phase(job, handle, phases, "lower", target_w=place_w,
+                                             settle_s=c.lower_settle_s, max_ik_err_m=c.max_ik_err_m)
         if why is not None:
             return self._stop_outcome(why, job, "lower", phases, t_run, **extra)
         if res.get("state") != "succeeded":
