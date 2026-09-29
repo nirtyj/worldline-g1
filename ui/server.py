@@ -80,7 +80,7 @@ S1_OWN_GRACE_S = 3.0          # frames this soon after a manipulate still show t
 QUIET_EVENTS = {"speech_ended"}
 MEMORY_ROWS = {"memory_saved", "place_learned", "note_saved", "delivered", "recall", "persona_goal_end", "observation"}
 VIEWS = ROOT / "ui" / "views"
-SPEECH_TOOLS = ("speak", "say")                 # "say" only so a THOR-era trace still renders
+SPEECH_TOOLS = ("speak",)
 OBSERVE_TOOLS = ("navigate", "observe", "wait_and_observe")
 SCAN_TOOLS = ("observe", "wait_and_observe")
 
@@ -743,7 +743,7 @@ class Hub:
                 rev = cf.rev if cf is not None else src.rev("head")
                 if rev != last_rev:
                     running = [str(t) for t in (ctx.get("running") or [])]
-                    if any(t in ("manipulate", "pick", "place") or t.startswith("manipulate") for t in running):
+                    if any(t.startswith("manipulate") for t in running):     # "manipulate" or "manipulate:pick"
                         last_own_t = now
                     own = now - last_own_t < S1_OWN_GRACE_S     # and the check right after it
                     jpeg = cf.jpeg if cf is not None else src.jpeg("head")

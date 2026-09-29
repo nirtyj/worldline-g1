@@ -595,7 +595,7 @@
   const FALLBACK = () => new Set((S.config && S.config.stepping_stones) || ["kinematic_nav", "kinematic_attach", "sonic_arm_script"]);
   const isOk = (st) => ["succeeded", "SUCCEEDED"].includes(st);
   const isBad = (st) => ["cancelled", "failed", "timed_out", "rejected", "dropped", "CANCELED", "ABORTED", "REJECTED", "TIMEOUT", "FAILED"].includes(st);
-  const SPEECH = new Set(["speak", "say"]);
+  const SPEECH = new Set(["speak"]);
   function xbadge(executor, skill) {
     if (!executor && !skill) return "";
     const fb = FALLBACK().has(executor);
@@ -751,6 +751,7 @@
   function showCam() {
     const c = S.cams[S.cam];
     $("nocam").hidden = !!c;
+    $("cam").hidden = !c;
     if (!c) { $("cam").removeAttribute("src"); $("nocam").textContent = `No ${S.cam} frames (${S.cam === "head" ? "P1 camera on 5565" : S.cam === "ego" ? "full profile only" : "start P1 with --viz or --tp-camera"})`; }
     else $("cam").src = "data:image/jpeg;base64," + c.b64;
     const m = (c && c.meta) || {};
@@ -823,7 +824,7 @@
         if (SPEECH.has(tool) || tool === "chunk") return null;
         const d = e.data || {};
         let brief;
-        if ((tool === "look" || tool === "observe" || tool === "wait_and_observe") && d.surfaces) {
+        if ((tool === "observe" || tool === "wait_and_observe") && d.surfaces) {
           const seen = Object.entries(d.surfaces || {}).map(([s, os]) => `${s}: [${os.map((o) => o.id).join(", ")}]`).join("; ");
           brief = `at ${d.at} sees ${seen || "nothing"}; hands ${JSON.stringify(d.hands || {})}`;
         } else {

@@ -33,7 +33,7 @@ SHORTCUT_LABELS = {
     "lite": "lite body (pure Python; no physics)",
 }
 NAV_TOOLS = ("navigate",)
-MANIP_TOOLS = ("manipulate", "pick", "place")
+MANIP_TOOLS = ("manipulate",)
 
 
 def stepping_stones() -> frozenset[str]:

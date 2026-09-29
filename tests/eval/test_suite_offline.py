@@ -255,3 +255,40 @@ def test_only_target_executors_make_a_target_pass():
     assert lite["fallback"] and lite["shortcuts"] == ["lite"] and "no physics" in lite["labels"][0]
     odd = sc.honesty({"nav": {"sonic_walk": 1}, "manip": {"some_new_executor": 1}})
     assert odd["fallback"] and odd["shortcuts"] == ["some_new_executor"], "unknown executors are never target passes"
+
+
+OLD_TOOLS = {"say", "look", "reachability", "pick", "place", "wait"}
+
+
+def test_no_old_tool_names_in_ui_and_eval():
+    """PLAN 10 test_tool_vocab for ui/ and eval/: no comparison of a tool name (.tool, tool_name, skill,
+    started(...), 'tool' keys) against THOR's old tools. Actions ('pick'/'place' as manipulate's action) are fine."""
+    tool_attr = {"tool", "tool_name", "skill"}
+
+    def is_tool_expr(n):
+        if isinstance(n, ast.Attribute) and n.attr in tool_attr:
+            return True
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" and n.args \
+                and isinstance(n.args[0], ast.Constant) and n.args[0].value in tool_attr:
+            return True
+        if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and n.slice.value in tool_attr:
+            return True
+        if isinstance(n, ast.BoolOp):
+            return any(is_tool_expr(v) for v in n.values)
+        return isinstance(n, ast.Name) and n.id in ("tool",)
+
+    def consts(n):
+        return {c.value for c in ast.walk(n) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+
+    bad = []
+    for p in sorted(list((ROOT / "ui").glob("*.py")) + list((ROOT / "eval").glob("*.py"))):
+        tree = ast.parse(p.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Compare) and (is_tool_expr(node.left) or any(is_tool_expr(c) for c in node.comparators)):
+                hit = consts(node) & OLD_TOOLS
+                if hit:
+                    bad.append(f"{p.name}:{node.lineno} {sorted(hit)}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "started" \
+                    and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value in OLD_TOOLS:
+                bad.append(f"{p.name}:{node.lineno} started({node.args[0].value!r})")
+    assert not bad, bad
