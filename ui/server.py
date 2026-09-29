@@ -56,7 +56,17 @@ from ui.truth import (DISPLAY_STEP, FALLBACK_LABELS, GT_LABEL, display_cells, la
                       profile_fallbacks, stepping_stones, to_plain, truth_payload, world_grid)
 
 INDEX = Path(__file__).resolve().parent / "index.html"
-LOG_DIR = ROOT / "runs" / "playground"
+
+
+def runs_dir() -> Path:
+    """runs/ (memory, episodes, procedures, playground logs); WORLDLINE_RUNS moves it (tests, the box)."""
+    return Path(os.environ.get("WORLDLINE_RUNS") or ROOT / "runs")
+
+
+def log_dir() -> Path:
+    return runs_dir() / "playground"
+
+
 TICK_S = 0.2
 PLANNER = "agent.model:create_brain"
 # System 1 plugs in here: "module:factory", where factory(on_status) returns an object with
@@ -349,7 +359,7 @@ class Session:
         except Exception as e:  # noqa: BLE001
             self.error = f"The planner could not start: {e}"
             return
-        self.calls_log = LOG_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}_{self.scene}_{self.profile}_model_calls.txt"
+        self.calls_log = log_dir() / f"{time.strftime('%Y%m%d-%H%M%S')}_{self.scene}_{self.profile}_model_calls.txt"
         self.recorder = CallRecorder(self.planner, self.clock, self._version, self.calls_log)
         brain = d.composite(self.planner)
         try:
@@ -437,7 +447,8 @@ class Session:
                 "map": self.map, "layout": self.layout,
                 "events": self._events_from(0), "trace": self._trace_from(0),
                 "calls": self.recorder.calls if self.recorder else [],
-                "calls_log": str(self.calls_log.relative_to(ROOT)) if self.calls_log else None,
+                "calls_log": (str(self.calls_log.relative_to(ROOT)) if self.calls_log.is_relative_to(ROOT)
+                              else str(self.calls_log)) if self.calls_log else None,
                 "error": self.error, **self.state(), "robot_map": self.robot_map.full()}
 
     def memory_message(self) -> dict[str, Any]:
@@ -808,7 +819,7 @@ class Hub:
             if old:
                 await old.stop()              # the old runtime saves its memory as it stops...
             if forget:                        # ...so forgetting has to come after that
-                (ROOT / "runs" / "memory" / f"{scene}.json").unlink(missing_ok=True)
+                self._forget(scene)
                 self._notice(f"Forgot everything about {scene}: no seen objects, landmarks, looks or notes.")
             broadcast(self.clients, dumps({"type": "loading", "scene": scene, "profile": profile}))
             new = Session(scene, agent, model, profile, self.deps)
@@ -828,6 +839,13 @@ class Hub:
             self.feed = CameraFeed(self._cameras_for(new))
             broadcast(self.clients, dumps({**new.init_message(), "meta": self.meta()}))
             broadcast(self.clients, dumps(new.memory_message()))
+
+    def _forget(self, scene: str) -> None:
+        """Wipe the house's spatial memory. The runtime keys memory by its map's scene name, which may
+        carry a variant (procthor-train-40@a); both spellings are removed."""
+        mem = runs_dir() / "memory"
+        for p in {mem / f"{scene}.json", *mem.glob(f"{scene}@*.json")}:
+            p.unlink(missing_ok=True)
 
     async def tick(self) -> None:
         s = self.session

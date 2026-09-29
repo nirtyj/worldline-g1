@@ -13,6 +13,7 @@ Each finished call is also appended to a plain-text log.
 
 from __future__ import annotations
 
+import inspect
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -27,7 +28,7 @@ class CallRecorder:
         self._rev = 0
         self._systems_written: set[str] = set()
         self._model_calls = 0
-        if hasattr(brain, "_call"):
+        if self._is_model_call(getattr(brain, "_call", None)):
             self._wrap_call(brain)
         if hasattr(brain, "classify"):
             self._wrap_classify(brain)
@@ -43,6 +44,18 @@ class CallRecorder:
     def _touch(self, rec: dict[str, Any]) -> None:
         self._rev += 1
         rec["rev"] = self._rev
+
+    @staticmethod
+    def _is_model_call(fn: Any) -> bool:
+        """llmkit's ModelBrain._call(system, text, tools) coroutine; a scripted brain may have an
+        unrelated helper of the same name, which must not be wrapped."""
+        if fn is None or not inspect.iscoroutinefunction(fn):
+            return False
+        try:
+            params = list(inspect.signature(fn).parameters)
+        except (TypeError, ValueError):
+            return False
+        return params[:3] == ["system", "text", "tools"]
 
     # ------------------------------------------------------------------
     def _wrap_call(self, brain: Any) -> None:

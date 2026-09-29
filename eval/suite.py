@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -37,7 +38,7 @@ if str(ROOT) not in sys.path:
 
 from eval import scenes as sc  # noqa: E402
 
-OUT = ROOT / "runs" / "eval"
+OUT = Path(os.environ.get("WORLDLINE_RUNS") or ROOT / "runs") / "eval"
 LOAD_TIMEOUT_S = 300.0                   # an Isaac reset: band on, reset_scene, robot reset, band release (PLAN 9.1)
 BIND = sc.load()
 H40, H15, K10 = BIND.scene("H40"), BIND.scene("H15"), BIND.scene("K10")
