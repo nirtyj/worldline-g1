@@ -246,11 +246,14 @@ not list `"chunk"` makes the executor unhealthy ("body arm op has no chunk mode 
 
 ## 8. As built by the body (master `4b081c2` `body/arm.py`), reconciled in wave 1
 
-Read in `body/arm.py` on master (read-only) and exercised by `tests/services/test_groot_arms_body_arm.py`, which runs
+Read in `body/arm.py` on master (read-only; the body owner's own list is master `docs/arm_tracking.md` §8.6, which
+this table matches) and exercised by `tests/services/test_groot_arms_body_arm.py`, which runs
 the real `GrootArmExecutor` (real `groot/` helpers, the fake PolicyServer) against the real `ArmChannel` ticking at
 50 Hz in wall time over the body's own test plant (`body/tests/arm_sim.py`). The test skips on this branch (no
-`body/arm.py`) and runs after the wave-2 merge. On a trial merge (this branch + master's `body/`, `tools/`): 3 passed
-(a full session, a body halt latch, a cancel).
+`body/arm.py`) and runs after the wave-2 merge. On trial merges (this branch + master's `body/`, `tools/`,
+`sim_isaac/` at `1673463` and at `84ddbfe`): 3 passed, 3 runs in a row each (a full session, a body halt latch, a
+cancel). The body owner ran chunk mode live with synthetic chunks (master `arm_tracking.md` §8.3: 10 sessions, 98
+chunks applied, cancel 3/3, halt 3/3).
 
 | Item | Contract v0.1 | Body as built | Runtime now |
 |---|---|---|---|
@@ -259,7 +262,10 @@ the real `GrootArmExecutor` (real `groot/` helpers, the fake PolicyServer) again
 | Halt latch | messages with `control_epoch <= halt_epoch` → `halted` | the same, plus: every `arm` message while latched → `halted`; the active session ends `canceled`, `ended_by: "halt"`, hold measured | `halted` / `ended_by: halt` → `failed(halted)` (unchanged). The runtime's HaltGate epochs are still not the executions' `control_epoch` (R.2) |
 | Required fields | `session_id`, `generation`, `control_epoch` | missing ones → `bad_args` (not `bad_chunk`) | always sent |
 | Ended session ids | `stale_session` | kept in a bounded map, `stale_session {ended: true, ended_by}` | `stale_session` → `failed(controller_unavailable)` |
-| `stop {arms: true}` | not specified | ends the session `canceled` (reason `stop`); the stream is then refused `arm_stopped` until `restart: true` | not sent by `groot_arms`; a refused `arm_stopped` ends the session `failed(halted)` (`BODY_FATAL`) |
+| `stop {arms: true}` | not specified | ends a chunk session at once (`canceled`, `ended_by: "stop"`) and blends back; its later messages are `stale_session` (a v0.5 stream gets `arm_stopped`) | not sent by `groot_arms`; the terminal event (`ended_by: stop`) ends the session `failed(halted)`; `arm_stopped` maps to `halted` too |
+| Row playback | `k = round(...)` | rows interpolated linearly at the continuous time index (the reported `k` is rounded) | nothing to change |
+| `slew_frac` | per tick over 28 values | slew-limited **arm** values over ticks × 28 (the body never slew-limits the hands) | read as reported |
+| Halt latch hands | hold | the **measured** hands (never opened, never closed to a fist) | nothing to change |
 | Progress | `arm.progress` 5 Hz | 5 Hz `progress` with `kind: "chunk"`, `clamped_frac`, `clamped_frac_total`, `slew_frac`, `lead_s`, `max_step_rad`, `chunks{...}` | read as specified |
 
 Open for wave 2: replay the fake body's sequences against the real channel in `body/tests` (the body owner's half of
