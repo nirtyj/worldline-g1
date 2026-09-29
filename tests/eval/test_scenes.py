@@ -217,10 +217,14 @@ DELIVERIES = [("fetch_other_room", None, ["alarm_clock_1"]), ("fetch_search", No
               ("addition", "g1_alternative", ["alarm_clock_1", "wine_bottle_1"])]
 
 
-def _g1_stack(scene: str):
+TARGET_STANCE = {"stance_via": "approach", "stance_clearance_m": 0.20}    # R.7's validated reach stance
+
+
+def _g1_stack(scene: str, target_stance: bool = True):
     """A lite service stack built as an Isaac world is: the R.7 stands (config mapgen, not mapgen.lite_world) and a
     reachability (and the place reach test that reads it) that judges with the calibrated G1 arm (config workspace,
-    not workspace.lite_world)."""
+    not workspace.lite_world); with target_stance, the approach stances 0.20 m from the furniture that R.7 validated
+    live (config keeps A*'s 0.25 m until navigate(reach_stance) checks stances with ReachabilityModel.stance_ok)."""
     from services.reachability import G1Workspace
     from tests.services.conftest import Stack
     from world.mapgen import MapParams
@@ -230,8 +234,8 @@ def _g1_stack(scene: str):
         s = Stack(house=scene, profile="lite")
     finally:
         MapParams.for_source = real
-    ws = G1Workspace.from_dict({k: v for k, v in s.robot.stack_profile.g1["workspace"].items() if k != "lite_world"})
-    s.robot.reach.ws = ws
+    d = {k: v for k, v in s.robot.stack_profile.g1["workspace"].items() if k != "lite_world"}
+    s.robot.reach.ws = G1Workspace.from_dict({**d, **(TARGET_STANCE if target_stance else {})})
     assert s.world.static_map().params.stand_off_m[0] < 0.30
     return s
 
@@ -345,3 +349,28 @@ def test_the_apple_is_beyond_a_g1s_reach_and_the_mugs_beyond_one_reposition():
             # mug_1: no stance within one reposition; mug_2 is not even in view from its stand's scan (1.45 m away)
             assert s.robot.reach.check("mug", oid).reason in ("too_far", "beyond_reach", "not_seen_here"), oid
     run(h40())
+
+
+@pytest.mark.parametrize("scene, oid", [("procthor-train-40", "alarm_clock_1"), ("procthor-train-40", "wine_bottle_1"),
+                                        ("ithor-FloorPlan10", "bowl_1")])
+def test_with_todays_config_the_stances_pass_navigations_own_check(scene, oid):
+    """The INTERIM config (stance_via go_to, 0.25 m) gives stances that services/navigation.py's reach_stance check
+    accepts today (A*'s inflated free space and a free straight segment, within approach_max_m), so the live F1 is
+    not blocked while the 0.20 m approach stances wait for navigation."""
+    pytest.importorskip("scipy")
+    import math
+    from tests.services.conftest import run
+    s = _g1_stack(scene, target_stance=False)
+    ws = s.robot.reach.ws
+    assert ws.stance_via == "go_to" and ws.stance_clearance_m == 0.25
+
+    async def main():
+        o = s.world.object(oid)
+        _at(s, o.where)
+        await s.run("observe", {"mode": "scan"})
+        r = s.robot.reach.check(o.type, oid)
+        assert r.reason == "needs_reposition", r.reason
+        st, p, g = r.stance, s.world.robot_pose(), s.world.static_map().grid
+        assert g.is_free(st["x"], st["y"]) and g.segment_free((p.x, p.y), (st["x"], st["y"]))
+        assert math.hypot(st["x"] - p.x, st["y"] - p.y) <= ws.approach_max_m + 0.05
+    run(main())

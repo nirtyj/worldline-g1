@@ -40,7 +40,7 @@ def test_one_envelope_row_bisects_the_forward_reach():
 
 def test_coverage_judges_with_the_calibrated_arm():
     pytest.importorskip("scipy")
-    rows = wc.coverage("procthor-train-40")
+    rows = wc.coverage("procthor-train-40", overrides={"stance_via": "approach", "stance_clearance_m": 0.20})
     by = {r.object_id: r for r in rows}
     assert by["alarm_clock_1"].verdict == "one_approach"                    # F1's object: one reach stance
     assert by["book_1"].verdict == "too_low"
@@ -59,7 +59,8 @@ def test_a_two_step_reach_stance_would_reach_more_than_one_straight_approach():
     from world.workspace_cal import _At, _SeenAll
     from services.skills import build_registry
     from robot.profile import load_profile
-    ws = G1Workspace.from_dict({k: v for k, v in load_profile("sonic").g1["workspace"].items() if k != "lite_world"})
+    ws = G1Workspace.from_dict({**{k: v for k, v in load_profile("sonic").g1["workspace"].items()
+                                   if k != "lite_world"}, "stance_via": "approach", "stance_clearance_m": 0.20})
     w = LiteWorld("procthor-train-15")
     reg = build_registry(["lite"], w)
     o = w.object("egg_1")                                           # 0.32 m from a standable spot, ~1 m from its stand

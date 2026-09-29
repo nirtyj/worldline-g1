@@ -215,7 +215,8 @@ def _res(r) -> dict:
                               "stance": getattr(r, "stance", None)}.items() if v is not None}
 
 
-def coverage(house: str, *, profile: str = "sonic", config_dir: str | Path | None = None) -> list[CoverageRow]:
+def coverage(house: str, *, profile: str = "sonic", config_dir: str | Path | None = None,
+             overrides: dict | None = None) -> list[CoverageRow]:
     from robot.profile import load_profile
     from services.reachability import G1Workspace, ReachabilityModel
     from services.skills import build_registry
@@ -230,6 +231,7 @@ def coverage(house: str, *, profile: str = "sonic", config_dir: str | Path | Non
     nav = _At()
     # the calibrated G1 arm, not the lite world's INTERIM one (workspace.lite_world): this is about the robot
     ws = {k: v for k, v in (prof.g1.get("workspace") or {}).items() if k != "lite_world"}
+    ws.update(overrides or {})
     model = ReachabilityModel(w, G1Workspace.from_dict(ws), registry=reg, observation=_SeenAll(w), nav=nav)
     m = w.static_map()
     rows = []
@@ -305,6 +307,9 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("coverage")
     c.add_argument("--houses", nargs="*", default=list(HOUSES))
     c.add_argument("--profile", default="sonic")
+    c.add_argument("--stance-via", default=None, help="override workspace.stance_via (approach | go_to | two_step)")
+    c.add_argument("--stance-clearance", type=float, default=None, help="override workspace.stance_clearance_m")
+    c.add_argument("--approach-max", type=float, default=None, help="override workspace.approach_max_m")
     c.add_argument("--out", default=None)
     a = ap.parse_args(argv)
     out = Path(a.out) if a.out else None
@@ -322,11 +327,14 @@ def main(argv: list[str] | None = None) -> int:
             (out / f"envelope_{a.arm}.json").write_text(json.dumps(env, indent=1) + "\n")
         return 0
     from robot.profile import load_profile
-    ws = load_profile(a.profile).g1.get("workspace") or {}
-    report: dict[str, Any] = {"profile": a.profile, "workspace": ws, "houses": {}}
+    ov = {k: v for k, v in (("stance_via", a.stance_via), ("stance_clearance_m", a.stance_clearance),
+                            ("approach_max_m", a.approach_max)) if v is not None}
+    ws = {**(load_profile(a.profile).g1.get("workspace") or {}), **ov}
+    ws.pop("lite_world", None)
+    report: dict[str, Any] = {"profile": a.profile, "workspace": ws, "overrides": ov, "houses": {}}
     allrows: list[CoverageRow] = []
     for h in a.houses:
-        rows = coverage(h, profile=a.profile)
+        rows = coverage(h, profile=a.profile, overrides=ov)
         allrows += rows
         report["houses"][h] = {"summary": coverage_summary(rows, ws), "rows": [asdict(r) for r in rows]}
         print(h, json.dumps(report["houses"][h]["summary"]))

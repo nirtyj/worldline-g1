@@ -139,24 +139,34 @@ A pick that needs a reach stance adds the approach (15 s mean, §2).
 `needs_reposition` it moves to the stance and checks again. There are 130 pickables in H40/H15/K10/H38, 110 of them
 in the height band. `outputs/.../coverage_final/coverage.json`:
 
-| | In-band pickables |
+| Stance rule | In-band pickables |
 |---|---|
 | Physically reachable at all (some spot 0.20 m from obstacles within the arm's horizontal reach) | **59 / 110 = 54 %** |
-| Reachable from the keypoint or after one straight reach stance (≤ 0.60 m), this config | **25 / 110 = 22.7 %** (24.5 % counting another stretch's stand) |
-| Same with a two-step reach stance (A* next to the stance, then the approach; `stance_via: two_step`, up to 2 m) | 53 / 110 = 48 % |
-| Before R.7 (M2a's config: reach 0.55 m from the pelvis, stance 0.25 m from obstacles) | 18 / 119 = 15 % (and it called reachable some grasps the arm cannot do) |
+| **Config today (INTERIM)**: A* stances 0.25 m from obstacles (`stance_via: go_to`), one reach stance ≤ 0.60 m | **13 / 110 = 11.8 %** (bound at 0.25 m: 39 = 35.5 %) |
+| R.7's validated stance: `approach`, 0.20 m, one straight reach stance ≤ 0.60 m | **25 / 110 = 22.7 %** (24.5 % counting another stretch's stand) |
+| Two-step reach stance (`stance_via: two_step`: A* next to the stance, then the approach, up to 2 m) | 51 / 110 = 46.4 % |
+| Before R.7 (M2a's config: reach 0.55 m from the pelvis, stance 0.25 m) | 18 / 119 = 15 % (and it called reachable some grasps the arm cannot do) |
+
+Runs: `coverage_config_go_to_0.25/`, `coverage_approach_0.20/`, `coverage_two_step_0.20/` and `coverage_baseline/`.
+Reproduce with `python -m world.workspace_cal coverage [--stance-via approach --stance-clearance 0.20]`.
+
+Why the config is INTERIM: `services/navigation.py`'s `navigate(reach_stance)` still accepts only stances in A*'s
+inflated free space, with a free straight segment to them. That rejects every 0.20 m stance, and every approach-rule
+stance found for the scenario objects. With 0.25 m + go_to, the stances for the H40 alarm clock, the wine bottle and
+the K10 bowl pass that check (`tests/eval/test_scenes.py`), so the live F1 is not blocked. The switch to 0.20 m +
+approach is two config lines once navigation checks stances with `ReachabilityModel.stance_ok()` (request to robot).
 
 So "most household pickables" are not reachable. The body and the houses cap it at 54 %: ProcTHOR scatters props
 over the whole depth of 0.6 m counters, and a G1 standing 0.20 m from the edge reaches 0.23-0.30 m past it. The
 one-step reach stance is the next limit, because many objects sit far from their stretch's only stand. A two-step
 reach stance in navigation would take this to 48 % (request to robot).
 
-What changed to get from 15 % to 22.7 %, in the runtime and the config:
+What the runtime and config changes do, from 15 % towards 22.7 % (with the approach stance) and 46 % (two-step):
 
 - **stance search** (`find_stance`): the object may sit anywhere in the reach window, seen from any direction around
   it (every 10°), rather than straight ahead in a 15 cm band;
-- **approach stances**: 0.20 m from the furniture on a straight segment, not A*'s 0.25 m inflated space. Live, the
-  body stood 0.15-0.20 m from a counter 15/15 with no fall;
+- **approach stances** (`stance_via: approach`, INTERIM off): 0.20 m from the furniture on a straight segment, not
+  A*'s 0.25 m inflated space. Live, the body stood 0.15-0.20 m from a counter 15/15 with no fall;
 - **approach_max_m 0.60**: the body approach's `max_dist`;
 - **beyond_reach** compares against the arm's real horizontal reach at the object's height.
 
@@ -170,7 +180,7 @@ clearance) succeeded 8 of 8, with the body's final error 1.6-6.1 cm. A deep-stre
 
 | Scenario | Decision | Evidence |
 |---|---|---|
-| `fetch_search`, `question_midtask` (E-1 blockers) | **Rebound** to `dish_sponge_1` (bathroom sink, H15; the only sponge; reachable after one reach stance), `status: substituted`, THOR's apple under `original` | The apple is `beyond_reach`: 0.64 m from any spot the pelvis can stand vs 0.50 m reach at its grasp height (`tests/eval/test_scenes.py`) |
+| `fetch_search`, `question_midtask` (E-1 blockers) | **Rebound** to `dish_sponge_1` (bathroom sink, H15; the only sponge; reachable after one reach stance on the lite world, and on Isaac with the 0.20 m approach stance), `status: substituted`, THOR's apple under `original` | The apple is `beyond_reach`: 0.64 m from any spot the pelvis can stand vs 0.50 m reach at its grasp height (`tests/eval/test_scenes.py`) |
 | `addition` | Kept (mug); flagged `mugs_out_of_the_calibrated_arm`; `g1_alternative`: wine_bottle_1 | With the calibrated arm neither mug is in one reposition's reach. The wine bottle is (tested). The CD next to the alarm clock is not rendered (§6) |
 | `other_side` | Kept (spatula); `status: flagged` `spatula_beyond_reach`; `g1_alternative`: bowl_1 from counter_2c to counter_2a | The spatula is 0.70 m from any stance vs 0.49 m reach, and 0.30 m long across the counter (unplaceable near 2a's edge). The bowl goes round the stove (tested) |
 

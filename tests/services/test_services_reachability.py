@@ -181,17 +181,20 @@ def test_needs_reposition_stance_is_free_and_close():
     run(main())
 
 
-def _g1_arm(s):
+def _g1_arm(s, **over):
     """The calibrated G1 arm of config/g1.yaml (what an Isaac world uses), on this lite stack."""
     ws = {k: v for k, v in s.robot.stack_profile.g1["workspace"].items() if k != "lite_world"}
-    return ReachabilityModel(s.world, G1Workspace.from_dict(ws), registry=s.robot.skill_registry,
+    return ReachabilityModel(s.world, G1Workspace.from_dict({**ws, **over}), registry=s.robot.skill_registry,
                              observation=s.robot.obs, nav=s.robot.nav)
+
+
+APPROACH = {"stance_via": "approach", "stance_clearance_m": 0.20}      # R.7's validated reach stance
 
 
 def test_the_lite_world_gets_the_interim_arm_and_an_isaac_world_the_calibrated_one():
     s = Stack()
     ws = G1Workspace.from_dict(s.robot.stack_profile.g1["workspace"])
-    assert ws.arm_reach_m < 0.45 and ws.stance_via == "approach" and ws.lite_world
+    assert ws.arm_reach_m < 0.45 and ws.stance_via == "go_to" and ws.lite_world
     lite = ws.for_world(s.world)
     assert lite.arm_reach_m == 0.65 and lite.stance_via == "go_to" and lite.obj_z_min_m == 0.55 and not lite.lite_world
 
@@ -224,7 +227,7 @@ def test_calibrated_stance_is_an_approach_stance_close_to_the_furniture():
     """The calibrated arm's reach stance: the pelvis stance_clearance_m (0.20) from the furniture on a straight
     segment from here (the body's approach), within approach_max_m, the object inside the sphere with margin."""
     s = Stack(house="procthor-train-40")
-    m = _g1_arm(s)
+    m = _g1_arm(s, **APPROACH)
 
     async def main():
         await _scan_at(s, "bedroom_dresser_1b")
@@ -245,7 +248,7 @@ def test_calibrated_stance_is_an_approach_stance_close_to_the_furniture():
 
 def test_beyond_reach_says_how_far_the_arm_reaches():
     s = Stack(house="procthor-train-15")
-    m = _g1_arm(s)
+    m = _g1_arm(s, **APPROACH)
 
     async def main():
         await _scan_at(s, "kitchen_counter_1b")

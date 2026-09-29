@@ -20,7 +20,7 @@ Checks, in THOR's order (thor/robot.py:434-459) so prompts and eval semantics ca
          reaches it, else out_of_workspace
        - neither, and no spot the robot can stand on (stance_clearance_m from every obstacle) lies within the arm's
          horizontal reach of the object -> beyond_reach (+ detail): no stand, stance or reposition can help (H15's
-         apple, 0.44 m deep on a 0.59 m counter, 15 cm from the wall, is 0.63 m from any such spot vs about 0.5 m)
+         apple, 0.44 m deep on a 0.59 m counter, 15 cm from the wall, is 0.64 m from any such spot vs 0.50 m)
   8. hand_full            max_held (1) objects already held
   9. no_skill             no loaded skill handles pick of this type (with the preferred arm)
 
@@ -326,7 +326,8 @@ class ReachabilityModel:
             cb, sb = math.cos(beta), math.sin(beta)
             for f, l in cands:
                 r = math.hypot(f, l)
-                sx, sy = obj_xy[0] - r * cb, obj_xy[1] - r * sb
+                # rounded as the stance is handed on, so navigation's check sees the point judged here (5 cm grid)
+                sx, sy = round(obj_xy[0] - r * cb, 3), round(obj_xy[1] - r * sb, 3)
                 d = math.hypot(sx - p.x, sy - p.y)
                 if d > ws.approach_max_m + 1e-9:
                     continue
