@@ -179,7 +179,7 @@ def decode_planner(msg: bytes) -> dict:
         "speed": float(f["speed"][0]) if "speed" in f else -1.0,
         "height": float(f["height"][0]) if "height" in f else -1.0,
     }
-    for k in ("upper_body_position", "left_hand_joints", "right_hand_joints"):
+    for k in ("upper_body_position", "upper_body_velocity", "left_hand_joints", "right_hand_joints"):
         if k in f:
             out[k] = [float(x) for x in f[k]]
     return out

@@ -101,6 +101,15 @@ class BodyConfig:
     vel_deadband: float = 0.05          # |v| below this: no translation (turn in place / stand)
     vel_wz_deadband: float = 0.02
     facing_lead_max_deg: float = 25.0   # facing setpoint (integrated wz) stays within this of the GT yaw
+    # arm channel (op `arm`, body/arm.py; measured in docs/arm_tracking.md)
+    arm_watchdog_s: float = 0.30        # no message for this long -> hold the last pose
+    arm_hold_s: float = 1.0             # ... for this long, then blend back to SONIC's own arms
+    arm_blend_s: float = 1.5
+    arm_max_vel: float = 6.0            # slew limit on the sent targets [rad/s]
+    arm_servo_ki: float = 2.0           # integral outer loop on measured arm joints [1/s]; 0 = off. ki 2 took static
+                                        # palm errors from 17-75 mm to 2-23 mm; ki 4 was no better and tilted more
+    arm_servo_delay_s: float = 0.15     # error vs the target this long ago (SONIC's lag), so the loop ignores lag
+    arm_servo_max: float = 0.4          # |correction| per joint [rad]
 
     @property
     def ports(self) -> dict:

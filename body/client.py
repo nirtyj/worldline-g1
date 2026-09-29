@@ -263,8 +263,14 @@ class BodyClient:
             args["tol_deg"] = tol_deg
         return self.run("turn_to", args, wait, timeout)
 
-    def stop(self, wait: bool = True, timeout: float = 10.0) -> OpHandle:
-        return self.run("stop", {}, wait, timeout)
+    def stop(self, wait: bool = True, timeout: float = 10.0, arms: bool = False) -> OpHandle:
+        """Planner IDLE (legs). arms=True also ends an active arm stream (blend back to SONIC's own arms)."""
+        return self.run("stop", {"arms": True} if arms else {}, wait, timeout)
+
+    def arm_stream(self, stream: str | None = None, **defaults) -> "ArmStream":
+        """Stream arm/hand joint targets into SONIC (op `arm`, body/arm.py). defaults (watchdog_s, hold_s,
+        blend_s, max_vel, waist, vel, preempt) are sent with the first message."""
+        return ArmStream(self, stream or f"arm-{uuid.uuid4().hex[:8]}", defaults)
 
     # -- queries --------------------------------------------------------------------------------
     def status(self, op_id: str | None = None) -> dict:
@@ -305,3 +311,63 @@ class BodyClient:
         if not imgs:
             return ts, None
         return ts, imgs.get(name, next(iter(imgs.values())))
+
+
+class ArmStream:
+    """Client side of the `arm` op. Send targets at up to 50 Hz; stop sending (watchdog 0.3 s -> hold -> blend) or
+    call end() to give the arms back to SONIC.
+
+        with BodyClient() as bc:
+            arm = bc.arm_stream()
+            arm.send(upper_body={"right_elbow_joint": 1.2}, right_hand=0.0)   # dict by joint name, or a 17-list
+            ...                                                                 # (joint_map.UPPER_BODY_MUJOCO_JOINTS)
+            arm.end(); arm.handle.wait(5)                                       # succeeded once blended back
+
+    `handle` is the op's OpHandle (accepted -> progress -> succeeded | canceled | failed). Updates only get a reply.
+    """
+
+    def __init__(self, client: BodyClient, stream: str, defaults: dict):
+        self.client = client
+        self.stream = stream
+        self.defaults = defaults
+        self.handle: OpHandle | None = None
+        self.last_reply: dict | None = None
+        self.sent = 0
+        self.rejected = 0
+
+    def send(self, upper_body=None, left_hand=None, right_hand=None, upper_body_vel=None, **kw) -> dict:
+        args = {"stream": self.stream, "t_wall": time.time(), **kw}
+        for k, v in (("upper_body", upper_body), ("left_hand", left_hand), ("right_hand", right_hand),
+                     ("upper_body_vel", upper_body_vel)):
+            if v is not None:
+                args[k] = _plain(v)
+        if self.handle is None or self.handle.done():
+            args = {**self.defaults, **args}
+            op_id = f"arm-{uuid.uuid4().hex[:8]}"
+            h = OpHandle(self.client, op_id, "arm", {k: v for k, v in args.items() if not isinstance(v, (list, dict))})
+            self.client._handles[op_id] = h
+            rep = self.client.request("arm", args, op_id=op_id)
+            h.reply = rep
+            if rep.get("ok"):
+                self.handle = h
+            elif not h.done():
+                h._on_event({"id": op_id, "op": "arm", "state": "failed",
+                             "data": {"reason": rep.get("error"), **(rep.get("data") or {})}, "via": "reply"})
+        else:
+            rep = self.client.request("arm", args)
+        self.sent += 1
+        if not rep.get("ok"):
+            self.rejected += 1
+        self.last_reply = rep
+        return rep
+
+    def end(self) -> dict:
+        return self.client.request("arm", {"stream": self.stream, "end": True})
+
+
+def _plain(v):
+    if isinstance(v, dict):
+        return {str(k): float(x) for k, x in v.items()}
+    if isinstance(v, (int, float)):
+        return float(v)
+    return [float(x) for x in v]

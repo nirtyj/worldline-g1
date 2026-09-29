@@ -1,8 +1,8 @@
 """wl-body service (P3): ROUTER 5610 (commands) / PUB 5611 (events + state), 50 Hz control loop.
 
 Request  (DEALER or REQ -> ROUTER 5610, one JSON frame):
-    {"id": "<client id, optional>", "op": "stand|walk|go_to|turn_to|stop|status|ping|reload_map|clear_fault|
-                                          shutdown_control", "args": {...}}
+    {"id": "<client id, optional>", "op": "stand|walk|go_to|turn_to|velocity|arm|stop|status|ping|reload_map|
+                                          clear_fault|shutdown_control", "args": {...}}
 Reply    (same envelope back): {"id", "ok": bool, "state": "accepted|rejected|failed|done", "error"?: str, "data"?: {}}
 Events   (PUB 5611, multipart [b"body.event", JSON]):
     {"id", "op", "state": "accepted|progress|succeeded|failed|canceled", "data": {...}, "seq", "t_wall"}
@@ -13,6 +13,8 @@ reason "preempted"); stop cancels (reason "stop") and runs a StopMotion (planner
 Watchdogs: gt.pose stale > pose_stale_s, g1_debug stale > debug_stale_s, op timeout, fall (gt fallen or pelvis_z below
 band) -> the op fails, the mux holds IDLE, and after a fall the service latches fault="fallen" (clear_fault after a
 P1 reset). The mux itself holds IDLE if this loop stalls for > cmd_stale_s. A user stop never sends command{stop}.
+The arm channel (op `arm`, body/arm.py) is separate from the one active motion: it overlays upper-body and hand
+targets on every planner message, so it composes with any leg motion; `stop {arms: true}` also ends it.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import uuid
 
 import zmq
 
+from .arm import ArmChannel, ArmError
 from .config import BodyConfig, ep
 from .deploy_monitor import DeployMonitor
 from .frames import PlannerFrame
@@ -93,6 +96,7 @@ class BodyService:
         self.pose_sub = PoseSub(ep(P["p1_pose"], cfg.host), ctx=self.ctx)
         self.deploy = DeployMonitor(ep(P["sonic_debug"], cfg.host), ctx=self.ctx, on_debug=self._on_debug)
         self.mctx = MotionCtx(self)
+        self.arm = ArmChannel(cfg, self.mux, self.deploy, self.emit, log=self.log, record=self._record)
         self.active: Motion | None = None
         self.ops: collections.OrderedDict[str, dict] = collections.OrderedDict()
         self.fault: str | None = None
@@ -214,6 +218,13 @@ class BodyService:
             self._cancel_active("shutdown")
             self.mux.shutdown_control()
             return {"ok": True, "state": "done", "data": {"mux": self.mux.snapshot()}}
+        if op == "arm":
+            try:
+                return self.arm.handle(op_id, args, self._arm_can_start())
+            except ArmError as e:
+                return {"ok": False, "state": "rejected", "error": e.reason, "data": e.data}
+        if op == "stop" and args.get("arms"):
+            self.arm.end("stop")
         if op == "velocity":
             rep = route_velocity(self, args)   # stream updates (and Nav2 /cmd_vel) never start a new op
             if rep is not None:
@@ -221,6 +232,13 @@ class BodyService:
         if op not in ALL_MOTIONS:
             return {"ok": False, "state": "rejected", "error": f"unknown op {op!r}"}
         return self._start_motion(op_id, op, args)
+
+    def _arm_can_start(self) -> tuple[bool, str | None, dict]:
+        if self.fault:
+            return False, f"fault:{self.fault}", {"hint": "reset the robot in P1, then clear_fault"}
+        if not (self.mux.control_started and self.deploy.in_control()):
+            return False, "not_standing", {"hint": "call stand first", "deploy": self.deploy.snapshot()}
+        return True, None, {}
 
     def _record(self, op_id: str, op: str, args: dict) -> None:
         self.ops[op_id] = {"id": op_id, "op": op, "args": args, "state": "received", "t_start": time.time(),
@@ -304,6 +322,12 @@ class BodyService:
                     self._finish("failed", {"reason": "fallen", "pose": pose.brief(), **_safe(m, pose)})
                     m = None
                 self.mux.hold(pose.yaw, owner="fall")
+                self.arm.abort("fallen")
+        try:
+            self.arm.tick(now)
+        except Exception:
+            self.log(f"[arm] tick crashed: {traceback.format_exc()}")
+            self.arm.abort("internal")
         if m is None:
             self._learn_bias(pose, age)
             return
@@ -374,6 +398,7 @@ class BodyService:
             "mux": self.mux.snapshot(),
             "nav": self.nav_info,
             "nav_backend": self.cfg.nav_backend,
+            "arm": self.arm.snapshot(),
             "tick": self.tick_stats,
             "ports": self.cfg.ports,
         }
@@ -439,6 +464,7 @@ class BodyService:
         self.log("[body] shutting down (planner IDLE hold; command{stop} is NOT sent)")
         if self.active is not None:
             self._cancel_active("service_shutdown")
+        self.arm.abort("service_shutdown")
         p = self.pose_sub.latest()
         self.mux.hold(p.yaw if p else self.mux.last_facing_w, owner="shutdown")
         time.sleep(0.1)

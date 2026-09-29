@@ -37,11 +37,16 @@ import msgpack
 import numpy as np
 import zmq
 
+from body import joint_map as jm
 from body.config import ep, ports as _ports
 from body.wire import (LocomotionMode, decode_command, decode_planner, quat_wxyz_from_yaw, split_topic, wrap,
                        yaw_from_quat_wxyz)
 
 MODE_DEFAULT_SPEED = {1: 0.4, 2: 1.2, 3: 2.5}
+# SONIC's IDLE reference (g1_debug body_q_target, MuJoCo order) as measured on the M1 stack 2026-09-29
+REF_Q29 = (0.07, 0.078, 0.159, 0.146, -0.176, -0.111, 0.101, -0.08, -0.356, 0.074, -0.124, 0.062,
+           0.008, 0.02, 0.146, -0.03, 0.273, -0.612, 1.017, 0.053, 0.054, 0.013,
+           -0.013, -0.266, 0.667, 1.023, -0.055, 0.194, -0.136)
 
 
 class FakeDeploy:
@@ -69,6 +74,18 @@ class FakeDeploy:
         self.modes_seen = collections.Counter()
         self.planner_times: collections.deque[float] = collections.deque(maxlen=500)
         self.command_log: list[dict] = []
+        # upper-body override model (zmq_manager.hpp:581-628 semantics; body/arm.py): the arms follow the override
+        # with a first-order lag, else SONIC's IDLE reference arms (REF_Q29, as measured on the M1 stack)
+        self.ref_q29 = list(REF_Q29)
+        self.body_q = list(REF_Q29)
+        self.has_upper = False
+        self.has_hands = False
+        self.upper: list[float] | None = None
+        self.hands = {"left": list(jm.DEX3_DEPLOY_DEFAULT_LEFT), "right": list(jm.DEX3_DEPLOY_DEFAULT_RIGHT)}
+        self.hand_q = {"left": list(jm.DEX3_DEPLOY_DEFAULT_LEFT), "right": list(jm.DEX3_DEPLOY_DEFAULT_RIGHT)}
+        self.upper_log: collections.deque = collections.deque(maxlen=3000)   # (t_mono, mode, upper17|None, hands?)
+        self.tau_arm = 0.08
+        self.arm_bias = [0.0] * 29          # tests: a steady-state tracking error, like SONIC's (docs/arm_tracking.md)
         self._running = False
         self._thread: threading.Thread | None = None
 
@@ -194,6 +211,16 @@ class FakeDeploy:
                 self.planner = p
                 self.planner_mono = time.monotonic()
                 self.modes_seen[p["mode"]] += 1
+                # every consumed planner message re-evaluates the override (zmq_manager.hpp:581-596)
+                self.has_upper = "upper_body_position" in p
+                self.has_hands = "left_hand_joints" in p or "right_hand_joints" in p
+                if self.has_upper:
+                    self.upper = p["upper_body_position"]
+                for side in ("left", "right"):
+                    if f"{side}_hand_joints" in p:
+                        self.hands[side] = p[f"{side}_hand_joints"]
+                self.upper_log.append((self.planner_mono, p["mode"], p.get("upper_body_position"),
+                                       self.has_hands))
 
     def _enter_control(self) -> None:
         self.start_pending = False
@@ -211,6 +238,7 @@ class FakeDeploy:
             if p is not None:
                 self.stats["planner_timeouts"] += 1
                 self.planner = None
+                self.has_upper = self.has_hands = False    # zmq_manager.hpp:618-628
             mode, move_p, facing_p, speed = LocomotionMode.IDLE, (0.0, 0.0), None, -1.0
         else:
             mode, move_p, facing_p, speed = p["mode"], p["movement"][:2], p["facing"][:2], p["speed"]
@@ -230,6 +258,13 @@ class FakeDeploy:
         self.wz = max(-self.max_wz, min(self.max_wz, 2.5 * err))
         if np.linalg.norm(self.v) > 0.05 or abs(self.wz) > 0.2:
             self.phase += 2 * math.pi * 1.8 * dt
+        tgt = jm.mujoco_from_upper(self.upper, self.ref_q29) if (self.has_upper and self.upper) else self.ref_q29
+        a = min(1.0, dt / self.tau_arm)
+        for i in range(12, 29):
+            self.body_q[i] += (tgt[i] + self.arm_bias[i] - self.body_q[i]) * a
+        for side, dflt in (("left", jm.DEX3_DEPLOY_DEFAULT_LEFT), ("right", jm.DEX3_DEPLOY_DEFAULT_RIGHT)):
+            ht = self.hands[side] if self.has_hands else dflt
+            self.hand_q[side] = [q + (t - q) * min(1.0, dt / 0.15) for q, t in zip(self.hand_q[side], ht)]
 
     def _debug_msg(self) -> dict:
         self.index += 1
@@ -241,7 +276,9 @@ class FakeDeploy:
                     for i in range(12)]
         d = {"control_loop_type": "fake", "index": self.index, "ros_timestamp": 0.0,
              "base_quat": quat_wxyz_from_yaw(yaw), "base_ang_vel": [0.0, 0.0, self.wz],
-             "body_q": [0.0] * 29, "last_action": legs + [0.0] * 17, "token_state": [0.0] * 64,
+             "body_q": list(self.body_q), "body_q_target": list(self.ref_q29),
+             "left_hand_q": list(self.hand_q["left"]), "right_hand_q": list(self.hand_q["right"]),
+             "last_action": legs + list(self.body_q[12:29]), "token_state": [0.0] * 64,
              "base_trans_target": [0.0, 0.0, 0.78]}
         if self.state == "CONTROL" and self.theta0 is not None:
             d["init_base_quat"] = quat_wxyz_from_yaw(self.theta0)

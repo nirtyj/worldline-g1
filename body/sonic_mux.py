@@ -17,6 +17,13 @@ Semantics honoured (WBC @b042411):
 - command{stop:1} makes the deploy exit through Stop() -> CreateDampingCommand() (kp=0, kd=8) and the robot
   collapses (g1_deploy_onnx_ref.cpp:2718-2745, main loop :4513-4530). So it is ONLY used by shutdown_control()
   (m1_down.sh, after P1's band is on). A user stop is planner IDLE (hold()).
+- Upper-body overlay (body/arm.py): while set_upper() is active every planner message also carries
+  upper_body_position[17] + upper_body_velocity[17] (wire order, body/joint_map.py) and, if given,
+  left/right_hand_joints[7] (zmq_manager.hpp:885-980). The deploy re-evaluates the override on every consumed
+  message (:581-596), so the overlay is independent of the planner command: motions keep the legs, the arm channel
+  the arms. The overlay is NOT subject to the stale-command watchdog above: if the control loop stalls the arms keep
+  their last target (the arm channel's own watchdog runs in that loop); if this process dies the deploy's 1 s
+  planner timeout drops the override (:618-628).
 """
 
 from __future__ import annotations
@@ -69,12 +76,15 @@ class SonicMux:
         self._running = False
         self._thread: threading.Thread | None = None
         self._last_sent: dict | None = None          # planner-frame values last sent
+        self._upper: tuple | None = None             # (pos17, vel17, left7|None, right7|None), wire order
+        self._upper_t = 0.0
         self._last_facing_w: float | None = None
         self.control_started = False
         self.control_stopped = False
         self.t_start_sent: float | None = None
         self.stats = {"planner_sent": 0, "command_start_sent": 0, "command_stop_sent": 0, "stale_holds": 0,
-                      "frame_unknown_holds": 0, "replan_changes": 0, "by_mode": collections.Counter()}
+                      "frame_unknown_holds": 0, "replan_changes": 0, "upper_sent": 0, "hands_sent": 0,
+                      "by_mode": collections.Counter()}
         self._rate_ts: collections.deque[float] = collections.deque(maxlen=200)
         self.changes: collections.deque[dict] = collections.deque(maxlen=5000)  # command changes (evidence)
         self._cmd_log = open(cmd_log_path, "a", buffering=1) if cmd_log_path else None
@@ -110,6 +120,28 @@ class SonicMux:
         with self._lock:
             self._cmd = cmd
             self._cmd_t = time.monotonic()
+
+    def set_upper(self, pos17, vel17=None, left7=None, right7=None) -> None:
+        """Overlay the upper-body/hand override on every planner message from now on (wire order, see joint_map)."""
+        if len(pos17) != 17 or (vel17 is not None and len(vel17) != 17):
+            raise ValueError("upper body vectors must have 17 values")
+        for h in (left7, right7):
+            if h is not None and len(h) != 7:
+                raise ValueError("hand vectors must have 7 values")
+        ov = (tuple(float(v) for v in pos17), tuple(float(v) for v in (vel17 if vel17 is not None else [0.0] * 17)),
+              None if left7 is None else tuple(float(v) for v in left7),
+              None if right7 is None else tuple(float(v) for v in right7))
+        with self._lock:
+            self._upper = ov
+            self._upper_t = time.monotonic()
+
+    def clear_upper(self) -> None:
+        with self._lock:
+            self._upper = None
+
+    def upper(self) -> tuple | None:
+        with self._lock:
+            return self._upper
 
     def hold(self, facing_w: float | None = None, owner: str = "") -> None:
         self.set(PlannerCmd(LocomotionMode.IDLE, (0.0, 0.0), facing_w, -1.0, -1.0, owner))
@@ -163,6 +195,8 @@ class SonicMux:
             "control_stopped": self.control_stopped,
             "rate_hz": round(self.rate_hz(), 2),
             "cmd": None if cmd is None else {**asdict(cmd), "age_s": round(time.monotonic() - t, 3)},
+            "upper": None if self._upper is None else {"age_s": round(time.monotonic() - self._upper_t, 3),
+                                                       "hands": [self._upper[2] is not None, self._upper[3] is not None]},
             "last_sent": self._last_sent,
             "stats": {**{k: v for k, v in self.stats.items() if k != "by_mode"},
                       "by_mode": {LocomotionMode.NAMES.get(k, str(k)): v for k, v in self.stats["by_mode"].items()}},
@@ -212,7 +246,17 @@ class SonicMux:
                 movement = (0.0, 0.0, 0.0)
                 speed = -1.0  # static modes force -1 anyway (zmq_manager.hpp:607-609)
         facing, movement, speed, changed = self._deadband(mode, facing, movement, speed)
-        msg = build_planner_message(mode, movement, facing, speed, float(cmd.height))
+        with self._lock:
+            ov = self._upper
+        if ov is None:
+            msg = build_planner_message(mode, movement, facing, speed, float(cmd.height))
+        else:
+            msg = build_planner_message(mode, movement, facing, speed, float(cmd.height),
+                                        upper_body_position=ov[0], upper_body_velocity=ov[1],
+                                        left_hand_position=ov[2], right_hand_position=ov[3])
+            self.stats["upper_sent"] += 1
+            if ov[2] is not None or ov[3] is not None:
+                self.stats["hands_sent"] += 1
         sent = {"mode": mode, "movement": [round(v, 5) for v in movement], "facing": [round(v, 5) for v in facing],
                 "speed": round(speed, 4), "owner": cmd.owner}
         if changed:
