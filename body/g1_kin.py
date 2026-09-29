@@ -110,13 +110,14 @@ def points(q_named: dict, frame: str = "pelvis") -> dict[str, np.ndarray]:
 
 def ik_palm(side: str, target_xyz: Sequence[float], q_seed: dict, q_rest: dict | None = None,
             palm_dir: Sequence[float] | None = None, w_dir: float = 0.05, w_rest: float = 0.02,
-            iters: int = 200, tol: float = 2e-3, margin: float = 0.05) -> tuple[dict, float]:
+            iters: int = 200, tol: float = 2e-3, margin: float = 0.05, lock: Sequence[str] = ()) -> tuple[dict, float]:
     """Damped-least-squares IK for the palm position (pelvis frame) over the 7 arm joints; waist fixed at q_seed.
 
     palm_dir: optional desired direction of the palm's +z axis (the fingers close towards palm -z on Dex3; used
     softly with weight w_dir). q_rest: posture the null space is pulled to (weight w_rest). Joint limits are
-    enforced with `margin`. Returns (q_named, final position error in m)."""
-    joints = ARM_CHAIN[side]
+    enforced with `margin`. lock: arm joints held at their q_seed value (e.g. the wrist pitch, which SONIC barely
+    tracks: docs/arm_tracking.md §3.2). Returns (q_named, final position error in m)."""
+    joints = tuple(j for j in ARM_CHAIN[side] if j not in lock)
     q = dict(q_seed)
     rest = q_rest or q_seed
     tgt = np.asarray(target_xyz, float)

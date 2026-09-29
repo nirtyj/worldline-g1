@@ -124,7 +124,9 @@ def test_arm_stream_mapping_watchdog_blend(stack):
     assert _wait(lambda: bc.status()["arm"]["state"] == "blend", 1.5)
     arm.handle.wait(5)
     t_done = time.monotonic() - t_stop
-    assert arm.handle.state == "succeeded" and arm.handle.result["ended_by"] == "watchdog"
+    # a silent client is a failure, not a success (G0 verifier defect): failed, reason client_silent
+    assert arm.handle.state == "failed" and arm.handle.result["ended_by"] == "watchdog"
+    assert arm.handle.result["reason"] == "client_silent"
     assert 0.3 + 0.4 + 0.5 - 0.1 <= t_done <= 2.5
     assert _wait(lambda: not dep.has_upper and not dep.has_hands, 1.0)
     # the last override before release equals SONIC's reference (seamless hand-back)
@@ -187,13 +189,25 @@ def test_arm_ownership_preempt_end_and_walk(stack):
     assert h.ok, h.result
     assert _wait(lambda: not dep.has_upper, 1.0)
 
-    # stop {arms: true} ends a stream too (canceled, after the blend)
+    # stop {arms: true} ends a stream too (canceled, after the blend), and it sticks (G0 defect D1): the owner's
+    # further messages are rejected arm_stopped during and after the blend, until restart: true
     c = bc.arm_stream(stream="C", blend_s=0.3, servo_ki=0.0)
     assert _stream(c, 0.3, upper_body={"left_elbow_joint": 1.0})["ok"]
     assert bc.stop(arms=True).ok
+    rep = c.send(upper_body={"left_elbow_joint": 1.0})
+    assert not rep["ok"] and rep["error"] == "arm_stopped", rep
     c.handle.wait(3)
     assert c.handle.state == "canceled" and c.handle.result["reason"] == "stop"
     assert _wait(lambda: not dep.has_upper, 1.0)
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 0.5:                  # the owner keeps streaming: nothing reaches the deploy
+        assert c.send(upper_body={"left_elbow_joint": 1.0})["error"] == "arm_stopped"
+        time.sleep(0.02)
+    assert not dep.has_upper and bc.status()["arm"]["state"] == "off"
+    rep = c.send(upper_body={"left_elbow_joint": 0.9}, restart=True)
+    assert rep["ok"] and rep["state"] == "accepted", rep
+    assert c.end()["ok"]
+    c.handle.wait(3)
 
 
 def test_arm_slew_limit_and_stale(stack):
@@ -207,6 +221,15 @@ def test_arm_slew_limit_and_stale(stack):
     # 1 rad step at 2 rad/s: after ~0.1 s only ~0.2-0.3 rad of it has been sent
     moved = _named_from_wire(dep.upper)["right_elbow_joint"] - ref_elbow
     assert 0.02 < moved < 0.45
+    # the limit holds whatever the message rate (G0 verifier: it was ~2x max_vel when messages came at 50 Hz, because
+    # every message advanced the limiter too): stream at 100 Hz, the far side moves at <= 2 rad/s
+    t_s = time.monotonic()
+    x_s = _named_from_wire(dep.upper)["right_elbow_joint"]
+    while time.monotonic() - t_s < 0.2:
+        a.send(upper_body={"right_elbow_joint": ref_elbow + 1.0})
+        time.sleep(0.01)
+    rate = (_named_from_wire(dep.upper)["right_elbow_joint"] - x_s) / (time.monotonic() - t_s)
+    assert 1.2 < rate < 2.0 * 1.25, rate
     _stream(a, 0.6, upper_body={"right_elbow_joint": ref_elbow + 1.0})
     assert _named_from_wire(dep.upper)["right_elbow_joint"] == pytest.approx(ref_elbow + 1.0, abs=1e-4)
     assert bc.status()["arm"]["stats"]["slew_limited_ticks"] > 5
