@@ -47,11 +47,13 @@ H40, H15, K10 = BIND.scene("H40"), BIND.scene("H15"), BIND.scene("K10")
 class Run:
     """One websocket session and everything it has seen."""
 
-    def __init__(self, ws: Any, profile: str = "lite", scale: float | None = None, original: bool = False) -> None:
+    def __init__(self, ws: Any, profile: str = "lite", scale: float | None = None, original: bool = False,
+                 g1_alternative: bool | None = None) -> None:
         self.ws = ws
         self.profile = profile
         self.scale = scale
         self.original = original
+        self.g1_alternative = g1_alternative           # None: scenes.yaml's g1_alternative on the G1 profiles only
         self.init: dict[str, Any] | None = None
         self.frame: dict[str, Any] | None = None
         self.trace: list[dict[str, Any]] = []
@@ -112,10 +114,15 @@ class Run:
             await asyncio.sleep(0.3)
         return False
 
-    # -- time ----------------------------------------------------------
+    # -- binding and time ----------------------------------------------
+    def binding(self, name: str | None = None) -> tuple[str, dict[str, Any]]:
+        """(which, scenario) as this run plays it (eval/scenes.py Bindings.binding)."""
+        return BIND.binding(name or self.current, self.profile, self.original, self.g1_alternative)
+
     def limit(self, name: str | None = None) -> float:
         """This scenario's time limit on this profile (THOR limit x time scale, >= 2 x humanoid estimate)."""
-        return BIND.time_limit(name or self.current, self.profile, self.scale)[0]
+        name = name or self.current
+        return BIND.time_limit(name, self.profile, self.scale, self.binding(name)[1])[0]
 
     def wait(self, seconds: float) -> float:
         """A body-dependent wait inside a script, scaled like the limits."""
@@ -209,11 +216,11 @@ class Run:
     async def begin(self, name: str) -> None:
         """Load the scenario's house and assert its fixtures on world truth."""
         self.current = name
-        b = BIND.scenario(name)
+        b = self.binding(name)[1]
         house = b["house"]
         await self.load(BIND.scene(house), forget=bool(b.get("forget")))
         need = [x for x in [b.get("target"), b.get("object")] if x] + list(b.get("distractors") or [])
-        need += BIND.second_request(name, self.original)[1] if b.get("status") == "substituted" or b.get("original") else []
+        need += list(b.get("second") or [])
         ok, notes = sc.check_fixtures(BIND, house, (self.init or {}).get("layout") or {},
                                       (self.frame or {}).get("truth") or {}, need)
         self.fixtures = {"fixtures_ok": ok, "fixture_notes": notes}
@@ -228,8 +235,8 @@ class FixtureError(RuntimeError):
 # ----------------------------------------------------------------------
 # Scenarios. Each returns (passed, note).
 # ----------------------------------------------------------------------
-async def fetch(r: Run, oid: str, label: str, timeout: float | None = None) -> tuple[bool, str]:
-    await r.say(f"Bring me the {label}.")
+async def fetch(r: Run, oid: str, label: str, timeout: float | None = None, say: str | None = None) -> tuple[bool, str]:
+    await r.say(say or f"Bring me the {label}.")
     ok = await r.until(lambda: r.where(oid) == r.user_surface and r.idle(), timeout or r.limit())
     return ok, f"{oid} ended on {r.where(oid)}"
 
@@ -240,8 +247,10 @@ async def fetch_other_room(r: Run) -> tuple[bool, str]:
 
 
 async def fetch_search(r: Run) -> tuple[bool, str]:
+    """H15's apple is beyond a G1's reach (R.7), so scenes.yaml fetches the dish sponge; --original: the apple."""
     await r.begin("fetch_search")
-    return await fetch(r, "apple_1", "apple")
+    oid, label, say = BIND.fetch_target("fetch_search", r.original)
+    return await fetch(r, oid, label, say=say)
 
 
 async def correction(r: Run) -> tuple[bool, str]:
@@ -287,13 +296,14 @@ async def recall_history(r: Run) -> tuple[bool, str]:
 
 async def question_midtask(r: Run) -> tuple[bool, str]:
     await r.begin("question_midtask")
-    await r.say("Bring me the apple.")
+    oid, _, say = BIND.fetch_target("question_midtask", r.original)
+    await r.say(say)
     await r.until(lambda: r.started("navigate"), r.wait(40))
     t0 = r.now()
     await r.say("What are you holding right now?")
     answered = await r.until(lambda: any(st >= t0 for st, _ in r.said), 20)
-    ok = await r.until(lambda: r.where("apple_1") == r.user_surface and r.idle(), r.limit())
-    return ok and answered, f"answered={answered}, delivered={ok}"
+    ok = await r.until(lambda: r.where(oid) == r.user_surface and r.idle(), r.limit())
+    return ok and answered, f"answered={answered}, delivered={ok} ({oid} on {r.where(oid)})"
 
 
 async def note_only(r: Run) -> tuple[bool, str]:
@@ -376,9 +386,11 @@ async def replace_task(r: Run) -> tuple[bool, str]:
 
 async def addition(r: Run) -> tuple[bool, str]:
     """Two deliveries: the second request arrives while the first runs. On H40 the THOR text asked for a book;
-    both books are unreachable static prims there, so scenes.yaml substitutes a mug (see its note)."""
+    both books are unreachable static prims there, so scenes.yaml substitutes a mug (see its note); no G1 stance
+    reaches either mug (R.7), so its g1_alternative asks for the wine bottle."""
     await r.begin("addition")
-    then, second = BIND.second_request("addition", r.original)
+    b = r.binding("addition")[1]
+    then, second = b.get("then"), list(b.get("second") or [])
     await r.say("Bring me the alarm clock.")
     await r.until(lambda: r.started("navigate"), r.wait(40))
     await r.say(then)
@@ -445,8 +457,11 @@ async def permission_yes(r: Run) -> tuple[bool, str]:
 async def other_side(r: Run) -> tuple[bool, str]:
     """"The other side of the stove" needs to know what the stove sits between. In MolmoSpaces Kitchen 10 the
     spatula starts on counter_2b, the stove is next along the wall, then counter_2a (scenes.yaml has why this
-    differs from THOR's counter_1a / counter_2). Both surfaces are also resolved from the live map and truth."""
-    b = BIND.scenario("other_side")
+    differs from THOR's counter_1a / counter_2). Both surfaces are also resolved from the live map and truth.
+    The spatula is beyond a G1's reach (R.7); scenes.yaml's g1_alternative moves bowl_1 from counter_2c, one stretch
+    further from the stove, to counter_2a. Either way the golden line names the stove's two neighbours."""
+    base = BIND.scenario("other_side")
+    b = r.binding("other_side")[1]
     await r.begin("other_side")
     n0 = max(r.calls or {0: None})
     lay = (r.init or {}).get("layout") or {}
@@ -461,7 +476,8 @@ async def other_side(r: Run) -> tuple[bool, str]:
     await r.say(b["say"])
     ok = await r.until(lambda: r.where(b["object"]) == target and r.idle(), r.limit())
     inputs = [str(c.get("input") or "") for n, c in r.calls.items() if n > n0 and c.get("via") == "model"]
-    golden = sc.golden_lines(b["landmark"], start or b["start_surface"], target)
+    near = start if b["start_surface"] == base["start_surface"] else base["start_surface"]   # the stove's near neighbour
+    golden = sc.golden_lines(b["landmark"], near or base["start_surface"], target)
     knew = any(g in i for i in inputs for g in golden)
     checks = [f"{c.get('goal')!r}: {c.get('ok')}" for c in r.rows("goal_check")]
     return ok and start == b["start_surface"], (f"{b['object']} from {start} to {r.where(b['object'])} (target {target}); "
@@ -492,14 +508,13 @@ SCENARIOS: list[tuple[str, Callable[[Run], Awaitable[tuple[bool, str]]]]] = [
 def score(name: str, passed: bool, note: str, seconds: float, run: Run) -> dict[str, Any]:
     """One result row: pass/fail, the binding, the time limit and how it was derived, the executors that
     produced the result, and the honesty label (a pass through a STEPPING STONE is a fallback pass)."""
-    b = BIND.scenario(name)
-    limit, how = BIND.time_limit(name, run.profile, run.scale)
+    which, b = run.binding(name)
+    limit, how = BIND.time_limit(name, run.profile, run.scale, b)
     used = run.executors()
     hon = sc.honesty(used, grasp=bool(b.get("grasp")), profile=run.profile)
     return {"name": name, "passed": passed, "seconds": round(seconds, 1), "note": note,
             "profile": run.profile, "house": b["house"], "scene": BIND.scene(b["house"]),
-            "binding": ("original" if run.original else b.get("use", "original")) if b.get("status") == "substituted" else "as_thor",
-            "binding_status": b.get("status", "ok"), "binding_flags": list(b.get("flags") or []),
+            "binding": which, "binding_status": b.get("status", "ok"), "binding_flags": list(b.get("flags") or []),
             "time_limit_s": limit, "time_limit": how,
             "executors_used": used, "shortcuts": hon["shortcuts"], "honesty": hon["labels"],
             "fallback_pass": bool(passed and hon["fallback"]), "target_pass": bool(passed and not hon["fallback"]),
@@ -545,6 +560,8 @@ async def main() -> int:
     ap.add_argument("--profile", default="lite", choices=sorted(BIND.data["profiles"]))
     ap.add_argument("--time-scale", type=float, default=None, help="override the profile's time scale")
     ap.add_argument("--original", action="store_true", help="run THOR's text where scenes.yaml substituted one")
+    ap.add_argument("--g1-alternative", choices=("auto", "on", "off"), default="auto",
+                    help="scenes.yaml's g1_alternative bindings (addition, other_side): auto = on the G1 profiles only")
     ap.add_argument("--out", default=None, help="summary JSON path (default: runs/eval/<stamp>_<profile>_<tag>.json)")
     ap.add_argument("--trace-dir", default=None, help="write each scenario's trace rows, model calls and speech here")
     args = ap.parse_args()
@@ -552,7 +569,8 @@ async def main() -> int:
     from websockets.asyncio.client import connect
     results = []
     async with connect(args.url, max_size=2 ** 24) as ws:
-        run = Run(ws, args.profile, args.time_scale, args.original)
+        run = Run(ws, args.profile, args.time_scale, args.original,
+                  {"auto": None, "on": True, "off": False}[args.g1_alternative])
         reader = asyncio.create_task(run.reader())
         for name, fn in SCENARIOS:
             if only and name not in only:

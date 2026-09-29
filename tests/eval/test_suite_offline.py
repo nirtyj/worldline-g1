@@ -96,8 +96,9 @@ def deliver(nav: str, manip: str, skill: str, moves: dict[str, str]):
     return on_say
 
 
-async def _play(page: FakePage, fn, profile: str, scale: float | None = 0.01, original: bool = False):
-    run = suite.Run(page, profile, scale, original)
+async def _play(page: FakePage, fn, profile: str, scale: float | None = 0.01, original: bool = False,
+                g1_alternative: bool | None = None):
+    run = suite.Run(page, profile, scale, original, g1_alternative)
     reader = asyncio.create_task(run.reader())
     try:
         passed, note = await asyncio.wait_for(fn(run), 30)
@@ -189,8 +190,8 @@ def test_other_side_resolves_from_the_live_map_and_checks_the_golden_line():
         await page.frame(trace=[{"t": page.t, "type": "goal_check", "goal": "other side of stove_1 from counter_2b",
                                  "ok": True}])
     page = FakePage(K10_LAYOUT, {"spatula_1": {"type": "spatula", "where": "counter_2b"}}, on_say)
-    res, _ = asyncio.run(_play(page, suite.other_side, "sonic"))
-    assert res["passed"], res
+    res, _ = asyncio.run(_play(page, suite.other_side, "sonic", g1_alternative=False))    # the spatula, as written
+    assert res["passed"] and res["binding"] == "as_thor", res
     assert "LAYOUT had 'stove_1 (stove) is between counter_2b and counter_2a': True" in res["note"]
     assert res["fallback_pass"] and res["house"] == "K10"
     assert res["binding_status"] == suite.BIND.scenario("other_side").get("status", "ok")      # flagged until R.5

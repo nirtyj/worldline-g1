@@ -16,6 +16,10 @@ Keys are loaded by the page server from ~/.config/ludo-g1/secrets.env into its o
 this script only checks that the key names it needs are set somewhere, and never reads their values.
 Bar (PLAN M1 exit, docs/M2.md E-1): >= 15/17. Everything on `lite` is a STEPPING STONE body, so every pass here
 is a fallback pass (PASS*): E-1 measures the prompt and the harness, not the robot.
+
+Bindings: E-1 plays scenes.yaml's scenario decisions, including the g1_alternative bindings (addition: the wine
+bottle, other_side: the bowl), because on the lite world too no stance reaches either mug or the spatula
+(tests/eval/test_scenes.py); `--g1-alternative off` plays them as written. Each row names the binding it played.
 """
 
 from __future__ import annotations
@@ -85,10 +89,10 @@ def wait_ready(out: Path, proc: subprocess.Popen, timeout_s: float = 180.0) -> b
     return False
 
 
-def run_suite(out: Path, port: int, tag: str, only: list[str] | None) -> dict[str, Any]:
+def run_suite(out: Path, port: int, tag: str, only: list[str] | None, g1_alternative: str = "on") -> dict[str, Any]:
     env = {**os.environ, "WORLDLINE_RUNS": str(out / "runs"), "PYTHONUNBUFFERED": "1"}
     cmd = [PY, "-m", "eval.suite", "--url", f"ws://127.0.0.1:{port}/ws", "--profile", "lite", "--tag", tag,
-           "--out", str(out / f"{tag}.json"), "--trace-dir", str(out / "traces")]
+           "--out", str(out / f"{tag}.json"), "--trace-dir", str(out / "traces"), "--g1-alternative", g1_alternative]
     if only:
         cmd += ["--only", ",".join(only)]
     with (out / f"{tag}.log").open("w") as log:
@@ -107,6 +111,7 @@ def combine(p1: dict[str, Any], p2: dict[str, Any] | None, meta: dict[str, Any])
         final = again if again is not None else r
         rows.append({"name": r["name"], "final": "pass" if final["passed"] else "fail",
                      "verdict": ("PASS*" if final["fallback_pass"] else "PASS") if final["passed"] else "FAIL",
+                     "binding": final.get("binding"), "binding_flags": final.get("binding_flags") or [],
                      "passed_first": r["passed"], "rerun": again is not None,
                      "passed_rerun": None if again is None else again["passed"],
                      "reason": final["note"], "first_reason": r["note"] if again is not None else None,
@@ -126,13 +131,15 @@ def report_text(rep: dict[str, Any]) -> str:
     out = [f"E-1 · 17 scenarios on lite with live models · {rep['passed']}/{rep['total']} "
            f"({'meets' if rep['meets_bar'] else 'BELOW'} the bar {rep['bar']}/17; first pass {rep['passed_first_pass']}"
            f"/{rep['total']}) · git {rep['git']['head']} ({len(rep['git']['dirty'])} dirty paths)",
-           f"planner {rep['planner']} (model {rep['model']}) · System 1 {rep['system1']} · {rep['note']}", ""]
+           f"planner {rep['planner']} (model {rep['model']}) · System 1 {rep['system1']} · {rep['note']}",
+           f"bindings: {rep.get('bindings', '-')}", ""]
     for r in rep["scenarios"]:
         ex = "; ".join(f"{g}: {', '.join(f'{k}x{v}' for k, v in (r['executors_used'].get(g) or {}).items())}"
                        for g in ("nav", "manip") if r["executors_used"].get(g)) or "no body result"
         again = f" (first pass FAIL: {r['first_reason']})" if r["rerun"] else ""
+        bound = f" [binding: {r['binding']}]" if r.get("binding") not in (None, "as_thor") else ""
         c = r["costs"]
-        out.append(f"{r['verdict']:<5} {r['name']:<18} {r['reason']}{again}")
+        out.append(f"{r['verdict']:<5} {r['name']:<18} {r['reason']}{again}{bound}")
         out.append(f"      executors [{ex}] · calls: planner {c['model_calls']} ({c['next_action_calls']} next, "
                    f"{c['classify_calls']} classify), System 1 label {c['s1_route_calls']}, observe {c['s1_observe_calls']}"
                    f" · tokens {c['tokens_in']} in / {c['tokens_out']} out · {r['seconds']:.0f}/{r['time_limit_s']:.0f} s")
@@ -153,6 +160,8 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--no-rerun", action="store_true")
     ap.add_argument("--only", default="", help="comma-separated scenario names (default: all 17)")
+    ap.add_argument("--g1-alternative", choices=("on", "off"), default="on",
+                    help="play scenes.yaml's g1_alternative bindings (default on; see the module docstring)")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -163,15 +172,17 @@ def main() -> int:
     port = args.port or free_port()
     from ui.server import MODELS
     meta = {"stage": "E-1", "profile": "lite", "planner": args.planner, "model": MODELS[0][0], "system1": args.system1,
-            "git": git_state(), "started": time.strftime("%Y-%m-%d %H:%M:%S"), "port": port}
+            "git": git_state(), "started": time.strftime("%Y-%m-%d %H:%M:%S"), "port": port,
+            "bindings": ("scenes.yaml decisions: substitute + g1_alternative" if args.g1_alternative == "on"
+                         else "scenes.yaml decisions: substitute; addition and other_side as written")}
     proc = start_server(out, port, args.planner, args.system1, args.scene)
     try:
         if not wait_ready(out, proc):
             print(f"the page server did not come up; see {out / 'server.log'}", file=sys.stderr)
             return 3
-        p1 = run_suite(out, port, "pass1", [n for n in args.only.split(",") if n] or None)
+        p1 = run_suite(out, port, "pass1", [n for n in args.only.split(",") if n] or None, args.g1_alternative)
         fails = [r["name"] for r in p1.get("results") or [] if not r["passed"]]
-        p2 = run_suite(out, port, "pass2", fails) if fails and not args.no_rerun else None
+        p2 = run_suite(out, port, "pass2", fails, args.g1_alternative) if fails and not args.no_rerun else None
     finally:
         try:
             os.killpg(proc.pid, signal.SIGTERM)

@@ -1,6 +1,8 @@
 """The eval's bindings on the G1 stack: eval/scenes.yaml plus the rules that use it (PLAN 9.1).
 
   load()                      the houses, profiles and 17 scenario bindings
+  Bindings.binding()          a scenario as a run plays it (as written, THOR's original, scenes.yaml's substitute,
+                              or its G1 alternative) and which of those it is
   Bindings.fetch_target()     a fetch scenario's object, label and sentence after scenes.yaml's scenario decision
   Bindings.time_limit()       a scenario's wall-clock limit on a profile (THOR limit x time scale, never
                               below twice the humanoid estimate from walk distance, scans, picks and places)
@@ -25,6 +27,11 @@ import yaml
 HERE = Path(__file__).resolve().parent
 SCENES_YAML = HERE / "scenes.yaml"
 STEPPING_STONES = frozenset({"kinematic_nav", "kinematic_attach", "sonic_arm_script"})
+# The profiles that run the calibrated G1 arm (config/g1.yaml workspace, R.7): there a scenario's `g1_alternative`
+# replaces a binding no G1 stance can do, by default. `lite` keeps M2a's arm (INTERIM, workspace.lite_world); it runs
+# the binding as written unless the run asks for the alternative (eval/live_suite.py does for E-1: on the lite world
+# too neither mug nor the spatula is reachable, tests/eval/test_scenes.py).
+G1_PROFILES = frozenset({"bringup", "sonic", "full", "real_g1"})
 # The target executors (PLAN 2.1): a pass counts as a target pass only if every body result came from these.
 # One definition, api.results.TARGET_EXECUTORS; the literal is the fallback when api/ is not importable.
 try:
@@ -99,8 +106,8 @@ class Bindings:
             total += float(d)
         return total
 
-    def humanoid_estimate(self, name: str, profile: str) -> float:
-        sc, est = self.scenarios[name], self.data["estimate"]
+    def humanoid_estimate(self, name: str, profile: str, binding: dict[str, Any] | None = None) -> float:
+        sc, est = binding or self.scenarios[name], self.data["estimate"]
         p = self.profile(profile)
         legs = sc.get("legs") or []
         work = sc.get("work") or {}
@@ -109,21 +116,46 @@ class Bindings:
                 + work.get("scans", 0) * est["scan_s"] + work.get("picks", 0) * (p["t_pick_s"] + est["check_s"])
                 + work.get("places", 0) * p["t_place_s"])
 
-    def time_limit(self, name: str, profile: str, scale: float | None = None) -> tuple[float, dict[str, float]]:
+    def time_limit(self, name: str, profile: str, scale: float | None = None,
+                   binding: dict[str, Any] | None = None) -> tuple[float, dict[str, float]]:
         """(limit_s, how): max(THOR limit x scale, 2 x humanoid estimate) for body scenarios; talk-only
-        scenarios keep THOR's limit (the planner and speech run at the same speed on every profile)."""
-        sc = self.scenarios[name]
+        scenarios keep THOR's limit (the planner and speech run at the same speed on every profile).
+        `binding`: the scenario as the run plays it (Bindings.binding(), with its own legs and work)."""
+        sc = binding or self.scenarios[name]
         base = float(sc["thor_limit_s"])
         s = float(scale if scale is not None else self.profile(profile)["time_scale"])
         if not sc.get("legs"):
             return base, {"thor_s": base, "scale": 1.0, "estimate_s": 0.0}
-        est = self.humanoid_estimate(name, profile)
+        est = self.humanoid_estimate(name, profile, sc)
         limit = max(base * s, 2.0 * est)
         return round(limit, 1), {"thor_s": base, "scale": s, "estimate_s": round(est, 1)}
 
     def wait_scale(self, profile: str, scale: float | None = None) -> float:
         """For the short body-dependent waits inside a script (e.g. 'until the first navigate starts')."""
         return float(scale if scale is not None else self.profile(profile)["time_scale"])
+
+    # ------------------------------------------------------------------ which binding a run plays
+    def binding(self, name: str, profile: str | None = None, original: bool = False,
+                g1_alternative: bool | None = None) -> tuple[str, dict[str, Any]]:
+        """(which, scenario): the scenes.yaml entry with the binding this run plays laid over it.
+
+          original        --original: THOR's text where scenes.yaml substituted one
+          g1_alternative  the G1-feasible object, legs and sentence scenes.yaml proposes where no G1 stance reaches
+                          the bound object (R.7: addition, other_side); by default on G1_PROFILES, `g1_alternative`
+                          True/False forces it on/off; never with --original
+          substitute      `status: substituted` with `use: substitute` (scenes.yaml's scenario decision)
+          as_thor         the entry as written
+        """
+        sc = self.scenarios[name]
+        if original and sc.get("original"):
+            return "original", {**sc, **sc["original"]}
+        alt = profile in G1_PROFILES if g1_alternative is None else g1_alternative
+        if alt and not original and sc.get("g1_alternative"):
+            return "g1_alternative", {**sc, **sc["g1_alternative"]}
+        if sc.get("status") == "substituted":
+            use = str(sc.get("use", "original"))
+            return use, {**sc, **(sc.get(use) or {})}
+        return "as_thor", dict(sc)
 
     # ------------------------------------------------------------------ what a scenario says and waits for
     def fetch_target(self, name: str, original: bool = False) -> tuple[str, str, str]:
