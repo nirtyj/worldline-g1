@@ -285,7 +285,9 @@ and, in this run, through the same HTTP API from the laptop (`/api/cmd`, `/api/r
 - Consequence for M1: P1 has ~25 % headroom at real-time pacing (free-running RTF 1.29). `min`/`low` use most of
   it; the paced stand-in held RTF p50 1.00 with p10 0.88-0.93 while the server, a recorder and the tunnel streams
   also ran. **Use `off` for RTF-critical SONIC runs and measurements, `min` for demos and recordings, never
-  `high` while SONIC is in the loop.** The cost is per host render, so P1 `--camera-hz 15` would halve it.
+  `high` while SONIC is in the loop.** The cost is per host render, so P1 `--camera-hz 15` should roughly halve
+  it (inferred from the per-render cost, not measured; P1's own matrix shows 15 Hz alone does not raise its RTF,
+  contract 1.10). Compare P1's ~30 % free-running headroom (contract 1.10) with the numbers above.
   P1's own `--tp-camera` costs ~7 ms per render (contract 1.8), more than VizCams `min`.
 
 ### 7.3 Top-view mapping and freshness
