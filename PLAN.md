@@ -33,6 +33,8 @@ Every conflict between the three is resolved in §1.3, with the reason.
 4. **Box: NVIDIA Brev `ludo-g1-brev2`** (Nebius 1× L40S, 16 vCPU, 62 GiB, 484 GB, Ubuntu 24.04, driver 580.173.02), reached through `ludo_robotics_prep_g1/00_infra/` (§14 Q1 resolved). AWS is archived at `_archive/aws_infra/` and is not used.
 5. **Cosmos-Reason2-2B licence: accepted.** The backbone is cached on the box (§14 Q16 resolved).
 6. **Visual verification + browser streaming are part of M1:** `viz/` provides the recorder (head/chase/top-down mp4 + composite + contact sheet, pulled to the laptop) and a live browser console at 127.0.0.1:8765 (via `00_infra/tunnel.sh 8765`). The Worldline UI reuses this feed later.
+7. **Arms vs legs (decision "b", 2026-09-29; `docs/arena_vs_sonic.md`, `docs/arm_tracking.md`, `docs/groot_arms_design.md`).**
+   SONIC stays the only body controller. **Legs** = SONIC's planner, driven by navigation (`navigate` → keypoint stand → `go_to` via A*/Nav2); `manipulate` never walks (`navigate(reach_stance)` repositions). **Arms + hands + waist** = the body `arm` op, which streams joint targets into SONIC's planner upper-body override (17-D `upper_body_position` in SONIC's interleaved order + 7-D Dex3 per hand); one arm owner at a time. Executors: `sonic_arm_script` (scripted reach/grasp/lift through the `arm` op, M2b interim), `groot_arms` (GR00T N1.7 fine-tuned to output arm/hand joint chunks → `arm` op at 50 Hz; replaces the token-based `groot_sonic`), `kinematic_attach` (labelled stepping stone for "object stays in hand" until the Dex3 grasp is reliable). The arrival scan's target executor is the waist scan through the `arm` op.
 
 ---
 
