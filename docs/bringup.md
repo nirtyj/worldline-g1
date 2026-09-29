@@ -105,8 +105,9 @@ tmux attach -t wl-m2                                            # windows: isaac
   robot façade cancels its body ops and closes its client), then sends body `stop` (planner IDLE: the robot stands
   under SONIC, the M1 equivalent of HOLD until B.3 adds named modes; never `command{stop}`), then runs `m1_down.sh`
   (band on, deploy shutdown, body, P1, kill only that session).
-- The eval's reset does not move the robot on Isaac (no `reset_scene` yet, P1.7). For repeatable episodes restart
-  the stack between runs (`m2_down.sh` then `m2_up.sh`, about 70 s), as the rehearsal did.
+- The eval's reset did not move the robot on the rehearsal's P1 (no `reset_scene`; P1.7 landed in 61c9c8a after it,
+  untested by ops). For repeatable episodes restart the stack between runs (`m2_down.sh` then `m2_up.sh`, about
+  70 s), as the rehearsal did.
 
 ---
 
@@ -256,12 +257,12 @@ BREV_NAME=ludo-g1-arena ./ssh.sh "cd /work/worldline-g1 && bash scripts/groot_li
 # ---------- laptop: the user's browser
 ./tunnel.sh 8765          # then open http://127.0.0.1:8765  (laptop port 8765 must be free: lsof -iTCP:8765 -sTCP:LISTEN)
 
-# ---------- smoke tests (laptop; the stack stays up between them)
+# ---------- smoke tests (laptop, still in 00_infra with BREV_NAME exported; the stack stays up between them)
 ./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_p5.sh restart --session wl-m2 --planner brains.scripted:create --system1 tests.kept.system1_stub:create'
-cd ../../worldline-g1 && BREV_NAME=ludo-g1-brev2 scripts/m2_smoke.sh --label main-smoke61-r1 --session wl-m2 --profile full
+/Users/nirty/workspace/ludo-interview/worldline-g1/scripts/m2_smoke.sh --label main-smoke61-r1 --session wl-m2 --profile full
 #   for a clean start between runs: ./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_down.sh && bash scripts/m2_up.sh --profile full --viz min ...'
 ./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_p5.sh restart --session wl-m2 --planner agent.model:create_brain --system1 brains.system1_jev:create'
-BREV_NAME=ludo-g1-brev2 scripts/m2_smoke.sh --label main-smoke62-r1 --session wl-m2 --profile full
+/Users/nirty/workspace/ludo-interview/worldline-g1/scripts/m2_smoke.sh --label main-smoke62-r1 --session wl-m2 --profile full
 
 # ---------- down (when the lead says so)
 ./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_down.sh'
@@ -308,8 +309,9 @@ P5 **8765** (the only port the laptop needs), recorder control 5630, DCGM 5555 (
    as `scene_cells`, so every `decide()` raised (5 tracebacks in the first minute of cold start 2, before the overlay).
    It was fixed in the owner's tree then and is committed now (HEAD 1c648ac, `FrameGate(config=cfg)`). Item 1's
    `SENSE_TIMEOUT` = 12 s and the latch check in `services/navigation.py` are still in HEAD.
-6. **The eval's reset does not move the robot on Isaac** (no `reset_scene`, P1.7). For repeatable episodes restart
-   the stack (about 60-65 s up, about 7 s down).
+6. **The eval's reset did not move the robot on Isaac** (the rehearsal's P1 had no `reset_scene`; P1.7 is in
+   61c9c8a now, and whether the page's reset calls it is for world/ui+eval). Until then, restart the stack between
+   episodes (about 60-65 s up, about 7 s down).
 7. **Main box, before wave 2** (from `docs/devbox.md` §6.1, not re-checked here): `/work/logs/wl/isaac-cdds.log`
    holds plaintext keys. Delete it and rotate the keys.
 8. `00_infra/sync_wl.sh push` does not exclude `runs/` or `.env*` (docs/M2.md §7.4 step 3 says it should). A
