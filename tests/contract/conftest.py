@@ -7,6 +7,9 @@
             (pyproject addopts), and skipped cleanly unless WL_BOX=1 even when selected. Run on the box with
                 WL_BOX=1 WL_PORT_OFFSET=<n> .venv-rt/bin/python -m pytest -m box tests/contract
             It moves the real robot: the stack must be up (scripts/m1_up.sh or m2_up.sh), standing, in a house.
+    full    the same live stack built with robot.factory.build("full", ...): groot_arms (the GR00T PolicyServer at
+            WL_GROOT_ENDPOINT or the full profile's endpoint, on the main box the groot_link tunnel) in front of the
+            labelled fallbacks. Also `box`; `-m box -k full` runs only it.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import pytest
 
 from tests.unit.conftest import isolated_runs  # noqa: F401  (autouse: runs/ goes to a temp dir)
 
+LIVE = ("sonic", "full")                            # the live-stack backends (wall clock, the box's scene)
 LITE_SCENE = os.environ.get("WL_LITE_SCENE", "procthor-train-38")
 BOX_SCENE = os.environ.get("WL_BOX_SCENE")          # default: the scene P1 reports (house_id)
 _LIVE: list[tuple[Any, Any]] = []                   # (world, robot) built on the box, closed after each test
@@ -92,19 +96,19 @@ def _box_available() -> str | None:
 def clock_for(name: str):
     """lite/fake run on a fast sim clock; the live stack runs on wall time (SONIC is wall-clock bound)."""
     from sim.clock import SimClock
-    return SimClock(1.0 if name == "sonic" else 40.0)
+    return SimClock(1.0 if name in LIVE else 40.0)
 
 
 def make_backend(name: str, clock: Any) -> Any:
     if name == "fake":
         from tests.unit.fakes_rt import FakeRobot
         return FakeRobot(clock)
-    if name == "sonic":
+    if name in LIVE:
         why = box_available()
         if why:
             pytest.skip(why)
         from robot.factory import build
-        world, robot, _frames = build("sonic", BOX_SCENE or _P1.get("house_id"), clock, frames=None)
+        world, robot, _frames = build(name, BOX_SCENE or _P1.get("house_id"), clock, frames=None)
         _LIVE.append((world, robot))
         return robot
     why = lite_available()
@@ -118,4 +122,4 @@ def make_backend(name: str, clock: Any) -> Any:
     return robot
 
 
-BACKENDS = ["fake", "lite", pytest.param("sonic", marks=pytest.mark.box)]
+BACKENDS = ["fake", "lite", pytest.param("sonic", marks=pytest.mark.box), pytest.param("full", marks=pytest.mark.box)]
