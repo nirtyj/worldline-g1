@@ -4,25 +4,37 @@
 #
 #   scripts/m2_up.sh [--profile sonic|full] [--scene procthor-train-40] [--port-offset N] [--session wl-m2]
 #                    [--viz off|min|low|high] [--p5-port P] [--planner MOD:FN] [--system1 MOD:FN|off]
-#                    [--isaac-args "..."] [--no-groot-check] [--dry-run]
+#                    [--isaac-args "..."] [--groot link|local|off] [--no-groot-check] [--dry-run]
 #
 # Stages (each waits on a readiness probe; the time of each goes to <run>/stages.json):
+#   0. GR00T          --profile full, before anything else (a dead link fails the run in seconds, not after the
+#                     ~60 s Isaac start):
+#                     --groot link (default, PLAN §0.12: the PolicyServer runs on the DEV box, OD3):
+#                       scripts/groot_link.sh ensure (ping through the main box's 127.0.0.1:5550; a link that is down
+#                       with its tmux loop gone is brought up again with the last host). If the PolicyServer does not
+#                       answer, m2_up.sh STOPS (exit 3) and says what to run; nothing is started.
+#                     --groot local: scripts/groot_server.sh ensure on THIS box (start --warm when none answers). Only
+#                       for a deliberate measurement: on the main box it failed SONIC's timing gate standing (PLAN
+#                       §0.12, docs/groot_serving.md §9). A local server that does not answer also stops the run.
+#                     --groot off (or --no-groot-check): no check; `full` then rejects every GR00T call as `policy
+#                       unavailable` and uses its labelled fallbacks.
 #   1. P1 wl-isaac    m1_up.sh: REP ping + WL_ISAAC_READY, gt.pose >= 40 Hz, lowstate, camera; band on
 #   2. P3 wl-body     m1_up.sh: body.state on 5611 (binds the SONIC input before the deploy connects)
 #   3. P2 wl-sonic    m1_up.sh: deploy "Init Done" + robot_config
 #   4. stand          m1_up.sh: SONIC takes the weight, band released, upright
 #   5. P5 wl-runtime  scripts/m2_p5.sh start: ui.server --profile P --scene S, SimClock(1.0) (wall-second timeouts);
 #                     ready = HTTP 200 + an `init` for that scene/profile with no error (scripts/p5_probe.py)
-#   6. GR00T link     --profile full only: scripts/groot_link.sh ensure (the PolicyServer runs on the dev box,
-#                     reached through an SSH tunnel, OD3, docs/groot_serving.md §5: ping it, and bring the tunnel up
-#                     again with the last host if it is down). A failed check is a warning, because `full` then
-#                     rejects GR00T calls as `policy unavailable` and keeps its labelled fallbacks.
+#   6. GR00T again    --profile full: the same ping once P5 is up (the link can drop while Isaac starts); a failure
+#                     here ends the run with exit 3 and the stack left up (READY is not printed). Both modes end on
+#                     the local endpoint tcp://127.0.0.1:5550 (config/profiles/full.yaml; WL_GROOT_ENDPOINT overrides)
 # Defaults: session wl-m2, scene procthor-train-40 (H40, the F1 house), no viz cameras, the live planner and
 # System 1 (scripts/m2_p5.sh). go_to stays A* + pure pursuit (NAV_BACKEND=astar; Nav2 is deferred, PLAN §0.8).
 # --viz passes P1's VizCams level (docs/viz.md: min for recordings and demos, never high with SONIC in the loop).
 # Idempotent: a session whose body and deploy already answer skips stages 1-4; a ready P5 is left alone. A half-up
 # session is an error: run scripts/m2_down.sh first. Logs: /work/logs/wl/<session>-<ts>-*.log.
-# Env passed through to m1_up.sh: DEPLOY_TASKSET, ISAAC_TASKSET, BODY_TASKSET, BODY_ARGS, P1_TIMEOUT, DEPLOY_WAIT_S.
+# Env passed through to m1_up.sh: DEPLOY_TASKSET, ISAAC_TASKSET, BODY_TASKSET, BODY_ARGS, P1_TIMEOUT, DEPLOY_WAIT_S;
+# to groot_link.sh: GROOT_LINK_TASKSET, GROOT_LINK_NICE; to m2_p5.sh: P5_TASKSET, P5_THREADS; to groot_server.sh
+# (--groot local): GROOT_TASKSET, GROOT_NICE, GROOT_THREADS, GROOT_DIR, GROOT_CKPT.
 set -euo pipefail
 [[ -f /etc/profile.d/ludo.sh ]] && source /etc/profile.d/ludo.sh; true
 
@@ -32,7 +44,7 @@ PY_BODY=${PY_BODY:-$WL/.venv/bin/python}
 LOGD=${LOGD:-/work/logs/wl}
 M2_STATE=${M2_STATE:-$WL/outputs/m2}
 PROFILE=sonic; SCENE=procthor-train-40; OFFSET=0; SESSION=wl-m2; VIZ=off; P5_PORT=""; PLANNER=""; SYSTEM1=""
-ISAAC_ARGS=${ISAAC_ARGS:-}; GROOT_CHECK=1; DRY=0
+ISAAC_ARGS=${ISAAC_ARGS:-}; GROOT_CHECK=1; GROOT_MODE=link; DRY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile) PROFILE="$2"; shift 2;;
@@ -44,14 +56,18 @@ while [[ $# -gt 0 ]]; do
     --planner) PLANNER="$2"; shift 2;;
     --system1) SYSTEM1="$2"; shift 2;;
     --isaac-args) ISAAC_ARGS="$2"; shift 2;;
+    --groot) GROOT_MODE="$2"; shift 2;;
     --no-groot-check) GROOT_CHECK=0; shift;;
     --dry-run) DRY=1; shift;;
-    -h|--help) sed -n '2,29p' "$0"; exit 0;;
+    -h|--help) sed -n '2,37p' "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
 case "$PROFILE" in sonic|full) ;; *) echo "--profile must be sonic or full (lite/bringup need no stack)" >&2; exit 2;; esac
 case "$VIZ" in off|min|low|high) ;; *) echo "--viz must be off, min, low or high" >&2; exit 2;; esac
+case "$GROOT_MODE" in link|local|off) ;; *) echo "--groot must be link, local or off" >&2; exit 2;; esac
+[[ "$GROOT_CHECK" == 0 ]] && GROOT_MODE=off
+[[ "$PROFILE" == full ]] || GROOT_MODE=off
 [[ "$OFFSET" =~ ^[0-9]+$ ]] || { echo "--port-offset must be a number" >&2; exit 2; }
 [[ "$VIZ" != off ]] && ISAAC_ARGS="${ISAAC_ARGS:+$ISAAC_ARGS }--viz $VIZ"
 P5_PORT=${P5_PORT:-$((8765 + OFFSET))}
@@ -81,9 +97,12 @@ if [[ "$DRY" == 1 ]]; then
   echo "m1_up: bash $WL/scripts/m1_up.sh --house $HOUSE --port-offset $OFFSET --session $SESSION (ISAAC_ARGS='$ISAAC_ARGS')"
   echo "p5: bash $WL/scripts/m2_p5.sh start ${P5_ARGS[*]}"
   echo "page: http://127.0.0.1:$P5_PORT (laptop: BREV_NAME=<box> 00_infra/tunnel.sh $P5_PORT)"
-  if [[ "$PROFILE" == full && "$GROOT_CHECK" == 1 ]]; then
-    if [[ -f "$WL/scripts/groot_link.sh" ]]; then echo "groot: bash $WL/scripts/groot_link.sh ensure"
-    else echo "groot: skipped (scripts/groot_link.sh not present; owner groot_srv)"; fi
+  if [[ "$PROFILE" == full ]]; then
+    case "$GROOT_MODE" in
+      local) echo "groot: local, stage 0 (before P1) and again after P5: bash $WL/scripts/groot_server.sh ensure  [$(bash "$WL/scripts/groot_server.sh" where | tr '\n' ';')]";;
+      link) echo "groot: link, stage 0 (before P1) and again after P5: bash $WL/scripts/groot_link.sh ensure (stops with exit 3 when the PolicyServer does not answer)";;
+      off) echo "groot: off (full rejects GR00T calls as policy unavailable)";;
+    esac
   fi
   exit 0
 fi
@@ -103,7 +122,7 @@ from pathlib import Path
 run = Path(sys.argv[1])
 rows = [l.split() for l in (run / "stages.tsv").read_text().splitlines() if l.strip()]
 t = {k: float(v) for k, v in rows}
-order = ["start", "p1", "body", "deploy", "stand", "p5", "groot", "ready"]
+order = ["start", "groot", "p1", "body", "deploy", "stand", "p5", "groot_recheck", "ready"]
 seen = [k for k in order if k in t]
 out = {"t_epoch": t, "since_start_s": {k: round(t[k] - t["start"], 1) for k in seen},
        "stage_s": {b: round(t[b] - t[a], 1) for a, b in zip(seen, seen[1:])},
@@ -120,6 +139,37 @@ stage start
 HOUSE=$(house_of) || die "the runtime venv cannot load the profile/scene ($PY_RT; bash scripts/m2_venv.sh)"
 echo "house=$HOUSE" >> "$RUN/config.env"
 say "session $SESSION: profile $PROFILE, scene $SCENE (house $HOUSE), port offset $OFFSET, page port $P5_PORT, viz $VIZ"
+
+# ---- stage 0: GR00T (full): the PolicyServer must answer before anything starts
+GROOT=n/a
+groot_ok() {  # $1 = what to run: ensure (stage 0) or check (stage 6)
+  case "$GROOT_MODE" in
+    link) bash "$WL/scripts/groot_link.sh" "$1" 2>&1 | tee -a "$LOG_UP"; return "${PIPESTATUS[0]}";;
+    local) if [[ "$1" == ensure ]]; then
+             tmux has-session -t "=$SESSION" 2>/dev/null && say "note: session $SESSION is up; a server that must start now loads next to a standing SONIC"
+             bash "$WL/scripts/groot_server.sh" ensure 2>&1 | tee -a "$LOG_UP"; return "${PIPESTATUS[0]}"
+           fi
+           bash "$WL/scripts/groot_server.sh" ping 2>&1 | tee -a "$LOG_UP"; return "${PIPESTATUS[0]}";;
+  esac
+  return 0
+}
+groot_fail() {  # a clear stop: what is down and what to run
+  printf 'groot_mode=%s\ngroot=%s\n' "$GROOT_MODE" "$GROOT" >> "$RUN/config.env"
+  [[ -f "$RUN/stages.tsv" ]] && stage_times >&2 || true
+  echo "[m2_up] ERROR: GR00T PolicyServer not reachable ($GROOT, $1)." >&2
+  if [[ "$GROOT_MODE" == link ]]; then
+    echo "[m2_up]   dev box:  bash scripts/groot_server.sh status   (start --warm when it is not running)" >&2
+    echo "[m2_up]   main box: bash scripts/groot_link.sh status; new IPs after a Brev restart: docs/groot_serving.md §5.2" >&2
+  else
+    echo "[m2_up]   this box: bash scripts/groot_server.sh status ; log /work/logs/groot/server-5550.log" >&2
+  fi
+  echo "[m2_up]   or run without GR00T: --groot off (full then rejects GR00T calls as 'policy unavailable')" >&2
+  exit 3
+}
+if [[ "$GROOT_MODE" != off ]]; then
+  if groot_ok ensure; then GROOT=$GROOT_MODE:ok; stage groot
+  else GROOT=$GROOT_MODE:down; groot_fail "stage 0, before the stack: nothing was started"; fi
+fi
 
 # ---- stages 1-4: the M1 stack (skipped when this session already has one standing)
 wr() { (cd "$WL" && "$PY_BODY" -m tools.wait_ready "$@" --port-offset "$OFFSET"); }
@@ -155,17 +205,12 @@ stage p5
 cp "$M2_STATE/p5-$SESSION.ready.json" "$RUN/p5_ready.json" 2>/dev/null || true
 cp "$M2_STATE/p5-$SESSION.env" "$RUN/p5.env" 2>/dev/null || true
 
-# ---- stage 6: GR00T link (full only)
-GROOT=n/a
-if [[ "$PROFILE" == full && "$GROOT_CHECK" == 1 ]]; then
-  if [[ -f "$WL/scripts/groot_link.sh" ]]; then
-    if bash "$WL/scripts/groot_link.sh" ensure 2>&1 | tee -a "$LOG_UP"; then GROOT=ok; stage groot
-    else GROOT=failed; say "WARNING: GR00T link check failed: full rejects GR00T calls (policy unavailable) and uses its fallbacks"; fi
-  else
-    GROOT=skipped; say "GR00T link check skipped: scripts/groot_link.sh is not in this tree (owner groot_srv)"
-  fi
+# ---- stage 6: GR00T again, with the stack up (the link can drop while Isaac starts)
+if [[ "$GROOT_MODE" != off ]]; then
+  if groot_ok ensure; then GROOT=$GROOT_MODE:ok; stage groot_recheck
+  else GROOT=$GROOT_MODE:down; groot_fail "stage 6, after P5: the stack is up, GR00T calls are rejected"; fi
 fi
-echo "groot_link=$GROOT" >> "$RUN/config.env"
+printf 'groot_mode=%s\ngroot=%s\n' "$GROOT_MODE" "$GROOT" >> "$RUN/config.env"
 stage ready
 
 stage_times

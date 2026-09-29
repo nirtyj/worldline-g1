@@ -22,4 +22,11 @@ groot_arms:                       # services/executors/groot_arms.py GrootArmsCo
   debug_port: 5557                # SONIC g1_debug
   lead_s: 0.15                    # play chunk rows this far ahead: SONIC's ~0.15 s arm lag (G0, docs/arm_tracking.md
                                   # on the body branch); the body's own chunk-mode default. 0 vs 0.15 is the G2 A/B
-  camera_hz: 30                   # ego_view rate while the session holds it (p1_m2b.md §5.4: hz persists across off/on)
+  # Render budget (SONIC's timing gate with the client active, docs/groot_serving.md §9): P1 renders every enabled
+  # camera product at every render call, so during a session the head camera drops to the inference rate and
+  # ego_view streams at it too: one render of both per get_action; the client waits for each fresh frame.
+  camera_hz: 2.5                  # ego_view rate while the session holds it (p1_m2b.md §5.4: hz persists across off/on)
+  camera_warm_hz: 10              # until the first frame (P1 skips 4 warm-up frames per enable: 0.4 s at 10 Hz)
+  session_head_hz: 2.5            # the head camera's rate during a session, restored after it (stack default 30)
+  frame_sync: true                # wait for the next frame instead of polling a 2.5 Hz stream
+  replan_s: 0.4                   # one get_action per frame (2.5 Hz)

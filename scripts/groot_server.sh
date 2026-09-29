@@ -1,17 +1,32 @@
 #!/usr/bin/env bash
 # GR00T N1.7 PolicyServer (P4) for the G1 arms: nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace @ 7f78beb, label
-# "experimental". Runs on the DEV box (OD3) in tmux 'groot-server', bound to 127.0.0.1 only; the main box reaches it
-# through scripts/groot_link.sh. Contract and numbers: docs/groot_serving.md.
+# "experimental". Runs on the DEV box `ludo-g1-arena` (OD3; owner decision PLAN §0.12, 2026-09-29, superseding §0.11)
+# in tmux 'groot-server', bound to 127.0.0.1 only; the main box reaches it through scripts/groot_link.sh. With the
+# server on the main box next to Isaac and the SONIC deploy, SONIC's timing gate failed standing (docs/groot_serving.md
+# §9), so a main-box server is only for a deliberate measurement. Contract and numbers: docs/groot_serving.md.
 #
 #   bash scripts/groot_server.sh start  [--port 5550] [--ckpt DIR] [--gpu 0] [--wait 600] [--warm]
+#   bash scripts/groot_server.sh ensure [--port 5550] ...   # ping; start --warm when no server answers
 #   bash scripts/groot_server.sh stop   [--port 5550]
 #   bash scripts/groot_server.sh status [--port 5550]     # tmux, pid, port, VRAM, ping, state file
 #   bash scripts/groot_server.sh ping   [--port 5550]
+#   bash scripts/groot_server.sh where                    # the resolved GROOT_DIR / checkpoint / placement, nothing started
 #
 # --warm runs one get_action after start (the first call pays CUDA warm-up, ~seconds) and records its time.
-# Env: GROOT_DIR   Isaac-GR00T checkout with its .venv (default /work/arena/gr00t_n17 = 4b1dca9d, the pin of Arena's
-#                  static_apple workflow; the Arena spike served this checkpoint from it)
-#      GROOT_CLIENT_PY  python with numpy + pyzmq + msgpack for ping/warm (default: /work/groot/venv, else the repo .venv)
+# Env: GROOT_DIR   Isaac-GR00T checkout @ 4b1dca9d (Arena's static_apple pin) with its .venv (uv, py3.10). Default:
+#                  the first of /work/arena/gr00t_n17 (dev box, the Arena spike's env) and /work/groot/gr00t_n17 (the
+#                  main-box copy of the §0.11 measurement) that has .venv/bin/python. Never /work/repos/Isaac-GR00T
+#                  (another pin, the community SONIC checkpoint's)
+#      GROOT_CKPT  checkpoint dir (--ckpt wins). Default: the first of
+#                  /work/arena/models/isaaclab_arena/static_apple_tutorial/gn1x_tuned_static_apple (dev) and
+#                  /work/groot/models/gn1x_tuned_static_apple (main-box copy) with a config.json
+#      GROOT_TASKSET  CPU list for the server (taskset -c), "" = no pinning (the dev box runs nothing else). On the main
+#                  box the stack pins the deploy to 0-3 and Isaac, body and P5 to 4-15 (m1_up.sh, m2_p5.sh);
+#                  docs/groot_serving.md §9 has the placements measured there
+#      GROOT_NICE  nice level for the server (default 0)
+#      GROOT_THREADS  cap for torch/OMP/MKL CPU threads in the server (OMP_NUM_THREADS etc.; "" = torch's default)
+#      GROOT_CLIENT_PY  python with numpy + pyzmq + msgpack for ping/warm (default: /work/groot/venv, else the repo
+#                  .venv-rt / .venv)
 #      HF_HUB_OFFLINE   default 0: with 1 the start fails (transformers 4.57.3 asks the Hub API whether
 #                       nvidia/Cosmos-Reason2-2B is a Mistral tokenizer, tokenization_utils_base.py:2432, even
 #                       though every file is cached in $HF_HOME); HF_TOKEN comes from /etc/profile.d/ludo.sh
@@ -25,9 +40,18 @@ if [[ -f /etc/profile.d/ludo.sh ]]; then source /etc/profile.d/ludo.sh >/dev/nul
 set -u
 export HF_HOME="${HF_HOME:-/work/hf-cache}"
 
-GROOT_DIR="${GROOT_DIR:-/work/arena/gr00t_n17}"
 GROOT_SHA_EXPECTED=4b1dca9d88d2a0b9ea5a65aa61c82ff89f5c4f0e
-CKPT_DEFAULT=/work/arena/models/isaaclab_arena/static_apple_tutorial/gn1x_tuned_static_apple
+first_dir() {  # first_dir <file that must exist inside> <dir>...: the first dir that has it (else the first dir)
+  local need="$1" d; shift
+  for d in "$@"; do [[ -n "$d" && -e "$d/$need" ]] && { echo "$d"; return 0; }; done
+  echo "$1"
+}
+GROOT_DIR="${GROOT_DIR:-$(first_dir .venv/bin/python /work/arena/gr00t_n17 /work/groot/gr00t_n17)}"
+CKPT_DEFAULT="${GROOT_CKPT:-$(first_dir config.json \
+  /work/arena/models/isaaclab_arena/static_apple_tutorial/gn1x_tuned_static_apple /work/groot/models/gn1x_tuned_static_apple)}"
+GROOT_TASKSET="${GROOT_TASKSET-}"
+GROOT_NICE="${GROOT_NICE:-0}"
+GROOT_THREADS="${GROOT_THREADS-}"
 LOG_DIR=/work/logs/groot
 
 cmd="${1:-}"; shift || true
@@ -53,7 +77,8 @@ die() { log "ERROR: $*"; exit 1; }
 
 client_py() {
   local c
-  for c in "${GROOT_CLIENT_PY:-}" /work/groot/venv/bin/python "$REPO/.venv/bin/python" python3; do
+  for c in "${GROOT_CLIENT_PY:-}" /work/groot/venv/bin/python "$REPO/.venv-rt/bin/python" "$REPO/.venv/bin/python" \
+           python3; do
     [[ -n "$c" ]] || continue
     if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import numpy, zmq, msgpack' >/dev/null 2>&1; then
       echo "$c"; return 0
@@ -85,7 +110,7 @@ start() {
     log "tmux $SESSION already exists"; status; return 0
   fi
   listening && die "port $PORT is already in use (ss -ltnp 'sport = :$PORT')"
-  [[ -x "$GROOT_DIR/.venv/bin/python" ]] || die "$GROOT_DIR/.venv missing (arena_spike/setup_gr00t_envs.sh n17)"
+  [[ -x "$GROOT_DIR/.venv/bin/python" ]] || die "$GROOT_DIR/.venv missing (docs/groot_serving.md §1.1: clone Isaac-GR00T @ 4b1dca9d, uv sync --python 3.10)"
   local sha; sha="$(git -C "$GROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
   [[ "$sha" == "$GROOT_SHA_EXPECTED" ]] || log "WARNING: $GROOT_DIR is at $sha, expected $GROOT_SHA_EXPECTED"
   local f; for f in config.json processor_config.json statistics.json model.safetensors.index.json; do
@@ -93,12 +118,21 @@ start() {
   done
   mkdir -p "$LOG_DIR"
   {
-    echo "===== $(date -u +%FT%TZ) start port=$PORT gpu=$GPU ckpt=$CKPT groot=$sha offline=${HF_HUB_OFFLINE:-0}"
+    echo "===== $(date -u +%FT%TZ) start port=$PORT gpu=$GPU ckpt=$CKPT groot=$sha offline=${HF_HUB_OFFLINE:-0}" \
+         "taskset=${GROOT_TASKSET:-none} nice=$GROOT_NICE threads=${GROOT_THREADS:-default}"
   } >> "$LOG"
   local t0; t0=$(date +%s.%N)
+  # CPU placement (only matters when the server shares a box with the SONIC deploy and Isaac, PLAN §0.11): taskset,
+  # nice, thread caps
+  local pre="" thr=""
+  [[ -n "$GROOT_TASKSET" ]] && pre="taskset -c $GROOT_TASKSET "
+  [[ "$GROOT_NICE" != 0 ]] && pre="${pre}nice -n $GROOT_NICE "
+  [[ -n "$GROOT_THREADS" ]] && thr="OMP_NUM_THREADS=$GROOT_THREADS MKL_NUM_THREADS=$GROOT_THREADS \
+OPENBLAS_NUM_THREADS=$GROOT_THREADS TORCH_NUM_THREADS=$GROOT_THREADS "
+  log "placement: taskset '${GROOT_TASKSET:-none}', nice $GROOT_NICE, threads '${GROOT_THREADS:-default}'"
   tmux new-session -d -s "$SESSION" "cd '$GROOT_DIR' && export CUDA_VISIBLE_DEVICES='$GPU' HF_HOME='$HF_HOME' \
-HF_HUB_OFFLINE='${HF_HUB_OFFLINE:-0}' NO_ALBUMENTATIONS_UPDATE=1 PYTHONUNBUFFERED=1 && \
-.venv/bin/python gr00t/eval/run_gr00t_server.py --model-path '$CKPT' --embodiment-tag NEW_EMBODIMENT \
+HF_HUB_OFFLINE='${HF_HUB_OFFLINE:-0}' NO_ALBUMENTATIONS_UPDATE=1 PYTHONUNBUFFERED=1 $thr&& \
+${pre}.venv/bin/python gr00t/eval/run_gr00t_server.py --model-path '$CKPT' --embodiment-tag NEW_EMBODIMENT \
 --device cuda --host 127.0.0.1 --port $PORT 2>&1 | tee -a '$LOG'"
   log "tmux $SESSION started; waiting up to ${WAIT}s for ping on $ENDPOINT (log $LOG)"
   local deadline=$(( $(date +%s) + WAIT ))
@@ -128,7 +162,8 @@ HF_HUB_OFFLINE='${HF_HUB_OFFLINE:-0}' NO_ALBUMENTATIONS_UPDATE=1 PYTHONUNBUFFERE
 {"port": $PORT, "pid": ${pid:-null}, "session": "$SESSION", "bind": "$bind", "ckpt": "$CKPT",
  "groot_dir": "$GROOT_DIR", "groot_sha": "$sha", "gpu": "$GPU", "started_utc": "$(date -u +%FT%TZ)",
  "ready_s": $ready, "vram_mib_after_load": ${vram:-null}, "first_call_ms": ${warm_json:-null},
- "vram_mib_after_warm": ${vram_warm:-null}}
+ "vram_mib_after_warm": ${vram_warm:-null}, "host": "$(hostname)", "taskset": "$GROOT_TASKSET",
+ "nice": $GROOT_NICE, "threads": "$GROOT_THREADS"}
 JSON
   [[ "$bind" == "127.0.0.1:$PORT" ]] || die "server bound to '$bind', expected 127.0.0.1:$PORT only"
 }
@@ -156,10 +191,29 @@ status() {
   return 0
 }
 
+ensure() {  # a server that answers is left alone (whatever its placement); otherwise start it, warm (dev box)
+  if do_ping 3 >/dev/null 2>&1; then log "PolicyServer answers on $ENDPOINT"; do_ping 3; return 0; fi
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    log "tmux $SESSION exists but $ENDPOINT does not answer: restarting it"; stop
+  fi
+  WARM=1; start
+}
+
+where() {
+  local sha; sha="$(git -C "$GROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "groot_dir: $GROOT_DIR ($sha$([[ "$sha" == "$GROOT_SHA_EXPECTED" ]] && echo ", the expected pin" || echo ", NOT $GROOT_SHA_EXPECTED"))"
+  echo "venv:      $([[ -x "$GROOT_DIR/.venv/bin/python" ]] && echo "$GROOT_DIR/.venv" || echo missing)"
+  echo "ckpt:      $CKPT ($([[ -f "$CKPT/config.json" ]] && echo present || echo MISSING))"
+  echo "placement: taskset '${GROOT_TASKSET:-none}', nice $GROOT_NICE, threads '${GROOT_THREADS:-default}'"
+  echo "endpoint:  $ENDPOINT"
+}
+
 case "$cmd" in
   start) start;;
+  ensure) ensure;;
+  where) where;;
   stop) stop;;
   status) status;;
   ping) do_ping 3;;
-  *) sed -n '2,20p' "$0"; exit 2;;
+  *) sed -n '2,36p' "$0"; exit 2;;
 esac

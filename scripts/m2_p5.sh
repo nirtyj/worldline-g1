@@ -15,7 +15,9 @@
 # default --speed), so every runtime timeout is in wall seconds. Keys come from ~/.config/ludo-g1/secrets.env
 # (00_infra/secrets.sh), which ui.server reads itself; start refuses to launch a live planner or System 1 without them.
 # Ready = HTTP 200 on / and an `init` for that scene and profile with no error on /ws (scripts/p5_probe.py).
-# CPU pinning: P5_TASKSET (default 4-15 on Linux, like the body; "" disables). Logs: $LOGD/<session>-<ts>-p5.log.
+# CPU pinning: P5_TASKSET (default 4-15 on Linux, like the body; "" disables): never the SONIC deploy's 0-3, and that
+# includes the GR00T client of `full` (frame decode, the 0.92 MB request) that runs in P5. P5_THREADS (default 2) caps
+# the CPU thread pools of numpy/BLAS in P5 (OMP/OpenBLAS/MKL; "" = no cap). Logs: $LOGD/<session>-<ts>-p5.log.
 # The last start's options live in $M2_STATE/p5-<session>.env.
 set -euo pipefail
 [[ -f /etc/profile.d/ludo.sh ]] && source /etc/profile.d/ludo.sh; true
@@ -29,7 +31,7 @@ LIVE_PLANNER=agent.model:create_brain
 LIVE_SYSTEM1=brains.system1_jev:create
 
 cmd=${1:-status}; shift || true
-[[ "$cmd" == -h || "$cmd" == --help ]] && { sed -n '2,23p' "$0"; exit 0; }
+[[ "$cmd" == -h || "$cmd" == --help ]] && { sed -n '2,21p' "$0"; exit 0; }
 SESSION=wl-m2; OFFSET=""; PORT=""; PROFILE=""; SCENE=""; PLANNER=""; SYSTEM1=""; TIMEOUT=${P5_TIMEOUT:-300}
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     --planner) PLANNER="$2"; shift 2;;
     --system1) SYSTEM1="$2"; shift 2;;
     --timeout) TIMEOUT="$2"; shift 2;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
 done
@@ -56,6 +58,7 @@ fi
 OFFSET=${OFFSET:-${WL_PORT_OFFSET:-0}}; PORT=${PORT:-$((8765 + OFFSET))}; PROFILE=${PROFILE:-sonic}
 SCENE=${SCENE:-procthor-train-40}; PLANNER=${PLANNER:-$LIVE_PLANNER}; SYSTEM1=${SYSTEM1:-$LIVE_SYSTEM1}
 if [[ "$(uname -s)" == Linux ]]; then P5_TASKSET=${P5_TASKSET-4-15}; else P5_TASKSET=""; fi
+P5_THREADS=${P5_THREADS-2}
 
 say() { echo "[m2_p5 $(date +%H:%M:%S)] $*"; }
 die() { echo "[m2_p5] ERROR: $*" >&2; exit 1; }
@@ -101,7 +104,7 @@ P5_SYSTEM1=$SYSTEM1
 P5_LOG=$log
 EOF
   # like m1_up.sh: the window sources the box env itself (a running tmux server passes its own env, not ours)
-  env_src="source /etc/profile.d/ludo.sh 2>/dev/null; export WL_PORT_OFFSET=$OFFSET PYTHONUNBUFFERED=1${WORLDLINE_RUNS:+ WORLDLINE_RUNS=$WORLDLINE_RUNS};"
+  env_src="source /etc/profile.d/ludo.sh 2>/dev/null; export WL_PORT_OFFSET=$OFFSET PYTHONUNBUFFERED=1${WORLDLINE_RUNS:+ WORLDLINE_RUNS=$WORLDLINE_RUNS}${P5_THREADS:+ OMP_NUM_THREADS=$P5_THREADS OPENBLAS_NUM_THREADS=$P5_THREADS MKL_NUM_THREADS=$P5_THREADS};"
   # tee -i: Ctrl-C reaches only the server, so its shutdown lines (session stop, "stopped") still reach the log
   p5="$env_src cd $WL && exec ${P5_TASKSET:+taskset -c $P5_TASKSET }$PY_RT -u -m ui.server --host 127.0.0.1 --port $PORT --port-offset $OFFSET --profile $PROFILE --scene $SCENE --planner $PLANNER --system1 $SYSTEM1 2>&1 | tee -i -a $log"
   if tmux has-session -t "=$SESSION" 2>/dev/null; then

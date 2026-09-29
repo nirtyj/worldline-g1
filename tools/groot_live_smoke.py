@@ -435,6 +435,17 @@ def _palms(q17: np.ndarray) -> dict[str, np.ndarray]:
     return {k: np.array([p[k] for p in pts]) for k in ("left_palm", "right_palm")}
 
 
+def profile_groot_cfg(profile: str, **over: Any):
+    """GrootArmsConfig from the profile's `groot_arms:` section (as services.executors.groot_arms.create reads it),
+    then the given overrides."""
+    from robot.profile import load_profile
+    from services.executors.groot_arms import GrootArmsConfig
+    cfg = GrootArmsConfig.from_dict(dict((load_profile(profile).raw or {}).get("groot_arms") or {}))
+    for k, v in over.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
 def one_epoch_space(robot: Any) -> bool:
     """True on the M2b façade (R.2): SonicBody.fence maps an execution's control_epoch/generation onto the body's
     numbers and HaltGate works in control_epoch space. False on the M1 façade (raw numbers, its own gate counter)."""
@@ -518,12 +529,10 @@ def g2_session_report(kind: str, out, s, sends: list[dict], t_trig: float | None
 async def g2_async(a: argparse.Namespace) -> dict:
     import random
 
-    from api.execution import Execution, ExecutionManager, ResultHandle
+    from api.execution import ExecutionManager, ResultHandle
     from robot.factory import build
     from services.common import EventSink
-    from services.executors.groot_arms import (BodyArmPort, GrootArmExecutor, GrootArmsConfig, ZmqSensors,
-                                               _groot_helpers)
-    from services.executors.kinematic_attach import ManipJob
+    from services.executors.groot_arms import BodyArmPort, GrootArmExecutor, ZmqSensors, _groot_helpers
     from services.skills import load_skill_specs
     from sim.clock import SimClock
     from sim.log import EventLog
@@ -602,8 +611,12 @@ async def g2_async(a: argparse.Namespace) -> dict:
         arm = RecordingArm(port)
         events: list[dict] = []
         arm.subscribe(lambda ev: events.append({**ev, "t_rx": time.monotonic()}))
-        cfg = GrootArmsConfig(endpoint=a.endpoint, max_duration_s=a.max_s, view_min_px=a.view_min_px,
-                              lead_s=a.lead_s, camera_hz=30.0)
+        # the profile's own groot_arms section (config/profiles/full.yaml: the render budget of §9 included), so G2
+        # runs the session exactly as `full` does; only the run's knobs are overridden
+        cfg = profile_groot_cfg(a.profile, endpoint=a.endpoint, max_duration_s=a.max_s, view_min_px=a.view_min_px,
+                                lead_s=a.lead_s)
+        rep["groot_cfg"] = {k: getattr(cfg, k) for k in ("camera_hz", "camera_warm_hz", "session_head_hz", "frame_sync",
+                                                         "replan_s", "lead_s", "timeout_s", "endpoint")}
         rec = ChainRecorder(out, every=a.frame_every)
         helpers = rec.wrap(_groot_helpers())
         log = EventLog(clock)

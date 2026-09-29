@@ -7,10 +7,16 @@
 #
 # MAIN box:
 #   bash scripts/groot_link.sh keygen                        # ~/.ssh/groot_link_ed25519 (once); prints the public key
+#   bash scripts/groot_link.sh pin-host --host DEV_IP 'ssh-ed25519 AAAA…'   # the dev box's host key (from the laptop's
+#                                                            # 00_infra/.state-ludo-g1-arena/known_hosts): no TOFU
 #   bash scripts/groot_link.sh up --host DEV_IP [--port 5550] [--local-port 5550] [--user ubuntu]
+#                                                            # a running link to another host is replaced (new IPs
+#                                                            # after a Brev restart, groot_serving.md §5.2)
 #   bash scripts/groot_link.sh down | status | check [--local-port 5550]
 #   bash scripts/groot_link.sh ensure [--local-port 5550]     # check; if the link is down, bring it up again with the
 #                                                            # host of the last `up` (m2_up.sh --profile full runs this)
+# Env: GROOT_LINK_TASKSET  CPUs of the tunnel's ssh client (default 4-15 on the main box: never the SONIC deploy's
+#                          0-3, m1_up.sh; "" = no pinning); GROOT_LINK_NICE (default 5)
 # DEV box:
 #   bash scripts/groot_link.sh install-key 'ssh-ed25519 AAAA… groot-link@main' [--from MAIN_IP] [--port 5550]
 #                                                            (or --pub-file FILE)
@@ -33,7 +39,7 @@ log() { printf '[groot_link %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
 cmd="${1:-}"; shift || true
-HOST=""; USER_="ubuntu"; PORT=5550; LPORT=""; FROM=""; TAG="groot-link"; PUB=""
+HOST=""; USER_="ubuntu"; PORT=5550; LPORT=""; FROM=""; TAG="groot-link"; PUB=""; HOSTKEY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host) HOST="$2"; shift 2;;
@@ -43,12 +49,14 @@ while [[ $# -gt 0 ]]; do
     --from) FROM="$2"; shift 2;;
     --tag) TAG="$2"; shift 2;;
     --pub-file) PUB="$(cat "$2")"; shift 2;;
-    ssh-ed25519\ *) PUB="$1"; shift;;
+    ssh-ed25519\ *) PUB="$1"; HOSTKEY="$1"; shift;;
     *) die "unknown arg $1 (quote the public key as ONE argument)";;
   esac
 done
 LPORT="${LPORT:-$PORT}"
 [[ "$PORT" =~ ^[0-9]+$ && "$LPORT" =~ ^[0-9]+$ ]] || die "bad port"
+LINK_TASKSET="${GROOT_LINK_TASKSET-$([[ "$(uname -s)" == Linux ]] && echo 4-15)}"
+LINK_NICE="${GROOT_LINK_NICE:-5}"
 
 client_py() {
   local c
@@ -94,23 +102,45 @@ keygen() {
 STATE_ENV() { echo "$LOG_DIR/link-$LPORT.env"; }   # the last `up`'s host/user/port, for `ensure`
 
 up() {
-  if [[ -z "$HOST" && -f "$(STATE_ENV)" ]]; then source "$(STATE_ENV)"; HOST="$LINK_HOST"; USER_="$LINK_USER"; PORT="$LINK_PORT"; fi
+  local want="$HOST"
+  if [[ -f "$(STATE_ENV)" ]]; then
+    source "$(STATE_ENV)"
+    [[ -z "$HOST" ]] && { HOST="$LINK_HOST"; USER_="$LINK_USER"; PORT="$LINK_PORT"; }
+  fi
   [[ -n "$HOST" ]] || die "--host DEV_IP required (no earlier up recorded in $(STATE_ENV))"
   [[ -f "$KEY" ]] || die "no $KEY (run: groot_link.sh keygen, then install the key on the dev box)"
-  tmux has-session -t "$SESSION" 2>/dev/null && { log "tmux $SESSION already up"; status; return 0; }
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    if [[ -n "$want" && "$want" != "${LINK_HOST:-}" ]]; then   # the dev box's IP changed (a Brev restart)
+      log "tmux $SESSION goes to ${LINK_HOST:-?}: replacing it with $want"; down
+    else
+      log "tmux $SESSION already up"; status; return 0
+    fi
+  fi
   mkdir -p "$LOG_DIR"
   printf 'LINK_HOST=%q\nLINK_USER=%q\nLINK_PORT=%q\n' "$HOST" "$USER_" "$PORT" > "$(STATE_ENV)"
   local ssh_cmd; ssh_cmd="$(tunnel_cmd)"
+  # CPU placement: the tunnel's ssh encrypts ~2.3 MB/s while GR00T runs (0.92 MB requests at 2.5 Hz); keep it off the
+  # SONIC deploy's cores (0-3) and below the stack's priority
+  local pre=""
+  [[ -n "$LINK_TASKSET" ]] && command -v taskset >/dev/null 2>&1 && pre="taskset -c $LINK_TASKSET "
+  [[ "$LINK_NICE" != 0 ]] && pre="${pre}nice -n $LINK_NICE "
   local runner
   if command -v autossh >/dev/null 2>&1; then
-    runner="AUTOSSH_GATETIME=0 AUTOSSH_POLL=30 exec autossh -M 0 ${ssh_cmd#ssh }"
+    runner="AUTOSSH_GATETIME=0 AUTOSSH_POLL=30 exec ${pre}autossh -M 0 ${ssh_cmd#ssh }"
   else  # reconnect loop: ssh exits when the link dies (ServerAlive 3 x 5 s) or the forward cannot bind
-    runner="while true; do $ssh_cmd; echo \"\$(date -u +%FT%TZ) ssh exited rc=\$?; reconnect in 2 s\"; sleep 2; done"
+    runner="while true; do ${pre}$ssh_cmd; echo \"\$(date -u +%FT%TZ) ssh exited rc=\$?; reconnect in 2 s\"; sleep 2; done"
   fi
-  tmux new-session -d -s "$SESSION" "exec >>'$LOG_DIR/link-$LPORT.log' 2>&1; echo \"\$(date -u +%FT%TZ) up $HOST\"; $runner"
-  log "tmux $SESSION: 127.0.0.1:$LPORT -> $HOST 127.0.0.1:$PORT ($(command -v autossh >/dev/null && echo autossh || echo 'reconnect loop'))"
+  tmux new-session -d -s "$SESSION" "exec >>'$LOG_DIR/link-$LPORT.log' 2>&1; echo \"\$(date -u +%FT%TZ) up $HOST (taskset ${LINK_TASKSET:-none}, nice $LINK_NICE)\"; $runner"
+  log "tmux $SESSION: 127.0.0.1:$LPORT -> $HOST 127.0.0.1:$PORT ($(command -v autossh >/dev/null && echo autossh || echo 'reconnect loop'), taskset ${LINK_TASKSET:-none}, nice $LINK_NICE)"
   local i; for i in $(seq 1 15); do ping_port "$LPORT" 2 >/dev/null 2>&1 && { log "PolicyServer answers through the link"; return 0; }; sleep 1; done
   log "no ping through the link yet (server down? see $LOG_DIR/link-$LPORT.log); the link keeps retrying"
+}
+
+pin_host() {  # the dev box's host key, so the first connect is not trust-on-first-use; replaces older pins
+  [[ -n "$HOST" && "$HOSTKEY" == ssh-ed25519\ * ]] || die "pin-host --host DEV_IP 'ssh-ed25519 AAAA…'"
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  echo "$HOST $(awk '{print $1" "$2}' <<<"$HOSTKEY")" > "$KNOWN" && chmod 600 "$KNOWN"
+  log "pinned $HOST in $KNOWN"
 }
 
 link_ssh_pids() {  # the ssh/autossh clients of this link only (never a shell whose command line mentions it)
@@ -131,6 +161,8 @@ status() {
   echo "session: $(tmux has-session -t "$SESSION" 2>/dev/null && echo up || echo down)"
   echo "listen:  $(ss -ltn "sport = :$LPORT" 2>/dev/null | awk 'NR>1{print $4}' | paste -sd, - || true)"
   echo "ping:    $(ping_port "$LPORT" 2 2>/dev/null || true)"
+  local p; for p in $(link_ssh_pids); do echo "ssh:     pid $p, $(taskset -cp "$p" 2>/dev/null | sed 's/.*: /cpus /'), nice $(ps -o ni= -p "$p" | tr -d ' ')"; done
+  [[ -f "$(STATE_ENV)" ]] && echo "host:    $(sed -n 's/^LINK_HOST=//p' "$(STATE_ENV)")"
   [[ -f "$LOG_DIR/link-$LPORT.log" ]] && { echo "log tail:"; tail -3 "$LOG_DIR/link-$LPORT.log"; }
   return 0
 }
@@ -215,11 +247,12 @@ case "$cmd" in
   up) up;;
   down) down;;
   status) status;;
+  pin-host) pin_host;;
   check) ping_port "$LPORT" 3;;
   ensure) ensure;;
   install-key) install_key;;
   remove-key) remove_key;;
   auth-line) [[ -n "$PUB" ]] || die "auth-line 'ssh-ed25519 AAAA…' [--from IP]"; auth_line "$PUB" "$FROM" "$PORT";;
   selftest) selftest;;
-  *) sed -n '2,22p' "$0"; exit 2;;
+  *) sed -n '2,28p' "$0"; exit 2;;
 esac

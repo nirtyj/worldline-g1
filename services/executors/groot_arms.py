@@ -10,10 +10,17 @@ control semantics: lease and session fence, cancel, halt, stale chunks, the poli
     run(job)   stance_check  base at rest (waits settle_s for SONIC's glide) and upright; else failed(base_moving |
                              fell) with the body untouched. The service already checked the drift since
                              check_reachability
-               camera        the ego camera on (world.enable_camera(consumer=<execution id>, ttl_s, hz=30), renewed
+               camera        the ego camera on (world.enable_camera(consumer=<execution id>, ttl_s, hz), renewed
                              while the session runs; P1 renders ego_view only while a consumer holds it, and its
                              `detections` op answers `camera_off` otherwise, so this comes before the view check);
-                             waits up to camera_wait_s for the first frame (P1 skips 4 warm-up frames, ~0.2 s)
+                             waits up to camera_wait_s for the first frame (P1 skips 4 warm-up frames: enabled at
+                             camera_warm_hz, 10 Hz in `full`, that is ~0.4 s), then streams at camera_hz
+               render budget P1 renders EVERY enabled camera product at every render call (docs/viz.md §4), so an
+                             enabled ego_view is rendered at the head camera's rate whatever its own rate is. With
+                             session_head_hz > 0 the head camera drops to that rate for the session (restored after):
+                             `full` renders head + ego_view once per inference (2.5 Hz) and the client waits for
+                             each fresh frame (frame_sync), the measured fix for SONIC's timing gate
+                             (docs/groot_serving.md §9)
                view_check    >= view_min_px (200) of the object in the GR00T camera, from world.detections(camera=
                              "ego_view") when the world advertises it (capabilities()["detections:ego_view"]);
                              else skipped, and the result says so (INTERIM)
@@ -167,7 +174,13 @@ class GrootArmsConfig:
     camera_refresh_s: float = 3.0
     camera_hz: float = 30.0              # passed with every enable: P1 keeps a camera's rate across off/on
                                          # (docs/contracts/p1_m2b.md §5.4), so a session must say which it needs
+    camera_warm_hz: float = 0.0          # the rate the session enables ego_view at, until its first frame (P1 skips
+                                         # 4 warm-up frames per enable: 1.6 s at 2.5 Hz); 0 = camera_hz
     camera_wait_s: float = 1.5           # the first ego frame after enabling (measured 0.18-0.19 s, §13.1)
+    session_head_hz: float = 0.0         # the head camera's rate while the session holds ego_view (P1 renders every
+                                         # enabled product at every render call), restored afterwards; 0 = leave it
+    frame_sync: bool = False             # when due and the newest frame is older than frame_max_age_s, wait for the
+                                         # next frame (a camera at the inference rate) instead of polling
     debug_port: int = 5557               # SONIC g1_debug PUB
     frame_max_age_s: float = 0.15
     state_max_age_s: float = 0.06
@@ -211,7 +224,7 @@ class GrootArmsConfig:
                 continue
             v = d[f.name]
             kw[f.name] = v if f.name in ("endpoint", "camera") else (
-                bool(v) if f.name in ("warmup", "camera_swap_rb") else
+                bool(v) if f.name in ("warmup", "camera_swap_rb", "frame_sync") else
                 int(v) if f.name in ("camera_port", "debug_port", "min_rows_left", "max_errors") else float(v))
         cfg = cls(**kw)
         env = os.environ.get(ENDPOINT_ENV)
@@ -244,6 +257,8 @@ class SensorPort(Protocol):
     time.monotonic() it was received."""
     def ego_frame(self) -> tuple[np.ndarray | None, float]: ...
     def debug_state(self) -> tuple[dict | None, float]: ...
+    # optional: wait_frame(after: float, timeout_s: float) -> bool, True once a frame captured after `after` arrived
+    # (frame_sync; ZmqSensors has it, a port without it is polled)
 
 
 @dataclass
@@ -308,6 +323,10 @@ class Session:
         self.rejects_run = 0                                     # consecutive body refusals
         self.last_error: str | None = None
         self.obs_stale = 0
+        self.frame_waits = 0                                     # frame_sync: waits for a fresh frame, and their time
+        self.frame_wait_s = 0.0
+        self.last_frame_t: float | None = None                   # capture time of the last frame sent to the policy
+        self.head_prev_hz: float | None = None                   # session_head_hz: the head rate to restore
         self.last_obs_age: tuple[float, float] | None = None
         self.last_t0: float | None = None
         self.last_T = 0
@@ -524,6 +543,11 @@ class GrootArmClient(threading.Thread):
                 time.sleep(0.01)
                 continue
             frame, t_frame = self.sensors.ego_frame()
+            if cfg.frame_sync and (frame is None or time.monotonic() - t_frame > cfg.frame_max_age_s
+                                   or (s.last_frame_t is not None and t_frame <= s.last_frame_t)):
+                frame, t_frame = self._fresh_frame(t_frame if frame is not None else 0.0)
+                if s.fenced is not None:
+                    return
             dbg, t_dbg = self.sensors.debug_state()
             now = time.monotonic()
             f_age = now - t_frame if frame is not None else math.inf
@@ -562,12 +586,35 @@ class GrootArmClient(threading.Thread):
             lat = (time.monotonic() - t_req) * 1000.0
             s.errors = 0
             s.inferences += 1
+            s.last_frame_t = t_frame
             s.latencies_ms.append(lat)
             if s.fenced is not None:
                 s.dropped["stale_session"] += 1
                 s.emit("groot.inference", ok=True, latency_ms=round(lat, 1), dropped="stale_session")
                 return
             self._handle_action(action, t_dbg, lat)
+
+    def _fresh_frame(self, after: float) -> tuple[np.ndarray | None, float]:
+        """frame_sync: wait for a frame captured after `after` (the camera renders at about the inference rate, so
+        the newest frame is often most of a period old), up to one camera period + 0.3 s, keeping the body's session
+        alive; returns the newest frame either way (an old one then counts as stale in the loop)."""
+        s, cfg = self.s, self.cfg
+        wait = getattr(self.sensors, "wait_frame", None)
+        t0 = time.monotonic()
+        t_end = t0 + 1.0 / max(cfg.camera_hz, 0.5) + 0.3
+        s.frame_waits += 1
+        while s.fenced is None and time.monotonic() < t_end:
+            if callable(wait):
+                if wait(after, min(0.1, max(t_end - time.monotonic(), 0.0))):
+                    break
+            else:
+                _, t = self.sensors.ego_frame()
+                if t > after:
+                    break
+                time.sleep(0.01)
+            self._keepalive()
+        s.frame_wait_s += time.monotonic() - t0
+        return self.sensors.ego_frame()
 
     def _ping(self) -> bool:
         try:
@@ -989,7 +1036,7 @@ class GrootArmExecutor:
         return {"ran": True, "camera": cam, "px": round(px, 1), "min_px": self.cfg.view_min_px, "method": method,
                 "ok": px >= self.cfg.view_min_px}
 
-    async def _camera(self, s: Session, on: bool, notes: list[str] | None = None) -> None:
+    async def _camera(self, s: Session, on: bool, notes: list[str] | None = None, hz: float | None = None) -> None:
         """P1 renders ego_view only while a consumer holds it (docs/contracts/p1_m2b.md §5.4): the session is the
         consumer, with a TTL so a crashed runtime cannot leave the camera rendering."""
         if not self._caps().get("enable_camera"):
@@ -999,7 +1046,7 @@ class GrootArmExecutor:
             return
         kw: dict[str, Any] = {"consumer": s.id, "ttl_s": self.cfg.camera_ttl_s}
         if on:
-            kw["hz"] = self.cfg.camera_hz
+            kw["hz"] = hz or self.cfg.camera_hz
         try:
             try:
                 await asyncio.to_thread(self.world.enable_camera, self.cfg.camera, on, **kw)
@@ -1009,6 +1056,27 @@ class GrootArmExecutor:
         except Exception as e:  # noqa: BLE001 - NotSupported on a P1 without the op, a P1 timeout
             if notes is not None:
                 notes.append(f"{self.cfg.camera} enable_camera({on}) failed: {e}"[:200])
+
+    async def _head_rate(self, s: Session, on: bool, notes: list[str] | None = None) -> None:
+        """session_head_hz: the head camera at that rate while the session renders ego_view, then back to the rate it
+        had. It keeps its own `default` consumer (no TTL), so only the rate changes; a runtime that dies mid-session
+        leaves the lower rate until the next session or a restart of P1 (docs/groot_serving.md §9)."""
+        hz = float(self.cfg.session_head_hz or 0.0)
+        if hz <= 0 or not self._caps().get("enable_camera"):
+            return
+        try:
+            if on:
+                rep = await asyncio.to_thread(self.world.enable_camera, "head", True, consumer="default")
+                prev = (rep or {}).get("hz") if isinstance(rep, dict) else None
+                if isinstance(prev, (int, float)) and prev > 0 and s.head_prev_hz is None:
+                    s.head_prev_hz = float(prev)
+                await asyncio.to_thread(self.world.enable_camera, "head", True, consumer="default", hz=hz)
+            elif s.head_prev_hz is not None:
+                await asyncio.to_thread(self.world.enable_camera, "head", True, consumer="default",
+                                        hz=s.head_prev_hz)
+        except Exception as e:  # noqa: BLE001 - a world without the op, a P1 timeout: the rate stays as it was
+            if notes is not None:
+                notes.append(f"head camera rate {'set' if on else 'restore'} failed: {e}"[:200])
 
     async def _first_frame(self, t_on: float) -> float | None:
         """Seconds from enabling the camera to the first ego frame captured after it, None if none came within
@@ -1066,7 +1134,7 @@ class GrootArmExecutor:
         extra["pose0"] = (pose0.x, pose0.y)
         # 2. the ego camera on (P1's `detections` answers camera_off otherwise), then the view check
         t0 = time.monotonic()
-        await self._camera(s, True, notes)
+        await self._camera(s, True, notes, hz=cfg.camera_warm_hz or None)
         judge: GtJudge | None = None
         verdict: tuple[str, str | None, str] | None = None
         opened = False
@@ -1088,6 +1156,10 @@ class GrootArmExecutor:
                             f"{vc['px']:.0f} px of {job.object_id} in {cfg.camera} (< {cfg.view_min_px:.0f})")
             if self._fenced_by(handle, job, s):
                 return self._early_fence(s, done)
+            # the stream rate (camera_warm_hz only covered P1's warm-up frames) and the session's head rate
+            if cfg.camera_warm_hz and cfg.camera_warm_hz != cfg.camera_hz:
+                await self._camera(s, True, notes)
+            await self._head_rate(s, True, notes)
             # 3. enter: the arm session opens with open hands
             t0 = time.monotonic()
             unsub = self.arm.subscribe(self._body_event(s))
@@ -1126,6 +1198,7 @@ class GrootArmExecutor:
                 unsub()
         finally:
             await self._camera(s, False)
+            await self._head_rate(s, False, notes)
             self._flush(s)
         status, reason, detail = verdict
         self._phase(s, phases, "execute", t_exec, inferences=s.inferences, chunks_sent=s.chunks_sent,
@@ -1283,6 +1356,10 @@ class GrootArmExecutor:
             "base_shift_m": round(shift, 3), "obs_stale": s.obs_stale, "policy_errors": s.errors_total,
             "hold_on_end": hold, "carry": CARRY_LABEL if status == "succeeded" else None,
             "view_check": extra.get("view_check"), "camera_first_frame_s": extra.get("camera_first_frame_s"),
+            "render": {"ego_hz": self.cfg.camera_hz, "warm_hz": self.cfg.camera_warm_hz or self.cfg.camera_hz,
+                       "session_head_hz": self.cfg.session_head_hz or None, "head_restored_hz": s.head_prev_hz,
+                       "frame_sync": self.cfg.frame_sync, "frame_waits": s.frame_waits,
+                       "frame_wait_s": round(s.frame_wait_s, 2)},
             "gt": judge.summary() if judge is not None else None,
             "cancel_ack_ms": None if s.t_ack is None or s.t_fence is None else round((s.t_ack - s.t_fence) * 1000, 2),
             "notes": list(notes), "attempts": [attempt],
@@ -1377,6 +1454,7 @@ class ZmqSensors:
     def __init__(self, camera_ep: str, debug_ep: str, camera_key: str = "ego_view", swap_rb: bool = True):
         self.camera_ep, self.debug_ep, self.key, self.swap_rb = camera_ep, debug_ep, camera_key, swap_rb
         self._lock = threading.Lock()
+        self._new_frame = threading.Condition(self._lock)
         self._frame: tuple[Any, float] | None = None
         self._decoded: tuple[int, np.ndarray] | None = None
         self._seq = 0
@@ -1422,6 +1500,7 @@ class ZmqSensors:
             with self._lock:
                 self._seq += 1
                 self._frame = (img, t)
+                self._new_frame.notify_all()
         s.close(0)
 
     def _dbg_loop(self) -> None:
@@ -1458,6 +1537,13 @@ class ZmqSensors:
         with self._lock:
             self._decoded = (seq, rgb)
         return rgb, fr[1]
+
+    def wait_frame(self, after: float, timeout_s: float) -> bool:
+        """Block until a frame captured after `after` (monotonic) is held, or timeout_s; True when one is."""
+        self.start()
+        with self._lock:
+            return self._new_frame.wait_for(lambda: self._frame is not None and self._frame[1] > after,
+                                            timeout=max(0.0, timeout_s))
 
     def debug_state(self) -> tuple[dict | None, float]:
         self.start()
