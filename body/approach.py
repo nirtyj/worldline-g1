@@ -8,9 +8,10 @@ the goal and the facing held at the goal yaw (planner_onnx.md:152-176: facing an
 strafes or walks backwards without turning).
 
 What SONIC does with such commands (live, procthor-train-38, velocity-op pulses from a stand, 2026-09-29,
-outputs/body_wave/approach-char-*): nothing is repeatable open loop. The first 1 cm of travel comes 0.25-2.0 s after
-the command; SLOW_WALK 0.2 m/s travels 0-27 cm forward/back in 1-2 s and hardly steps sideways (0-4 cm); 0.3 m/s
-steps sideways 0-18 cm, 0.4 m/s 7-50 cm; after IDLE the robot keeps going -5..+36 cm (more at higher speed). So
+outputs/body_wave/approach-char-*): nothing is repeatable open loop. The first 1 cm of travel comes 0.24-2.0 s after
+the command (or never); SLOW_WALK 0.2 m/s travels 0-27 cm forward/back in 1-2 s and hardly steps sideways (< 3 cm in
+2 s); 0.3 m/s steps sideways 0-16 cm, 0.4 m/s 7-50 cm; after IDLE the robot keeps going -5..+36 cm (more at higher
+speed). So
 the motion closes the loop on ground truth every tick instead of timing pulses:
 
   turn (FacingServo; only if |yaw error| > turn_first_deg)
