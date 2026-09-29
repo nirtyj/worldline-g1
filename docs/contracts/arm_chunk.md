@@ -20,7 +20,7 @@ inference jitter only change *which* row is played, never *when*.
 
 ```
 P5 groot_arms ── GrootArmClient thread ──────────────────────────────────────────────────────────────────────┐
-   │ SUB ego_view frame + SUB g1_debug (5557)  →  obs  →  PolicyServer REQ (1.5 s)  →  action (40 x 50 Hz)       │
+   │ SUB ego_view (P1 5566) + SUB g1_debug (5557)  →  obs  →  PolicyServer REQ (1.5 s)  →  action (40 x 50 Hz)   │
    │ t0_mono = receive time of that g1_debug                                                                   │
    └─ DEALER 5610  op "arm" {stream, session_id, generation, control_epoch, mode:"chunk", chunk{seq, t0_mono,   │
                              dt, order, upper_body T×17, left_hand T×7, right_hand T×7}}                        │
@@ -186,6 +186,9 @@ not list `"chunk"` makes the executor unhealthy ("body arm op has no chunk mode 
   an object in hand stays in hand), and the session ends `canceled`, `ended_by: "halt"`, `hold: "measured"`.
   Until `resume`, every message with `control_epoch ≤ n` is rejected `halted`. Before B.1 exists, the M1 halt is a
   body `stop` (legs only): the runtime then sends `end {hold_on_end: "measured", reason: "halted"}` itself.
+  The comparison needs one epoch space: the halt's `n` must be the harness's control epoch (PLAN §5.5: a stop bumps
+  it, `halt()` first). M2a's `HaltGate` counts its own epochs, so R.2 has to align them; until then the latch still
+  ends the session, and later messages of it are refused `stale_session`.
 - **Faults.** A fall drops the override at once, as in v0.5 (`abort`); the session ends `failed`, `ended_by:
   "fault"`.
 
