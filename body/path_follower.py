@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from .motions import Motion, MotionError, Settle, _f
+from .motions import FacingServo, Motion, MotionError, Settle, _f
 from .nav_grid import NavGrid, PlanResult, path_length
 from .wire import Pose, wrap
 
@@ -102,6 +102,7 @@ class GoToMotion(Motion):
         self.v_req = _f(a, "speed", self.cfg.v_default, self.cfg.v_min, self.cfg.v_max)
         self.pos_tol = _f(a, "pos_tol", self.cfg.pos_tol, 0.05, 1.0)
         self.final_pos_tol = _f(a, "final_pos_tol", self.cfg.final_pos_tol, self.pos_tol, 1.0)
+        self.approach_tol = _f(a, "approach_tol", self.cfg.approach_tol, 0.05, self.final_pos_tol)
         self.yaw_tol = math.radians(_f(a, "yaw_tol_deg", self.cfg.yaw_tol_deg, 1.0, 45.0))
         self.final_yaw_tol = math.radians(_f(a, "final_yaw_tol_deg", self.cfg.final_yaw_tol_deg, 1.0, 45.0))
         self.nav: NavGrid = self.ctx.get_nav()
@@ -113,6 +114,7 @@ class GoToMotion(Motion):
         self.stuck_events: list[dict] = []
         self.plans: list[dict] = []
         self.stuck = StuckDetector(self.cfg.stuck_window_s, self.cfg.stuck_min_progress_m)
+        self.servo: FacingServo | None = None
         self._plan(pose)
         self.facing_cmd = pose.yaw
         return {"plan": self.plans[-1], "goal": [float(self.goal[0]), float(self.goal[1])],
@@ -223,7 +225,7 @@ class GoToMotion(Motion):
         if self.phase == "settle":
             self.hold(self.facing_cmd)
             if self.settle.update(speed, wz):
-                if d_goal > self.final_pos_tol and self.approach_attempts < 2:
+                if d_goal > self.approach_tol and self.approach_attempts < 2:
                     self.approach_attempts += 1
                     self.phase, self.t_phase = "approach", now
                     self.approach_dir = (self.goal - p) / max(d_goal, 1e-6)
@@ -241,24 +243,22 @@ class GoToMotion(Motion):
             return None
 
         if self.phase == "final_turn":
-            err = wrap(self.goal_yaw - pose.yaw)
-            cmd = self.goal_yaw if abs(err) <= math.radians(90) else wrap(pose.yaw + math.copysign(math.radians(90), err))
-            self.facing_cmd = cmd
+            # FacingServo: SONIC's IDLE turn stops ~20 % short, so push the facing past the goal yaw by the residual
+            if self.servo is None:
+                self.servo = FacingServo(self.goal_yaw, push=self.cfg.turn_push)
+            err = self.servo.command(self, pose, now)
+            self.facing_cmd = self.servo.want()
             if abs(err) < self.yaw_tol:
-                self.hold(self.goal_yaw)
-                self.facing_cmd = self.goal_yaw
                 self.phase, self.settle = "final_settle", Settle(self.cfg.stop_v_eps, 0.4, 2.5, wz_eps=0.1)
-            elif now - self.t_phase > 15.0:
+            elif now - self.t_phase > 20.0:
                 self.phase = "check"
-            else:
-                self.turn_cmd(cmd, pose.yaw)
             return None
 
         if self.phase == "final_settle":
-            self.hold(self.goal_yaw)
+            self.hold(self.facing_cmd)
             if self.settle.update(speed, wz):
                 err = wrap(self.goal_yaw - pose.yaw)
-                if abs(err) > self.final_yaw_tol and now - self.t_phase < 15.0:
+                if abs(err) > self.final_yaw_tol and now - self.t_phase < 20.0:
                     self.phase = "final_turn"
                 else:
                     self.phase = "check"
@@ -288,6 +288,7 @@ class GoToMotion(Motion):
                 "pos_err": round(d, 4), "yaw_err_deg": None if yerr is None else round(yerr, 2),
                 "path_len_m": round(self.plans[0]["length_m"], 3) if self.plans else None,
                 "replans": self.replans, "approach_attempts": self.approach_attempts,
+                "servo": None if self.servo is None else self.servo.to_dict(),
                 "stuck_events": self.stuck_events, "plans": self.plans, **self._summary(pose)}
 
     def on_cancel(self, pose: Pose | None, reason: str) -> dict:

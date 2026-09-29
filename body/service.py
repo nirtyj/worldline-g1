@@ -489,6 +489,8 @@ def main(argv=None) -> int:
     ap.add_argument("--turn-style", choices=["idle", "slowwalk"], default="idle")
     ap.add_argument("--v-default", type=float, default=0.45)
     ap.add_argument("--pelvis-z-min", type=float, default=0.55)
+    ap.add_argument("--turn-push", type=float, default=None, help="FacingServo residual push (default 0.6)")
+    ap.add_argument("--heading-bias-ki", type=float, default=None, help="planner-frame bias integrator (default 0 = off)")
     ap.add_argument("--nav-backend", choices=["nav2", "astar"], default=None,
                     help="go_to backend (env NAV_BACKEND, default nav2; falls back to astar if Nav2 is down)")
     args = ap.parse_args(argv)
@@ -499,6 +501,10 @@ def main(argv=None) -> int:
                      turn_style=args.turn_style, v_default=args.v_default, pelvis_z_min=args.pelvis_z_min)
     if args.nav_backend:
         cfg.nav_backend = args.nav_backend
+    if args.turn_push is not None:
+        cfg.turn_push = args.turn_push
+    if args.heading_bias_ki is not None:
+        cfg.heading_bias_ki = args.heading_bias_ki
     log_dir = args.log_dir or f"/tmp/wl-body-{time.strftime('%Y%m%d-%H%M%S')}"
     svc = BodyService(cfg, log_dir=log_dir)
 

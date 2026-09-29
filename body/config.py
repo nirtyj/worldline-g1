@@ -68,7 +68,9 @@ class BodyConfig:
     robot_radius: float = 0.25
     plan_res: float = 0.10
     pos_tol: float = 0.15               # arrival radius for the follower
-    final_pos_tol: float = 0.25         # after settle; E3 allows 0.30
+    final_pos_tol: float = 0.25         # success tolerance after settle; E3 allows 0.30
+    approach_tol: float = 0.12          # after settle, a slow holonomic approach runs while the error is above this
+                                        # (SONIC glides 0.1-0.2 m after IDLE: stops take 0.4-1.1 s, sonic_deploy.md §6)
     yaw_tol_deg: float = 6.0
     final_yaw_tol_deg: float = 12.0     # E3 allows 15
     lookahead_m: float = 0.6
@@ -79,7 +81,16 @@ class BodyConfig:
     settle_s: float = 0.8
     stop_v_eps: float = 0.05
     turn_style: str = "idle"            # "idle": IDLE + facing (keyboard Q/E); "slowwalk": fallback
-    heading_bias_ki: float = 0.4        # outer-loop heading bias integrator [1/s]
+    walk_hold_line: bool = True         # forward walks with yaw_rate 0: pure pursuit on the start line (WalkMotion)
+    walk_lookahead_m: float = 1.0
+    walk_ct_max_deg: float = 30.0
+    turn_push: float = 0.6              # FacingServo residual push (motions.py; sonic_deploy.md §0.5: 0.6 measured on P1)
+    # Outer-loop heading bias integrator [1/s]. 0 = off (M1 default): on P1 the planner frame from g1_debug equals the
+    # GT frame (P1's IMU quaternion is the GT pelvis orientation), and the only steady heading error is SONIC's
+    # IDLE-turn shortfall, which is planner behaviour. Learnt as a frame bias it would also rotate every later walk
+    # direction (by up to the 20 deg clamp; inferred from frames.py, not measured); FacingServo corrects turns
+    # explicitly instead.
+    heading_bias_ki: float = 0.0
     heading_bias_max_deg: float = 20.0
     # go_to backend (docs/nav2.md): "nav2" (ROS 2 Nav2 through nav2/ros_bridge.py) or "astar" (path_follower.py)
     nav_backend: str = field(default_factory=lambda: os.environ.get("NAV_BACKEND", "nav2").strip().lower())

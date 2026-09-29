@@ -50,6 +50,11 @@ if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
 fi
 say "session $SESSION, port offset $OFFSET"
 
+# 0: Nav2 (only if m1_up started it; a no-op otherwise)
+if [[ "$FAKE" != 1 ]] && tmux has-session -t "=$([[ "$SESSION" == wl-m1 ]] && echo wl-nav2 || echo "$SESSION-nav2")" 2>/dev/null; then
+  bash "$WL/nav2/m1_hook.sh" down "$OFFSET" "$SESSION" >/dev/null 2>&1 && say "Nav2 stopped" || say "Nav2 stop reported an error"
+fi
+
 # 1-3: park the robot on the band, then stop SONIC control
 if alive body; then
   cli stop 10 >/dev/null 2>&1 && say "body: stopped (planner IDLE)" || say "body: stop failed (continuing)"

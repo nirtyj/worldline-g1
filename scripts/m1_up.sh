@@ -17,8 +17,11 @@
 # body-m1fake) so the script itself can be tested without a GPU.
 # NOTE: the deploy's DDS domain is hard-coded to 0 (g1_deploy_onnx_ref.cpp:2218), so the real stack always uses
 # DDS domain 0 on lo whatever --port-offset is; only the ZMQ ports move.
-# CPU pinning (optional env): DEPLOY_TASKSET (e.g. 0-3: the deploy pins its busy-spinning main thread to CPU 0 itself,
-# sonic_deploy.md §5), ISAAC_TASKSET (e.g. 4-15), BODY_TASKSET. CPUs 2k/2k+1 are hyperthread siblings on the box.
+# CPU pinning (env; real stack defaults DEPLOY_TASKSET=0-3, ISAAC_TASKSET=4-15, BODY_TASKSET=4-15, set to "" to disable):
+# the deploy pins its busy-spinning main thread to CPU 0 itself (sonic_deploy.md §5). CPUs 2k/2k+1 are hyperthread
+# siblings on the box, so 0-3 = 2 physical cores for the deploy and 4-15 = 6 cores for Isaac.
+# go_to backend: NAV_BACKEND=astar (M1 default: body/path_follower.py A* + pure pursuit on P1's occupancy grid) or
+# nav2 (ROS 2 Nav2 through nav2/ros_bridge.py, started here via nav2/m1_hook.sh; the body falls back to A* if it is down).
 # The wall-clock deploy is sensitive to CPU contention: the deploy agent's MuJoCo reference passed on a quiet box and
 # fell repeatedly while other Isaac jobs loaded all cores (outputs/m1/deploy/mujoco-ref-*). Run M1 on a quiet box.
 set -euo pipefail
@@ -27,7 +30,7 @@ source /etc/profile.d/ludo.sh 2>/dev/null || true
 WL=${WL:-/work/worldline-g1}
 PY_ISAAC=${PY_ISAAC:-/work/envs/isaaclab/bin/python}
 PY_BODY=${PY_BODY:-$WL/.venv/bin/python}
-HOUSE=${HOUSE:-procthor-10k-train-40}
+HOUSE=${HOUSE:-procthor-train-38}   # docs/scenes.md: kitchen + bedroom + living room, 5.4 m straight run at spawn
 OFFSET=0; SESSION=""; FAKE=0; STAND=1; ISAAC_ARGS=${ISAAC_ARGS:-}; P1_TIMEOUT=${P1_TIMEOUT:-1500}
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,7 +49,9 @@ if [[ "$FAKE" == 1 ]]; then
   SESSION=${SESSION:-body-m1fake}
 else
   SESSION=${SESSION:-wl-m1}
+  DEPLOY_TASKSET=${DEPLOY_TASKSET-0-3}; ISAAC_TASKSET=${ISAAC_TASKSET-4-15}; BODY_TASKSET=${BODY_TASKSET-4-15}
 fi
+export NAV_BACKEND=${NAV_BACKEND:-astar}
 export WL_PORT_OFFSET=$OFFSET
 TS=$(date +%Y%m%d-%H%M%S)
 LOGD=/work/logs/wl
@@ -55,7 +60,8 @@ mkdir -p "$LOGD" "$RUN"
 LOG_ISAAC=$LOGD/$SESSION-$TS-isaac.log
 LOG_DEPLOY=$LOGD/$SESSION-$TS-deploy.log
 LOG_BODY=$LOGD/$SESSION-$TS-body.log
-echo "$SESSION" > "$RUN/session"; echo "$OFFSET" > "$RUN/port_offset"
+echo "$SESSION" > "$RUN/session"; echo "$OFFSET" > "$RUN/port_offset"; echo "$HOUSE" > "$RUN/house"
+echo "$LOG_ISAAC" > "$RUN/isaac_log"; echo "$LOG_DEPLOY" > "$RUN/deploy_log"; echo "$LOG_BODY" > "$RUN/body_log"
 ln -sfn "$RUN" "$WL/outputs/m1/stack-latest-$SESSION"
 
 say() { echo "[m1_up $(date +%H:%M:%S)] $*"; }
@@ -72,11 +78,14 @@ done
 [[ -x "$PY_BODY" ]] || die "body venv missing: $PY_BODY"
 
 # ---- 1. P1
+# Every window sources the box env itself: an already-running tmux server gives new windows ITS environment, not ours
+# (without OMNI_KIT_ACCEPT_EULA Isaac blocks on the EULA prompt).
+ENV_SRC="source /etc/profile.d/ludo.sh 2>/dev/null; export WL_PORT_OFFSET=$OFFSET NAV_BACKEND=$NAV_BACKEND;"
 tmux new-session -d -s "$SESSION" -n isaac -x 220 -y 50 "bash --noprofile --norc"
 if [[ "$FAKE" == 1 ]]; then
-  tmux send-keys -t "=$SESSION:isaac" "cd $WL && exec $PY_BODY -u -m tools.fake_p1 --port-offset $OFFSET --out $RUN/fake_p1 2>&1 | tee -a $LOG_ISAAC" C-m
+  tmux send-keys -t "=$SESSION:isaac" "$ENV_SRC cd $WL && exec $PY_BODY -u -m tools.fake_p1 --port-offset $OFFSET --out $RUN/fake_p1 2>&1 | tee -a $LOG_ISAAC" C-m
 else
-  tmux send-keys -t "=$SESSION:isaac" "cd $WL && exec ${ISAAC_TASKSET:+taskset -c $ISAAC_TASKSET }$PY_ISAAC -u -m sim_isaac.app --house $HOUSE --physics-hz 200 --dds-domain 0 --dds-iface lo --camera 640x480 --camera-hz 30 --rt-pace --physx-device cpu --port-offset $OFFSET $ISAAC_ARGS 2>&1 | tee -a $LOG_ISAAC" C-m
+  tmux send-keys -t "=$SESSION:isaac" "$ENV_SRC cd $WL && exec ${ISAAC_TASKSET:+taskset -c $ISAAC_TASKSET }$PY_ISAAC -u -m sim_isaac.app --house $HOUSE --physics-hz 200 --dds-domain 0 --dds-iface lo --camera 640x480 --camera-hz 30 --rt-pace --physx-device cpu --port-offset $OFFSET --out-dir $RUN/p1 --stats-out $RUN/p1_stats_final.json $ISAAC_ARGS 2>&1 | tee -a $LOG_ISAAC" C-m
 fi
 say "P1 starting (log $LOG_ISAAC); first Isaac launch compiles shaders (up to ~15 min)"
 wr p1 --timeout "$P1_TIMEOUT" || die "P1 did not answer ping"
@@ -92,14 +101,18 @@ say "P1 up, band on"
 
 # ---- 2. P3 body (binds the SONIC input PUB before the deploy connects)
 tmux new-window -t "=$SESSION" -n body "bash --noprofile --norc"
-tmux send-keys -t "=$SESSION:body" "cd $WL && exec ${BODY_TASKSET:+taskset -c $BODY_TASKSET }$PY_BODY -u -m body.service --port-offset $OFFSET --log-dir $RUN/body 2>&1 | tee -a $LOG_BODY" C-m
+tmux send-keys -t "=$SESSION:body" "$ENV_SRC cd $WL && exec ${BODY_TASKSET:+taskset -c $BODY_TASKSET }$PY_BODY -u -m body.service --port-offset $OFFSET --log-dir $RUN/body ${BODY_ARGS:-} 2>&1 | tee -a $LOG_BODY" C-m
 wr body --timeout 30 || die "body service not up"
-say "body up (planner IDLE keepalive running)"
+say "body up (planner IDLE keepalive running, go_to backend $NAV_BACKEND)"
+if [[ "$NAV_BACKEND" == nav2 && "$FAKE" != 1 ]]; then
+  # before the wall-clock deploy starts, so Nav2's start-up burst cannot disturb SONIC (nav2/m1_hook.sh)
+  bash "$WL/nav2/m1_hook.sh" up "$OFFSET" "$SESSION" || say "WARNING: Nav2 not up; go_to falls back to A*"
+fi
 
 # ---- 3. P2 deploy
 if [[ "$FAKE" == 1 ]]; then
   tmux new-window -t "=$SESSION" -n deploy "bash --noprofile --norc"
-  tmux send-keys -t "=$SESSION:deploy" "cd $WL && exec $PY_BODY -u -m tools.fake_deploy --port-offset $OFFSET 2>&1 | tee -a $LOG_DEPLOY" C-m
+  tmux send-keys -t "=$SESSION:deploy" "$ENV_SRC cd $WL && exec $PY_BODY -u -m tools.fake_deploy --port-offset $OFFSET 2>&1 | tee -a $LOG_DEPLOY" C-m
   for i in $(seq 1 30); do grep -q "Init Done" "$LOG_DEPLOY" 2>/dev/null && break; sleep 1; done
 else
   # DEPLOY_FORCE=1 only inside an isolated network namespace (scripts/body_netns_e2e.sh): run_deploy.sh refuses to
@@ -124,5 +137,5 @@ fi
 
 # ---- 5. monitor
 tmux new-window -t "=$SESSION" -n monitor "bash --noprofile --norc"
-tmux send-keys -t "=$SESSION:monitor" "cd $WL && exec $PY_BODY -m tools.m1_monitor --port-offset $OFFSET" C-m
+tmux send-keys -t "=$SESSION:monitor" "$ENV_SRC cd $WL && exec $PY_BODY -m tools.m1_monitor --port-offset $OFFSET" C-m
 say "stack up: tmux attach -t $SESSION ; run dir $RUN ; drive test: (cd $WL && $PY_BODY -m tools.m1_drive_test --port-offset $OFFSET)"

@@ -220,6 +220,7 @@ class DebugRecorder(threading.Thread):
         self.t: list[float] = []
         self.legs: list[list[float]] = []
         self.index: list[int] = []
+        self.trans_target: list[list[float]] = []   # planner motion's base_trans_target (moves only if the planner walks)
         self.running = True
         self.config_seen = 0
 
@@ -247,12 +248,20 @@ class DebugRecorder(threading.Thread):
             self.t.append(time.time())
             self.legs.append([float(v) for v in la[:12]] if len(la) >= 12 else [float("nan")] * 12)
             self.index.append(int(d.get("index", -1)))
+            tt = d.get("base_trans_target") or []
+            self.trans_target.append([float(v) for v in tt[:3]] if len(tt) >= 3 else [float("nan")] * 3)
         s.close(0)
 
+    def snapshot(self):
+        """Consistent copies (the recorder thread appends t, legs and trans_target one after the other)."""
+        n = min(len(self.t), len(self.legs), len(self.trans_target), len(self.index))
+        return (np.array(self.t[:n]), np.array(self.legs[:n]).reshape(-1, 12),
+                np.array(self.trans_target[:n]).reshape(-1, 3), np.array(self.index[:n]))
+
     def window(self, t0, t1):
-        t = np.array(self.t)
+        t, legs, _, _ = self.snapshot()
         m = (t >= t0) & (t <= t1)
-        return t[m], np.array(self.legs)[m] if len(self.legs) else np.zeros((0, 12))
+        return t[m], legs[m]
 
 
 # ------------------------------------------------------------------------------------------------
@@ -539,11 +548,15 @@ class DriveTest:
             dl = self.nav.ray_free_distance(p["x"], p["y"], p["yaw"] + math.pi / 2)
             dr = self.nav.ray_free_distance(p["x"], p["y"], p["yaw"] - math.pi / 2)
             side = 1.0 if dl >= dr else -1.0
-            if max(dl, dr) < 1.0:
-                room = self._ensure_room(1.5)
+            if max(dl, dr) < 1.6:
+                room = self._ensure_room(2.0)
                 self.bc.turn_to(wrap(room["heading"] - side * math.pi / 2), timeout=60)
                 p = self.pose()
-        h = self.bc.walk(vy=side * 0.3, duration_s=3.0)
+        # 0.4 m/s sideways = the upstream keyboard's recommended strafe limit (docs/source/tutorials/keyboard.md).
+        # On P1 SONIC's lateral stepping realises only ~40-85 % of the planner's own lateral target (probe
+        # 2026-09-29 03:1x: planner base_trans_target 0.89-1.15 m vs GT 0.38-0.88 m for 0.3 m/s x 4 s; MuJoCo
+        # 0.89-1.12 m), so the strafe is commanded for 5 s. The pass bar stays >= 0.5 m of GT lateral motion.
+        h = self.bc.walk(vy=side * self.args.strafe_speed, duration_s=self.args.strafe_s)
         q = self.pose()
         dx, dy = q["x"] - p["x"], q["y"] - p["y"]
         c, s = math.cos(p["yaw"]), math.sin(p["yaw"])
@@ -551,6 +564,7 @@ class DriveTest:
         dyaw = math.degrees(wrap(q["yaw"] - p["yaw"]))
         ok = h.ok and side * lat >= 0.5 and abs(dyaw) <= 20.0 and abs(fwd) <= 0.5
         return {"pass": bool(ok), "side": "left" if side > 0 else "right", "lateral_m": round(lat, 3),
+                "cmd": {"vy": side * self.args.strafe_speed, "duration_s": self.args.strafe_s},
                 "forward_m": round(fwd, 3), "yaw_change_deg": round(dyaw, 2), "body": h.summary()}
 
     def t_stop_mid_walk(self):
@@ -656,7 +670,7 @@ class DriveTest:
     def e4(self) -> dict:
         walk_windows = [(s["t0"], s["t1"]) for s in self.segments if s["name"] in ("E3_walk_forward", "E3_goto",
                                                                                     "E3_strafe", "E3_stop")]
-        dbg_t = np.array(self.dbg.t)
+        dbg_t = self.dbg.snapshot()[0]
         rate = None
         if len(dbg_t) > 10:
             rate = round(float((len(dbg_t) - 1) / (dbg_t[-1] - dbg_t[0])), 2)
@@ -672,7 +686,54 @@ class DriveTest:
         st = self.bc.status()
         mux = st.get("mux") or {}
         stats1 = self.p1.try_call("get_stats") or {}
+        # planner target translation during walking (g1_debug base_trans_target, zmq_output_handler.hpp:20-22): the
+        # planner motion's kinematic reference advances only when the planner is generating locomotion
+        tgt_moves = []
+        tdbg, _, tt, _ = self.dbg.snapshot()
+        for t0, t1 in walk_windows:
+            m = (tdbg >= t0) & (tdbg <= t1)
+            if m.sum() > 2:
+                seg = tt[m][:, :2]
+                seg = seg[np.all(np.isfinite(seg), axis=1)]
+                if len(seg) > 2:
+                    tgt_moves.append(float(np.sum(np.linalg.norm(np.diff(seg, axis=0), axis=1))))
+        # deploy log (m1_up.sh writes its path into the stack run dir): proves zmq_manager planner mode
+        planner_log = {}
+        try:
+            run = os.path.realpath(os.path.join("/work/worldline-g1/outputs/m1", f"stack-latest-{self.args.session}"))
+            logp = open(os.path.join(run, "deploy_log")).read().strip()
+            txt = open(logp, errors="replace").read()
+            planner_log = {"deploy_log": logp,
+                           "planner_enabled": "[ZMQManager] Planner enabled" in txt,
+                           "planner_motion_active": "motion name is planner_motion" in txt,
+                           "planner_timeouts": txt.count("Planner timeout"),
+                           "input_type_zmq_manager": "zmq_manager" in txt}
+        except Exception as e:
+            planner_log = {"error": repr(e)}
+        by_mode = (mux.get("stats") or {}).get("by_mode") or {}
+        walk_contacts = [c for c in contacts if (c.get("single_support_phases") or 0) >= 4]
+        leg_hz = stats1.get("lowcmd_leg_change_hz")
+        lowcmd_hz = stats1.get("lowcmd_fresh_hz")
+        rw0, rw1 = self.stats0.get("root_writes"), stats1.get("root_writes")
+        checks = {
+            "lowcmd_fresh_ge_150hz": lowcmd_hz is not None and lowcmd_hz >= 150,
+            "leg_targets_change_40_60hz": leg_hz is not None and 40 <= leg_hz <= 60,
+            "g1_debug_45_55hz": rate is not None and 45 <= rate <= 55,
+            "leg_targets_vary_walking": bool(legs_changes) and float(np.mean(legs_changes)) > 0.9,
+            # SonicMux names modes after LocomotionMode.NAMES ("slowWalk"), body/wire.py
+            "planner_slow_walk_sent": (by_mode.get("slowWalk") or by_mode.get("SLOW_WALK") or 0) > 0,
+            "deploy_planner_mode": bool(planner_log.get("planner_enabled") and planner_log.get("planner_motion_active")),
+            "planner_target_moves_walking": bool(tgt_moves) and max(tgt_moves) > 1.0,
+            "alternating_foot_contacts": bool(walk_contacts) and all(
+                (c.get("alternation_ratio") or 0) >= 0.8 for c in walk_contacts),
+            "no_root_writes_during_run": rw0 is not None and rw1 is not None and rw1 == rw0,
+            "no_root_writes_since_spawn": rw1 == 0,
+            "command_stop_never_sent": ((mux.get("stats") or {}).get("command_stop_sent") or 0) == 0,
+        }
         return {
+            "checks": checks, "pass": all(checks.values()),
+            "planner_target_path_m_walking": [round(v, 3) for v in tgt_moves],
+            "deploy_log_planner": planner_log,
             "g1_debug_rate_hz": rate,
             "g1_debug_msgs": len(dbg_t),
             "leg_target_change_frac_walking": None if not legs_changes else round(float(np.mean(legs_changes)), 3),
@@ -701,8 +762,8 @@ class DriveTest:
         with open(os.path.join(self.out, "events.jsonl"), "w") as f:
             for ev in self.events:
                 f.write(json.dumps(ev, default=str) + "\n")
-        np.savez(os.path.join(self.out, "debug_legs.npz"), t=np.array(self.dbg.t), legs=np.array(self.dbg.legs),
-                 index=np.array(self.dbg.index))
+        dt_, dl_, dtt_, di_ = self.dbg.snapshot()
+        np.savez(os.path.join(self.out, "debug_legs.npz"), t=dt_, legs=dl_, index=di_, base_trans_target=dtt_)
         rtf = a[:, 13] if len(a) else np.zeros(0)
         rtf = rtf[np.isfinite(rtf)]
         dur = (a[-1, 0] - a[0, 0]) if len(a) > 1 else 0.0
@@ -732,8 +793,8 @@ class DriveTest:
                     "p1_rtf_1s_below_0p95_frac": e4["p1_stats_end"].get("rtf_1s_below_0p95_frac")},
             "falls": self.falls, "fell_any": bool(len(a) and a[:, 10].any()),
             "tests": tests,
-            "summary": {r["name"]: bool(r.get("pass")) for r in self.results},
-            "all_pass": all(bool(r.get("pass")) for r in self.results) and bool(self.results),
+            "summary": {**{r["name"]: bool(r.get("pass")) for r in self.results}, "E4_sonic_walks": bool(e4["pass"])},
+            "all_pass": all(bool(r.get("pass")) for r in self.results) and bool(self.results) and bool(e4["pass"]),
             "e4": e4,
             "camera_error": self.cam.error,
         }
@@ -822,9 +883,9 @@ class DriveTest:
             axs[1].plot(a[:, 0] - t0, a[:, 12] - 0.05, lw=0.6, label="right")
             axs[1].set_ylabel("foot contact")
             axs[1].legend(fontsize=7)
-        if self.dbg.t:
-            L = np.array(self.dbg.legs)
-            T = np.array(self.dbg.t) - t0
+        T, L, _, _ = self.dbg.snapshot()
+        if len(T):
+            T = T - t0
             for j, nm in ((0, "L hip pitch"), (3, "L knee"), (6, "R hip pitch"), (9, "R knee")):
                 axs[2].plot(T, L[:, j], lw=0.6, label=nm)
             axs[2].legend(fontsize=7)
@@ -907,6 +968,8 @@ def main(argv=None):
     ap.add_argument("--waypoints", default=None, help="x,y,yaw_deg;x,y,yaw_deg;... (default: room centres)")
     ap.add_argument("--walk-speed", type=float, default=0.5)
     ap.add_argument("--walk-dist", type=float, default=2.3)
+    ap.add_argument("--strafe-speed", type=float, default=0.4)
+    ap.add_argument("--strafe-s", type=float, default=5.0)
     ap.add_argument("--goto-timeout", type=float, default=150.0)
     ap.add_argument("--robot-radius", type=float, default=0.25)
     ap.add_argument("--pelvis-z-min", type=float, default=0.55)
@@ -915,6 +978,7 @@ def main(argv=None):
     ap.add_argument("--cam-fps", type=float, default=None, help="mp4 fps (default: P1 get_stats render_hz or 30)")
     ap.add_argument("--tp-fps", type=float, default=10.0, help="P1 --tp-hz (third-person camera)")
     ap.add_argument("--no-video", action="store_true")
+    ap.add_argument("--session", default="wl-m1", help="m1_up.sh session (finds the deploy log for E4)")
     args = ap.parse_args(argv)
     dt = DriveTest(args)
     dt.start()

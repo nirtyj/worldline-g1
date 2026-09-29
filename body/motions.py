@@ -258,8 +258,13 @@ class StandMotion(Motion):
 class WalkMotion(Motion):
     """Velocity primitive: body-frame (vx, vy) and yaw_rate for duration_s (wall clock), then stop and settle.
 
-    The body frame is the heading at the start of the op rotated by yaw_rate * t (so yaw_rate=0 walks a straight
-    line whatever small heading errors occur). |v| < 0.05 -> pure turn (IDLE + moving facing)."""
+    The body frame is the heading at the start of the op rotated by yaw_rate * t. |v| < 0.05 -> pure turn (IDLE +
+    moving facing).
+
+    Straight forward-dominant walks (yaw_rate = 0, |vx| >= |vy|) hold the line on ground truth with pure pursuit.
+    SONIC has no global position feedback and drifts while walking: to the right by 0.12-0.18 m over 2 m on P1
+    (sonic_deploy.md §0.4, §6), and by 0.27-0.55 m with up to -8.8 deg of heading over 2.6-2.7 m open loop in the M1
+    runs (run-20260929-022923, -023426). Strafes and curved walks (yaw_rate != 0) stay open loop."""
 
     op = "walk"
 
@@ -283,8 +288,17 @@ class WalkMotion(Motion):
             self.speed = spd_c
         else:
             self.speed = 0.0
-        prev = self.ctx.mux.last_facing_w
-        self.facing0 = prev if (prev is not None and abs(wrap(prev - pose.yaw)) < math.radians(10)) else pose.yaw
+        # the body frame is the robot's actual GT heading at the start. (Not the last commanded facing: after a
+        # turn_to that is target + FacingServo offset, up to ~10 deg off the real heading, and walking along it
+        # turned every walk after a turn by that much: 0.4-0.6 m lateral over 3.7 m, tuning run 2026-09-29 03:02.)
+        self.facing0 = pose.yaw
+        # line hold only for straight, forward-dominant walks. Strafes stay open loop: on P1 their distance is set by
+        # SONIC's lateral stepping (0.27-1.11 m open loop for 0.3 m/s x 4 s, planner target 0.89-1.15 m), the hold
+        # did not help (0.33-0.51 m in 4 runs, 20260929-0242..0255), and open-loop strafes stayed straight
+        # (forward error <= 0.17 m, yaw change <= 4.2 deg)
+        self.line_hold = bool(self.args.get("hold_line", self.cfg.walk_hold_line)) and abs(self.yaw_rate) < 1e-3 \
+            and self.speed > 0 and abs(self.vx) >= abs(self.vy)
+        self.max_cross = 0.0
         self.phase = "walk"
         self.settle: Settle | None = None
         return {"speed_cmd": round(self.speed, 3), "facing0_deg": round(math.degrees(self.facing0), 2),
@@ -292,6 +306,26 @@ class WalkMotion(Motion):
 
     def _facing(self, t: float) -> float:
         return wrap(self.facing0 + self.yaw_rate * t)
+
+    def _hold_line(self, pose: Pose, move, facing: float):
+        """Straight-line hold on GT for forward-dominant walks: pure pursuit on the line through the start position
+        (the same law as go_to's follow phase, path_follower.py): the movement direction points at the point
+        walk_lookahead_m ahead of the robot's projection on the line, and the facing turns with it by the same angle.
+        Raw GT pose, every control tick; the mux deadband (2 deg) limits re-plans as for go_to."""
+        d = np.asarray(move, dtype=float)
+        d /= max(1e-9, float(np.linalg.norm(d)))
+        r = pose.xy() - self.pose0.xy()
+        along = float(r @ d)
+        e = float(r @ np.array([-d[1], d[0]]))          # signed cross-track error (left of the line > 0)
+        look = self.pose0.xy() + (along + self.cfg.walk_lookahead_m) * d
+        v = look - pose.xy()
+        corr = wrap(math.atan2(v[1], v[0]) - math.atan2(d[1], d[0]))
+        ct_max = math.radians(self.cfg.walk_ct_max_deg)
+        corr = max(-ct_max, min(ct_max, corr))
+        cc, sc = math.cos(corr), math.sin(corr)
+        move_c = (cc * d[0] - sc * d[1], sc * d[0] + cc * d[1])
+        self.max_cross = max(self.max_cross, abs(e))
+        return move_c, wrap(facing + corr)
 
     def tick(self, pose: Pose, now: float):
         self.track(pose)
@@ -306,6 +340,8 @@ class WalkMotion(Motion):
                 if self.speed > 0:
                     c, s = math.cos(f), math.sin(f)
                     move = (c * self.vx - s * self.vy, s * self.vx + c * self.vy)
+                    if self.line_hold:
+                        move, f = self._hold_line(pose, move, f)
                     self.walk_cmd(move, f, self.speed)
                 else:
                     self.turn_cmd(f, pose.yaw)
@@ -315,19 +351,82 @@ class WalkMotion(Motion):
             vx, vy, wz = self.ctx.velocity()
             if self.settle.update(math.hypot(vx, vy), wz):
                 return "succeeded", {"speed_cmd": self.speed, "stop_time_s": self.settle.stop_time,
+                                     "line_hold": self.line_hold, "max_cross_track_m": round(self.max_cross, 3),
                                      **self._summary(pose)}
         return None
 
 
 # ------------------------------------------------------------------------------------------------
+class FacingServo:
+    """Closed-loop in-place turn on ground-truth yaw.
+
+    SONIC's IDLE + new `facing` turn stops about 20 % short of the command, identically in MuJoCo and in Isaac
+    (45 -> 35-37 deg, 90 -> 73-77 deg, 135 -> 115-120 deg). The planner's own target already stops short and the deploy
+    compares facings exactly, with no deadband (sonic_deploy.md §0.5 and §6, g1_deploy_onnx_ref.cpp:3671-3673), so
+    the shortfall is planner behaviour, not a frame error. The servo therefore commands target + offset: once the
+    robot has settled short of the target (|yaw rate| < wz_eps for hold_s) and the stepped command has reached the
+    final facing, the offset grows by push * residual. The deploy agent measured this on P1 (run p1char-bodyturn-*):
+    push 0.6 brought 5/5 turns (+-45, +-90, 180 deg) within 6 deg in 2.6-6.4 s with no fall; without it 0/5 did.
+    The yaw rate is the finite difference of GT yaw over ~0.3 s (the pelvis sways while standing)."""
+
+    def __init__(self, target: float, push: float = 0.6, wz_eps: float = 0.08, hold_s: float = 0.5,
+                 max_offset_deg: float = 35.0):
+        self.target = wrap(target)
+        self.push, self.wz_eps, self.hold_s = push, wz_eps, hold_s
+        self.max_offset = math.radians(max_offset_deg)
+        self.offset = 0.0
+        self.pushes = 0
+        self._t_quiet: float | None = None
+        self._hist: list[tuple[float, float]] = []
+
+    def yaw_rate(self, yaw: float, now: float) -> float:
+        self._hist.append((now, yaw))
+        while len(self._hist) > 2 and now - self._hist[0][0] > 0.3:
+            self._hist.pop(0)
+        (t0, y0), (t1, y1) = self._hist[0], self._hist[-1]
+        return wrap(y1 - y0) / (t1 - t0) if t1 - t0 > 0.05 else 0.0
+
+    def want(self) -> float:
+        return wrap(self.target + self.offset)
+
+    def command(self, motion: "Motion", pose: Pose, now: float) -> float:
+        """Issue the (stepped) IDLE facing command for this tick; returns the error to the target (rad)."""
+        err = wrap(self.target - pose.yaw)
+        want = self.want()
+        d = wrap(want - pose.yaw)
+        cmd = want if abs(d) <= math.radians(90) else wrap(pose.yaw + math.copysign(math.radians(90), d))
+        motion.turn_cmd(cmd, pose.yaw)
+        wz = self.yaw_rate(pose.yaw, now)
+        final = abs(wrap(cmd - want)) < 1e-6 and motion.ctx.mux.last_facing_w is not None and \
+            abs(wrap(motion.ctx.mux.last_facing_w - want)) < 1e-3
+        if self.push > 0 and final:
+            if abs(wz) < self.wz_eps:
+                if self._t_quiet is None:
+                    self._t_quiet = now
+                elif now - self._t_quiet > self.hold_s:
+                    self.offset = max(-self.max_offset, min(self.max_offset, self.offset + self.push * err))
+                    self.pushes += 1
+                    self._t_quiet = None
+            else:
+                self._t_quiet = None
+        else:
+            self._t_quiet = None
+        return err
+
+    def to_dict(self) -> dict:
+        return {"offset_deg": round(math.degrees(self.offset), 2), "pushes": self.pushes}
+
+
+# ------------------------------------------------------------------------------------------------
 class TurnToMotion(Motion):
-    """Turn in place to a world yaw (rad). Facing command is at most 90 deg ahead of the current yaw so the turn
-    direction is unambiguous; succeeds when |err| < tol and the robot is settled."""
+    """Turn in place to a world yaw (rad) with FacingServo (IDLE + facing, <= 90 deg ahead of the current yaw so the
+    direction is unambiguous, <= 30 deg steps, residual push). Succeeds when |err| < tol and the robot has settled
+    with |err| <= max(1.5 tol, 3 deg)."""
 
     op = "turn_to"
 
     def default_timeout(self) -> float:
-        return 20.0
+        return 25.0
 
     def start(self, pose: Pose) -> dict:
         super().start(pose)
@@ -338,6 +437,7 @@ class TurnToMotion(Motion):
             yaw = pose.yaw + yaw
         self.target = wrap(yaw)
         self.tol = math.radians(_f(self.args, "tol_deg", self.cfg.yaw_tol_deg, 1.0, 45.0))
+        self.servo = FacingServo(self.target, push=_f(self.args, "push", self.cfg.turn_push, 0.0, 1.0))
         self.settle: Settle | None = None
         self.phase = "turn"
         return {"target_deg": round(math.degrees(self.target), 2),
@@ -345,31 +445,26 @@ class TurnToMotion(Motion):
 
     def tick(self, pose: Pose, now: float):
         self.track(pose)
-        err = wrap(self.target - pose.yaw)
-        if abs(err) > math.radians(90):
-            cmd = wrap(pose.yaw + math.copysign(math.radians(90), err))
-        else:
-            cmd = self.target
-        _, _, wz = self.ctx.velocity()
         if self.phase == "turn":
-            self.turn_cmd(cmd, pose.yaw)
+            err = self.servo.command(self, pose, now)
             if abs(err) < self.tol:
                 self.phase = "settle"
                 self.settle = Settle(self.cfg.stop_v_eps, 0.4, 2.5, wz_eps=0.1)
             return None
-        # settle: hold the target (IDLE); re-enter turn if we drift out
-        self.hold(self.target)
+        # settle: keep the last command (no new re-plan); go back to turning if we end up out of tolerance
+        self.hold(self.servo.want())
         vx, vy, wz = self.ctx.velocity()
         if self.settle.update(math.hypot(vx, vy), wz):
             err = wrap(self.target - pose.yaw)
             if abs(err) <= max(self.tol * 1.5, math.radians(3)):
                 return "succeeded", {"target_deg": round(math.degrees(self.target), 2),
-                                     "yaw_err_deg": round(math.degrees(err), 2), **self._summary(pose)}
+                                     "yaw_err_deg": round(math.degrees(err), 2), "servo": self.servo.to_dict(),
+                                     **self._summary(pose)}
             self.phase = "turn"
         return None
 
     def on_timeout(self, pose: Pose) -> dict:
-        return {"yaw_err_deg": round(math.degrees(wrap(self.target - pose.yaw)), 2)}
+        return {"yaw_err_deg": round(math.degrees(wrap(self.target - pose.yaw)), 2), "servo": self.servo.to_dict()}
 
 
 # ------------------------------------------------------------------------------------------------
