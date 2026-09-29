@@ -37,8 +37,14 @@ class SimClock:
         await self.sleep(t - self.now())
 
     async def wait_for(self, aw: Awaitable[T], timeout: float) -> T:
-        """``asyncio.wait_for`` with a timeout in sim seconds."""
-        return await asyncio.wait_for(aw, timeout / self.speed)
+        """``asyncio.wait_for`` with a timeout in sim seconds.
+
+        Built on ``asyncio.timeout``: on Python 3.11, ``asyncio.wait_for`` loses a
+        cancellation of the caller when the awaited thing finishes in the same loop
+        iteration (fixed in 3.12), which left the runtime's think loop running after
+        its TaskGroup was cancelled. Raises TimeoutError (== asyncio.TimeoutError)."""
+        async with asyncio.timeout(timeout / self.speed):
+            return await aw
 
     def timeout(self, seconds: float):
         """``asyncio.timeout`` with a delay in sim seconds (Python 3.11+)."""

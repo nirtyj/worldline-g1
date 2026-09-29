@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ToolResult",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "type": "string"
+    },
+    "execution_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "rejected"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "data": {
+      "type": "object"
+    },
+    "generation": {
+      "type": "integer"
+    },
+    "control_epoch": {
+      "type": "integer"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "brain",
+        "harness",
+        "persona"
+      ]
+    },
+    "t_start": {
+      "type": "number"
+    },
+    "t_end": {
+      "type": "number"
+    },
+    "observation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "late": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tool",
+    "execution_id",
+    "status",
+    "summary",
+    "data",
+    "generation",
+    "control_epoch",
+    "source",
+    "t_start",
+    "t_end",
+    "observation_id",
+    "late"
+  ],
+  "additionalProperties": false
+}

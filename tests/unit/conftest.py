@@ -67,11 +67,15 @@ async def keep_running(rt: Any, cond: Callable[[], bool], wall_s: float = 10.0, 
         await asyncio.sleep(0.01)
 
 
-async def stop(rt: Any) -> None:
+async def stop(rt: Any, wall_s: float = 3.0) -> None:
+    """Cancel the runtime and make sure it really stops (a lost cancellation would hang the test)."""
     task = getattr(rt, "_test_task", None)
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+    if task is None or task.done():
+        return
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=wall_s)
+    if not done:
+        stacks = [t.get_coro().__qualname__ for t in asyncio.all_tasks() if not t.done()]
+        raise AssertionError(f"runtime ignored cancellation; live tasks: {stacks}")
+    if not task.cancelled() and task.exception() is not None and not isinstance(task.exception(), AssertionError):
+        raise task.exception()

@@ -1,0 +1,168 @@
+[
+  {
+    "name": "speak",
+    "description": "Say something to the user. Speech is queued and played in order; it never blocks walking or manipulation.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "One or two short sentences."
+        }
+      },
+      "required": [
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "list_locations",
+    "description": "List the named places the robot can walk to, nearest first, with walking distance from where it is now.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Optional filter, e.g. 'kitchen' or 'table'."
+        }
+      }
+    }
+  },
+  {
+    "name": "navigate",
+    "description": "Walk to a named location (about 2.5 s per metre). Whatever the hands hold stays held. The robot looks around when it arrives. location='reach_stance' takes the short step that the last check_reachability asked for (up to 0.40 m); it does not look around.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string",
+          "description": "A named location: a keypoint, a room, 'user', or 'reach_stance'.",
+          "enum": [
+            "<location>",
+            "user",
+            "reach_stance"
+          ]
+        },
+        "timeout_s": {
+          "type": "number",
+          "description": "Optional; can only lower the default timeout.",
+          "minimum": 1.0,
+          "maximum": 240.0
+        }
+      },
+      "required": [
+        "location"
+      ]
+    }
+  },
+  {
+    "name": "check_reachability",
+    "description": "Check whether an object of this type is visible from where the robot stands now, within arm reach from this exact pose, and which arm to use. Required right before every pick. If it says needs_reposition, call navigate(location='reach_stance') and check again.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "object_type": {
+          "type": "string",
+          "description": "The kind of object.",
+          "enum": [
+            "<object_type>"
+          ]
+        },
+        "object_id": {
+          "type": "string",
+          "description": "Which one, when BELIEF has several: an id from BELIEF, e.g. alarm_clock_1."
+        }
+      },
+      "required": [
+        "object_type"
+      ]
+    }
+  },
+  {
+    "name": "manipulate",
+    "description": "Run a trained manipulation skill from where the robot stands; it never walks (a pick takes about 12 s, a place about 10 s). pick needs a successful check_reachability for the same object right before it. place puts the held object on target, which must be a surface served from where the robot stands (default: the surface here). When the request says where it should end up, pass goal: the runtime checks it after the place.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "pick or place.",
+          "enum": [
+            "pick",
+            "place"
+          ]
+        },
+        "object_type": {
+          "type": "string",
+          "description": "The kind of object.",
+          "enum": [
+            "<object_type>"
+          ]
+        },
+        "arm": {
+          "type": "string",
+          "description": "The arm check_reachability preferred (for place: the holding hand).",
+          "enum": [
+            "left",
+            "right"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "description": "place only: the surface to put it on, or 'user'.",
+          "enum": [
+            "<surface>",
+            "user"
+          ]
+        },
+        "object_id": {
+          "type": "string",
+          "description": "An id from BELIEF, e.g. alarm_clock_1."
+        },
+        "goal": {
+          "type": "string",
+          "description": "Where the request wants it, as one of: 'on X', 'next to X', 'left of X', 'right of X', 'between X and Y', 'other side of X from Y', 'across from X', 'near X', 'in X'. X and Y are ids from MAP, LAYOUT or BELIEF. Leave it out when the request doesn't say where."
+        }
+      },
+      "required": [
+        "action",
+        "object_type"
+      ]
+    }
+  },
+  {
+    "name": "wait_and_observe",
+    "description": "Take a fresh look from where the robot is, then hold still and keep observing until something changes (the user speaks, an action finishes, something new is seen) or timeout_s passes. timeout_s=0 just looks once.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "timeout_s": {
+          "type": "number",
+          "description": "Seconds to keep observing; 0 looks once.",
+          "minimum": 0.0,
+          "maximum": 60.0
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why, in a few words."
+        }
+      }
+    }
+  },
+  {
+    "name": "recall",
+    "description": "Ask the robot's memory, instantly and without moving: where something is, was, or usually is; what is in a room or on a surface; what is next to what (the layout); what the user told you; what was asked or delivered in earlier sessions.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "What to look up, e.g. 'mug', 'kitchen', 'what did the user ask for last time'."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  }
+]

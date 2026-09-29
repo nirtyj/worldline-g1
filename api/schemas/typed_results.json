@@ -1,0 +1,407 @@
+{
+  "$defs": {
+    "SpeakResult": {
+      "type": "object",
+      "title": "SpeakResult",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "failed"
+          ]
+        },
+        "utterance_id": {
+          "type": "string"
+        },
+        "played": {
+          "type": [
+            "null",
+            "number"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "utterance_id"
+      ]
+    },
+    "NamedLocation": {
+      "type": "object",
+      "title": "NamedLocation",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "distance_m": {
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "surface",
+            "room",
+            "person",
+            "start"
+          ]
+        },
+        "room": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "desc": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "height_m": {
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "too_high": {
+          "type": "boolean"
+        },
+        "too_low": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "distance_m",
+        "type"
+      ]
+    },
+    "ListLocationsResult": {
+      "type": "object",
+      "title": "ListLocationsResult",
+      "properties": {
+        "locations": {
+          "type": "array"
+        }
+      },
+      "required": []
+    },
+    "NavigateResult": {
+      "type": "object",
+      "title": "NavigateResult",
+      "properties": {
+        "execution_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "rejected"
+          ]
+        },
+        "location": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "at": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "between": {
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "blocked_edge": {
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "executor": {
+          "type": "string",
+          "enum": [
+            "sonic_walk",
+            "kinematic_nav",
+            "lite"
+          ]
+        },
+        "path_len_m": {
+          "type": "number"
+        },
+        "walked_m": {
+          "type": "number"
+        },
+        "duration_s": {
+          "type": "number"
+        },
+        "replans": {
+          "type": "integer"
+        },
+        "settle_s": {
+          "type": "number"
+        },
+        "observation_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "keypoint",
+            "reposition"
+          ]
+        },
+        "final_err_m": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "execution_id",
+        "status",
+        "location"
+      ]
+    },
+    "ReachabilityResult": {
+      "type": "object",
+      "title": "ReachabilityResult",
+      "properties": {
+        "reachable": {
+          "type": "boolean"
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "preferred_arm": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "either",
+            "none"
+          ]
+        },
+        "reason": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "object_type": {
+          "type": "string"
+        },
+        "object_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "suggest_location": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "stance": {
+          "type": [
+            "null",
+            "object"
+          ]
+        },
+        "distance_m": {
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "height_m": {
+          "type": [
+            "null",
+            "number"
+          ]
+        },
+        "skill_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "at": {
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      },
+      "required": [
+        "reachable",
+        "visible",
+        "preferred_arm"
+      ]
+    },
+    "ManipulationResult": {
+      "type": "object",
+      "title": "ManipulationResult",
+      "properties": {
+        "execution_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "rejected"
+          ]
+        },
+        "skill": {
+          "type": "string"
+        },
+        "object_type": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "pick",
+            "place"
+          ]
+        },
+        "arm": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "object_id": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "target": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "holding": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "executor": {
+          "type": "string",
+          "enum": [
+            "groot_sonic",
+            "sonic_arm_script",
+            "kinematic_attach",
+            "lite"
+          ]
+        },
+        "phase": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "inferences": {
+          "type": "integer"
+        },
+        "chunks_dropped": {
+          "type": "object"
+        },
+        "attempts": {
+          "type": "array"
+        },
+        "duration_s": {
+          "type": "number"
+        },
+        "base_shift_m": {
+          "type": "number"
+        },
+        "surface": {
+          "type": [
+            "null",
+            "string"
+          ]
+        }
+      },
+      "required": [
+        "execution_id",
+        "status",
+        "skill",
+        "object_type"
+      ]
+    },
+    "WaitResult": {
+      "type": "object",
+      "title": "WaitResult",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "changed",
+            "unchanged",
+            "timed_out",
+            "cancelled"
+          ]
+        },
+        "observation_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "changes": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "observation_id"
+      ]
+    },
+    "RecallResult": {
+      "type": "object",
+      "title": "RecallResult",
+      "properties": {
+        "answer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "answer"
+      ]
+    }
+  }
+}
