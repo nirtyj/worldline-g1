@@ -415,8 +415,8 @@ class HookPage(FakePage):
             if getattr(self, "reject_manip", False):
                 await asyncio.sleep(0.05)
                 await self.frame(trace=[{"t": self.t, "type": "rejected", "tool": "manipulate", "stage": "capability",
-                                         "why": "policy unavailable: sim below real time: DEGRADED, rtf_5s 0.90 "
-                                                "(< 0.95)"}])
+                                         "why": "policy unavailable: sim below real time: DEGRADED, rtf_5s 0.87 "
+                                                "(< 0.9 for 3 s; ok again at >= 0.94 for 2 s)"}])
 
     async def block(self) -> dict:
         """G6: the box is in the corridor; the next walk ends blocked after one replan and the user is told."""
@@ -563,7 +563,7 @@ def test_g9_throttles_after_the_load_and_always_restores(monkeypatch):
         return {"ok": True}
     res, _ = _play(page, "G9", {"throttle_rtf": throttle_rtf, "restore_rtf": restore_rtf,
                                 "recover_robot": _none_needed})
-    assert order[0][:2] == ("throttle", 0.9) and order[0][2] and order[-1] == ("restore",)
+    assert order[0][:2] == ("throttle", 0.87) and order[0][2] and order[-1] == ("restore",)
     assert _crit(res, "manipulate rejected (DEGRADED)") is True
     assert _crit(res, "walking capped") is None                           # the page shows no walking cap
     assert res["verdict"] == "UNVERIFIED"

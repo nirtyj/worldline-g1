@@ -153,7 +153,7 @@ A fifth profile, `real_g1`, is a parity skeleton.
 | 16 | Place target | Optional; defaults to the surface at the current keypoint. It must be served from the current keypoint, otherwise `rejected: navigate to X first`. Place never walks | all three | Auto-navigate | One action per turn (doc §29 flow) |
 | 17 | Directly preceded (doc §12) | The newest successful `check_reachability` for this `object_type` (and bound `object_id`) must be the last execution with a `sense`, `body` or `wait` resource. Only `speak`, `list_locations` and `recall` may sit between. No base motion since, and the time-to-live is `REACH_FRESH_S=30`. There is **no exemption**: `manipulate` never moves the base itself (#26), and a `navigate(reach_stance)` reposition is base motion, so it must be followed by a new check | contract-first | `wait_and_observe(0)` allowed between (vertical-slice) | A scan moves the waist, so it counts as motion |
 | 18 | Halt transport | Dedicated PUSH halt lane (5612, `NOBLOCK`), then a poll for `body.halted{epoch}` on the event SUB for up to 30 ms | vertical-slice + contract-first | A request/reply round trip | Never blocked behind a queued command |
-| 19 | Timing | Wall clock, `SimClock(1.0)`. Isaac must run at RTF ≥ 1. A lowstate heartbeat thread plus a render governor. `DEGRADED` below 0.95 and `UNSAFE` below 0.85 | robot-stack | Sim-time lockstep | The deploy has wall-clock threads only, and `CheckSafety()` stops control when lowstate is more than 500 ms old (`g1_deploy_onnx_ref.cpp:299,2797` [v]) |
+| 19 | Timing | Wall clock, `SimClock(1.0)`. Isaac must run at RTF ≥ 1. A lowstate heartbeat thread plus a render governor. `DEGRADED` below 0.90 and `UNSAFE` below 0.85, with dwell and hysteresis (§3.5) | robot-stack | Sim-time lockstep | The deploy has wall-clock threads only, and `CheckSafety()` stops control when lowstate is more than 500 ms old (`g1_deploy_onnx_ref.cpp:299,2797` [v]) |
 | 20 | Physics device | CPU PhysX first (one robot); GPU as an A/B test | all three | — | No GPU sync cost for a single environment; measured in S1/S3 |
 | 21 | GR00T checkpoints | The community cloudwalk `UNITREE_G1_SONIC` bottle checkpoint is **plumbing only** (unofficial; Inspire-hand data vs Dex3 deploy). The target skill is fine-tuned **off-box** on Isaac-collected demos (M6) | all three | Treat the community checkpoint as a skill | Zero-shot domain and hand mismatch |
 | 22 | Tool timeouts | Navigate: `clamp(1.8·path_m/v + 12, 20, 240)`. Manipulate: `skill.max_duration_s + 10`. Cancel grace: 3.0 s for body tools, 1.5 s for others, then `halt()` | robot-stack | 2.5 s grace | SONIC deceleration and the token blend take up to about 1.5 s |
@@ -366,10 +366,20 @@ The deploy has no sim-time mode. If lowstate is more than 500 ms old, `CheckSafe
 - **Heavy GT operations** (scene load, occupancy map, catalog export, top render) are allowed only while the elastic band is on. Otherwise `GtServer` answers `busy:controller_active`.
 - **Health states:**
 
-  | State | Trigger | Effect |
-  |---|---|---|
-  | `DEGRADED` | RTF < 0.95 for 5 s | Walking capped at 0.3 m/s; `manipulate` rejected with `policy unavailable: sim below real time` |
-  | `UNSAFE` | RTF < 0.85 for 3 s | Body to HOLD; band engaged; every body tool rejected |
+  | State | Trigger | Back | Effect |
+  |---|---|---|---|
+  | `DEGRADED` | rtf_5s < 0.90 held 3 s | rtf_5s ≥ 0.94 held 2 s | Walking capped at 0.3 m/s; `manipulate` rejected with `policy unavailable: sim below real time` |
+  | `UNSAFE` | rtf_3s < 0.85 held 2 s, or rtf_3s < 0.70 at once | rtf_3s ≥ 0.90 held 2 s (to `DEGRADED` until rtf_5s is back too) | Body to HOLD; band engaged; every body tool rejected |
+
+  World owns the verdict (`world/sim_health.py`, `config/g1.yaml sim_health`): it applies these to P1's `sim.health`
+  windows and does not adopt P1's instant `level`. A level change is one `capability_changed` after the dwell, and the
+  CAPABILITY gate reads the same hysteretic level, so a 1–2 s dip after a walk rejects nothing. Why 0.90 and the
+  dwell (2026-09-29, the stance-fix live runs, `outputs/stance_fix/`): the house runs at rtf_5s 0.92–0.96 with the
+  whole stack up, so the earlier rule (RTF < 0.95, P1's level with no dwell) flipped every few seconds: every flip
+  woke the planner (59 calls, 396 k input tokens in 4 min after the answer) and picks right after a walk were refused.
+  Nothing in the timing evidence fails between 0.90 and 0.95 (`outputs/m2b_finish/wrap/summary_all.txt`: stand and
+  walk runs with 1 s p10 down to 0.82 and 0 falls; the scripted pick held the bottle at rtf_5s 0.93). The §0.10 b bar
+  (p10 ≥ 0.98) stays the timing gate for a measured run; it is not a runtime capability.
 
 - **Mitigation order if RTF < 1:**
   1. CPU PhysX.
@@ -727,7 +737,7 @@ class ToolResult:                 # the ONLY result shape the harness consumes
 |---|---|
 | Navigation | `unknown_location, no_path, blocked, halted, cancelled, fell, stuck, timeout, body_busy, nav_unhealthy, sim_slow, no_reach_stance, stance_not_reached` |
 | Reachability | `base_moving, not_found, not_seen_here, in_hand, inside_or_on_<x>, too_high, too_low, needs_reposition, too_far, out_of_workspace, hand_full, no_skill, policy_unavailable` |
-| Manipulation | `grasp_failed, grasp_missed, object_dropped, not_in_ego_view, no_surface_here, target_not_here, no_room_on_surface, no_room_in_reach, halted, fell, policy_stall, policy_out_of_bounds, policy_unavailable, controller_unavailable, timeout` |
+| Manipulation | `grasp_failed, grasp_missed, held_not_lifted, object_dropped, not_in_ego_view, no_surface_here, target_not_here, no_room_on_surface, no_room_in_reach, halted, fell, policy_stall, policy_out_of_bounds, policy_unavailable, controller_unavailable, timeout` |
 
 **Summary examples** (`api/summaries.py`):
 

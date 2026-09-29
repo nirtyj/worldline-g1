@@ -372,8 +372,10 @@ robot and then cached (`fresh: true` re-renders; blocks about 0.3 s; needs the b
   "cameras": {name: {"on": bool, "hz": float, "pub_hz": float}} }
 ```
 
-The level is P1's reading of PLAN §3.5; `world` owns what it does with it (R.6: `DEGRADED` rejects `manipulate`,
-`UNSAFE` rejects every body tool). `get_stats` is unchanged apart from added keys (`cameras`, `object_writes`,
+The level is P1's instant reading (no dwell); `world` owns what it does with it (R.6: `DEGRADED` rejects
+`manipulate`, `UNSAFE` rejects every body tool). Since 2026-09-29 world applies its own floor, dwell and hysteresis
+to `rtf_3s` / `rtf_5s` (PLAN §3.5: degraded at rtf_5s < 0.90 held 3 s) and uses `level` only when a message carries
+no numbers. `get_stats` is unchanged apart from added keys (`cameras`, `object_writes`,
 `attach_count`, `detach_count`, `render_calls`, `seg_attached`).
 
 ### 10.2 `gt.event` (sporadic, topic unchanged from M1)

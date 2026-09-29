@@ -778,11 +778,15 @@ async def g8_deploy_restart(r: StackRun, o: Outcome) -> None:
     o.check("a third recovery disables the body tools", None, "not exercised (costly); verify by hand")
 
 
+G9_RTF = 0.87
+
+
 async def g9_rtf_degraded(r: StackRun, o: Outcome) -> None:
     box: dict[str, Any] = {}
 
-    async def throttle() -> None:          # after the scene reset: a reset and a stand at RTF 0.9 are not the test
-        box["ok"], box["note"] = await r.inject("throttle_rtf", rtf=0.9)
+    async def throttle() -> None:          # after the scene reset: a reset and a stand at a low RTF are not the test
+        # G9_RTF sits between world's DEGRADED floor (rtf_5s < 0.90 held 3 s) and UNSAFE (rtf_3s < 0.85)
+        box["ok"], box["note"] = await r.inject("throttle_rtf", rtf=G9_RTF)
         o.notes.append(f"injected: {box['note']}")
     try:
         t0 = await _fetch_start(r, before=throttle)

@@ -6,11 +6,17 @@ Pinned: the phase order (pregrasp, grasp, the GT gate, the attach, lift, carry; 
 GT gate (no attach when the palm is not at the object: grasp_missed, the hand opens, the arm goes back), cancel ends
 the running phase where the arm is (arm end, hold measured) -> cancelled, a halt -> failed(halted) with no attach,
 the body lease (ARM_SCRIPT) and fences, and groot_then_script with this executor as the fallback: both attempts in
-data.attempts, the fallback's own data flat, the GR00T attempt's under data.groot."""
+data.attempts, the fallback's own data flat, the GR00T attempt's under data.groot.
+
+The verify (2026-09-29 stance-fix live finding: grasp_failed "rose 0.002 m" while the bottle was in the hand and was
+carried 5.8 m): what is in the hand at the end + the lift seen within the window after the lift phase decide. Lifted
+then carried low -> succeeded; held but never lifted -> failed(held_not_lifted) with holding true; the service never
+reports grasp_failed / grasp_missed while the hand holds the object."""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from typing import Any
 
@@ -32,8 +38,10 @@ class ScriptBody:
 
     name = "sonic_walk"
 
-    def __init__(self, phase_s: float = 0.05):
+    def __init__(self, phase_s: float = 0.05, phase_s_by: dict[str, float] | None = None):
         self.phase_s = phase_s
+        self.phase_s_by = dict(phase_s_by or {})       # per-phase durations (else phase_s)
+        self.ended: list[str] = []                      # phases that reached their terminal event, in order
         self.calls: list[dict] = []
         self.leases: list[tuple] = []
         self.fail: dict[str, str] = {}
@@ -81,6 +89,7 @@ class ScriptBody:
 
         def end(state="succeeded", **d):
             if not op.done:
+                self.ended.append(phase)
                 op.finish(state, {"phase": phase, "palm_final_w": palm, "ended_by": d.pop("ended_by", "script"),
                                   "palm_err_w_m": {"median": 0.01, "p90": 0.02, "max": 0.02}, **d})
 
@@ -88,7 +97,7 @@ class ScriptBody:
             rec["cancelled"] = reason
             loop.call_later(0.02, lambda: end("succeeded", ended_by="client", hold="measured"))
         op._cancel_fn = cancel
-        loop.call_later(self.phase_s, end)
+        loop.call_later(self.phase_s_by.get(phase, self.phase_s), end)
         if phase in ("lift", "carry") or (phase == "grasp" and extra.get("closure")):
             self.carry_engaged = phase in ("grasp", "lift", "carry")
         if phase in ("release", "retract"):
@@ -97,11 +106,11 @@ class ScriptBody:
 
 
 def _stack(body: ScriptBody, cfg: dict | None = None, executors=("sonic_arm_script_test", "lite"),
-           policy: str = "first_healthy") -> Stack:
+           policy: str = "first_healthy", world=None) -> Stack:
     c = {"min_lift_m": -1.0, **(cfg or {})}            # the lite world's attach does not lift the box: see below
 
     def make(ctx):
-        return SonicArmScriptExecutor(ctx.world, body, gate=ctx.gate, events=ctx.events,
+        return SonicArmScriptExecutor(world(ctx.world) if world else ctx.world, body, gate=ctx.gate, events=ctx.events,
                                       cfg=ArmScriptConfig.from_dict(c))
     registry.register_executor("sonic_arm_script_test", make, backend="sonic_arm_script")
     s = Stack(overrides={"manipulation": {"executors": list(executors), "policy": policy}})
@@ -271,4 +280,115 @@ def test_groot_then_script_falls_back_to_the_arm_script_with_both_attempts_merge
         assert modes == ["ARM_STREAM", "ARM_SCRIPT"] and body.leases[-1][0] == "release"
         r = s.robot.manip._results[p.execution_id]
         assert r.inferences == 7 and len(r.attempts) == 2
+    run(main())
+
+
+# ---------------------------------------------------------------------------------------------- the verify
+class LiftWorld:
+    """The executor's WorldModel with the picked object's height scripted by the arm phase that ended last (the lite
+    world's attach puts the box at a nominal hand offset instead): the box as first seen, raised by `rise[phase]`
+    metres."""
+
+    def __init__(self, world, body: ScriptBody, rise: dict[str, float]):
+        self._w, self._body, self._rise = world, body, dict(rise)
+        self._box0 = None
+
+    def __getattr__(self, name):
+        return getattr(self._w, name)
+
+    def object(self, oid):
+        o = self._w.object(oid)
+        if o is None or oid != PICK["object_id"]:
+            return o
+        if self._box0 is None:
+            self._box0 = o.box
+        dz = self._rise.get(self._body.ended[-1], 0.0) if self._body.ended else 0.0
+        (x0, y0, z0), (x1, y1, z1) = self._box0
+        return dataclasses.replace(o, box=((x0, y0, z0 + dz), (x1, y1, z1 + dz)))
+
+
+def test_lifted_then_carried_below_the_start_is_a_success():
+    """The live bottle: the lift raised it 6 cm, the carry tuck hung it lower than it started (-0.16 m at the end)."""
+    body = ScriptBody(phase_s_by={"carry": 0.4})
+    s = _stack(body, {"min_lift_m": 0.03}, executors=("sonic_arm_script_test",),
+               world=lambda w: LiftWorld(w, body, {"lift": 0.06, "carry": -0.16}))
+
+    async def main():
+        await _at_dresser(s)
+        p = await s.run("manipulate", dict(PICK))
+        d = p.data
+        assert p.status == "succeeded" and d["holding"] is True, (p.summary, d.get("detail"))
+        v = d["verify"]
+        assert v["held_by"] == "left" and v["rose_m"] == pytest.approx(0.06, abs=1e-3)
+        assert v["rose_after_lift_m"] == pytest.approx(0.06, abs=1e-3) and v["rose_end_m"] == pytest.approx(-0.16, abs=1e-3)
+        assert v["samples"] >= 5 and v["window_s"] == pytest.approx(0.6)
+        assert d["phases"][-1] == {"phase": "verify", "ok": True, "held": True, "lifted": True}
+    run(main())
+
+
+def test_held_but_not_lifted_is_held_not_lifted_not_grasp_failed():
+    body = ScriptBody()
+    s = _stack(body, {"min_lift_m": 0.03}, executors=("sonic_arm_script_test",),
+               world=lambda w: LiftWorld(w, body, {"lift": 0.004, "carry": 0.002}))
+
+    async def main():
+        await _at_dresser(s)
+        p = await s.run("manipulate", dict(PICK))
+        d = p.data
+        assert p.status == "failed" and d["reason"] == "held_not_lifted", p.summary
+        assert d["holding"] is True and "still holding it" in p.summary and "held_not_lifted" in p.summary
+        assert "rose only 0.004 m" in d["detail"] and d["verify"]["held_by"] == "left"
+        assert s.world.hands()["left"] == "alarm_clock_1"       # nothing was let go
+        from api.reasons import hint
+        assert "in the hand" in hint("held_not_lifted", "manipulation")
+    run(main())
+
+
+def test_not_in_the_hand_at_the_end_is_grasp_failed_with_an_empty_hand():
+    body = ScriptBody()
+    s = _stack(body, {"min_lift_m": 0.03}, executors=("sonic_arm_script_test",),
+               world=lambda w: LiftWorld(w, body, {"lift": 0.06}))
+
+    async def main():
+        await _at_dresser(s)
+        h = s.robot.start(s.ex("manipulate", dict(PICK)))
+        while "carry" not in body.ended:                  # the object slips out before the verify
+            await asyncio.sleep(0.01)
+        s.world.detach("alarm_clock_1")
+        p = await h.result()
+        assert p.status == "failed" and p.data["reason"] == "grasp_failed" and p.data["holding"] is False, p.summary
+    run(main())
+
+
+class SaysFailedButHolds:
+    """An executor whose own verdict contradicts the hand: it attaches the object, then reports grasp_failed."""
+    backend = "sonic_arm_script"
+    name = "sonic_arm_script"
+
+    def __init__(self, world):
+        self.world = world
+
+    def health(self):
+        return ServiceHealth(True, "ok", "fake")
+
+    async def cancel(self):
+        return None
+
+    async def run(self, job, handle):
+        self.world.attach(job.object_id, job.arm)
+        return ManipOutcome("failed", "grasp_failed", True, "verify", detail="the object rose 0.002 m (< 0.03)")
+
+
+def test_the_service_never_reports_a_failed_grasp_while_the_hand_holds_it():
+    registry.register_executor("says_failed_but_holds_test", lambda ctx: SaysFailedButHolds(ctx.world),
+                               backend="sonic_arm_script")
+    body = ScriptBody()
+    s = _stack(body, executors=("says_failed_but_holds_test",))
+
+    async def main():
+        await _at_dresser(s)
+        p = await s.run("manipulate", dict(PICK))
+        d = p.data
+        assert p.status == "failed" and d["reason"] == "held_not_lifted" and d["holding"] is True, p.summary
+        assert d["executor_reason"] == "grasp_failed" and s.world.hands()["left"] == "alarm_clock_1"
     run(main())

@@ -134,12 +134,15 @@ cameras:                        # GT perception camera models (world/perception.
     range_objects: 2.5
     range_landmarks: 4.0
 
-sim_health:                     # world/sim_health.py (PLAN §3.5; R.6): used when P1 sends no level of its own
-  degraded_below: 0.95          # -> manipulate rejected at CAPABILITY
-  unsafe_below: 0.85            # -> every body tool rejected at CAPABILITY
-  degraded_hold_s: 5.0
-  unsafe_hold_s: 3.0
+sim_health:                     # world/sim_health.py (PLAN §3.5; R.6): world's verdict over P1's rtf_3s / rtf_5s
+  degraded_below: 0.90          # rtf_5s below this for degraded_hold_s -> manipulate rejected at CAPABILITY
+  degraded_hold_s: 3.0          #   (the live house runs at rtf_5s 0.92-0.96; the old 0.95 floor flapped)
+  recover_above: 0.94           # degraded -> ok: rtf_5s at or above this for recover_s
   recover_s: 2.0
+  unsafe_below: 0.85            # rtf_3s below this for unsafe_hold_s -> every body tool rejected at CAPABILITY
+  unsafe_hold_s: 2.0
+  unsafe_now_below: 0.70        # rtf_3s below this -> unsafe at once (a stalled sim)
+  unsafe_recover_above: 0.90    # unsafe -> degraded / ok: rtf_3s at or above this for recover_s
   stale_s: 3.0
 
 mapgen:                         # world/mapgen.py MapParams (PLAN §7.1 table)

@@ -79,6 +79,15 @@ MAX_DECISIONS_PER_WAKE = 40
 WAIT_POLL_S = 0.1
 QUIET_NOCHANGE_LIMIT = 2  # two no-change waits in a row: sleep until an external wake (rule 7)
 RESULTS_KEPT = 40
+# a capability -> the tools a change to it affects: a running (or not yet started) one of these is worth a planner
+# call when the capability changes (robot/health.py CapabilityPolicy; "sim" by the state it leaves or enters)
+CAPABILITY_TOOLS: dict[str, frozenset[str]] = {
+    "navigation": frozenset({"navigate"}),
+    "manipulation": frozenset({"manipulate"}),
+    "body": frozenset({"navigate", "manipulate", "observe", "look"}),
+    "observation": frozenset({"observe", "look"}),
+    "speech": frozenset({"speak"}),
+}
 
 STOP_RE = re.compile(r"^\W*(stop|freeze|halt)\b|^\W*(please|hey|robot)\W+stop\b", re.I)
 NOT_STOP_RE = re.compile(r"\b(don.?t|do not|never)\s+stop\b", re.I)
@@ -336,10 +345,12 @@ class Runtime:
                     self._body_recover = self._spawn(self._recover_body_halt(ev.get("body_epoch")))
             self._wake(f"safety {what}")
         elif kind == "capability_changed":
-            self.tracer.log("capability_changed", **fields)
+            why = self._capability_wake(ev)
+            self.tracer.log("capability_changed", **{**fields, "wake": why})
             self.state.record("capability_changed", now, priority=2, **fields)
-            self._note = f"capability changed: {ev.get('detail') or ev.get('capability') or ''}".strip()
-            self._wake("capability changed")
+            if why is not None:
+                self._note = f"capability changed: {ev.get('detail') or ev.get('capability') or ''}".strip()
+                self._wake("capability changed")
         elif kind == "body_mode":
             mode = ev.get("mode")
             if mode != self._body_mode:
@@ -1428,6 +1439,26 @@ class Runtime:
         if not says or not str(says[-1].args.get("text", "")).rstrip().endswith("?"):
             return False
         return not any(u.t_end >= says[-1].t_start for u in self.task.utterances)
+
+    def _capability_wake(self, ev: dict[str, Any]) -> str | None:
+        """Why a capability change is worth a planner call, or None: logged and recorded only. It wakes the planner
+        on a change to UNSAFE (safety), when a running or not yet started execution uses what changed, or while
+        something is open (an unanswered request, an own goal, a question we asked); never when idle with nothing
+        open (the live sim's RTF flapping at the DEGRADED floor woke it every few seconds)."""
+        if ev.get("state") == "unsafe" and not ev.get("ok", False):
+            return "safety"
+        cap = str(ev.get("capability") or "")
+        if cap == "sim":
+            states = {ev.get("state"), (ev.get("was") or {}).get("state")}
+            tools = CAPABILITY_TOOLS["body"] if "unsafe" in states else CAPABILITY_TOOLS["manipulation"]
+        else:
+            tools = CAPABILITY_TOOLS.get(cap, frozenset())
+        for h in self.actions.values():
+            if h.skill in tools and not h.done:
+                return f"running {h.skill}"
+        if self._belief_wake_wanted():
+            return "open"
+        return None
 
     def _belief_wake_wanted(self) -> bool:
         """Whether a passive belief change while idle is worth a planner call: only while

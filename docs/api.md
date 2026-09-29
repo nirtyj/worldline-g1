@@ -72,17 +72,19 @@ them from the services' own health and the simulator's real-time health, which i
 
 | Sim state | When | Rejected at CAPABILITY (validator and `G1Robot.start`) |
 |---|---|---|
-| `ok` | RTF >= 0.95, or unknown (lite; a silent P1 is navigation's problem) | nothing |
-| `degraded` | RTF < 0.95 for 5 s (or P1's `sim.health.level`, from its 5 s window) | `manipulate`: `policy unavailable: sim below real time: DEGRADED, ...` |
-| `unsafe` | RTF < 0.85 for 3 s (or P1's level, 3 s window) | `navigate` (`nav_unhealthy`), `manipulate` (`policy_unavailable`), `observe(scan)` (`controller_unavailable`); speech, glances, check_reachability and waits still run |
+| `ok` | the default; back from `degraded` at rtf_5s >= 0.94 held 2 s; unknown RTF (lite; a silent P1 is navigation's problem) | nothing |
+| `degraded` | rtf_5s < 0.90 held 3 s | `manipulate`: `policy unavailable: sim below real time: DEGRADED, ...` |
+| `unsafe` | rtf_3s < 0.85 held 2 s, or < 0.70 at once; out at rtf_3s >= 0.90 held 2 s | `navigate` (`nav_unhealthy`), `manipulate` (`policy_unavailable`), `observe(scan)` (`controller_unavailable`); speech, glances, check_reachability and waits still run |
 
-Thresholds and hold times are `config/g1.yaml sim_health`. The `object_type` enum never changes.
+World applies these to P1's `sim.health` windows (rtf_3s, rtf_5s; the mean of gt.pose's 1 s RTF when P1 sends none)
+and does not adopt P1's instant `level` (PLAN §3.5). Thresholds, hold times and the way back are `config/g1.yaml
+sim_health`. The `object_type` enum never changes.
 
 `RobotBridge.events()` returns a queue of robot events (subscribing starts `HealthMonitor`, every 0.25 s):
 
 | Event | Producer | Harness |
 |---|---|---|
-| `capability_changed {capability, skill_id?, ok, state, detail, was}` | HealthMonitor: a capability's or a loaded skill's health changed (`ok` or `state`) | logged, NOTE for the planner, the brain is woken |
+| `capability_changed {capability, skill_id?, ok, state, detail, was}` | HealthMonitor: a capability's or a loaded skill's health changed (`ok` or `state`) | logged (trace row `wake`: why it woke the brain, or null); the brain is woken with a NOTE only on UNSAFE, when a running execution uses the capability, or while a request / own goal / question is open |
 | `safety_event {kind: fell, source: sim}` | P1 `gt.event robot_fell` (world's `drain_events`) | stop without asking the model, safety ack |
 | `safety_event {kind: fell}` | a walk that ended `fell` (navigation) | same |
 | `safety_event {kind: estop}` | `estop()` | stop |

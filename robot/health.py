@@ -1,16 +1,20 @@
 """Robot-side health: what may run now, who hears when that changes, and the halt re-send (PLAN §3.5, §5.2, §5.6).
 
     CapabilityPolicy   the capabilities the validator and G1Robot.start() check, from the services' own health plus
-                       the simulator's real-time health (world/sim_health.py, read through WorldModel.sim_health):
-                           DEGRADED (RTF < 0.95, held 5 s)   manipulate rejected: "policy unavailable: sim below real
-                                                              time ..." (R.6)
-                           UNSAFE   (RTF < 0.85, held 3 s)   every body tool rejected: navigate, manipulate and the
-                                                              scan (which turns the body); speech, glances,
-                                                              check_reachability and waits still run
+                       the simulator's real-time health (world/sim_health.py, read through WorldModel.sim_health; the
+                       level there already has its dwell and hysteresis, so a 1-2 s dip after a walk rejects nothing):
+                           DEGRADED (rtf_5s < 0.90 held 3 s; ok again at    manipulate rejected: "policy unavailable:
+                                     >= 0.94 for 2 s)                        sim below real time ..." (R.6)
+                           UNSAFE   (rtf_3s < 0.85 held 2 s, or < 0.70;     every body tool rejected: navigate,
+                                     out at >= 0.90 for 2 s)                 manipulate and the scan (which turns the
+                                                                             body); speech, glances,
+                                                                             check_reachability and waits still run
     HealthMonitor      the capability_changed producer (PLAN §5.2): polls the capabilities and every loaded skill's
-                       health every `period_s`, and on a change emits
+                       health every `period_s`, and on a change of (ok, state) emits
                            {"type": "capability_changed", "capability", "skill_id"?, "ok", "state", "detail", "was"}
-                       on the robot's event sink. The harness logs it and puts the detail in a NOTE for the planner.
+                       on the robot's event sink. A sim level change is emitted once, after world's dwell. The harness
+                       logs it; it wakes the planner (with the detail in a NOTE) only when the change matters: UNSAFE,
+                       a running execution that uses it, or an open request / own goal / question (agent/harness.py).
                        The object_type enum never changes (Invariant 9); only CAPABILITY answers do.
                        It also forwards the simulator's events (WorldModel.drain_events, P1 gt.event): robot_fell ->
                        safety_event {kind: "fell", source: "sim"} (the harness stops), object_fell -> object_fell,

@@ -199,22 +199,11 @@ class IsaacGTWorldModel(GTWorld):
         return self.rtf_monitor.state()
 
     def _on_health(self, msg: dict) -> None:
-        """sim.health (P1.9): P1's level is PLAN §3.5 over its own windows (unsafe = rtf_3s < 0.85, degraded =
-        rtf_5s < 0.95); world applies it. rtf_1s is the number shown."""
-        r1 = msg.get("rtf_1s")
-        self.rtf_monitor.update(float(r1) if isinstance(r1, (int, float)) else None, source="p1:sim.health")
-        level = str(msg.get("level") or "")
-        if level in ("ok", "degraded", "unsafe"):
-            r3, r5 = msg.get("rtf_3s"), msg.get("rtf_5s")
-            if level == "unsafe":
-                detail = f"sim below real time: UNSAFE, rtf_3s {r3:.2f} (< 0.85)" if isinstance(r3, (int, float)) \
-                    else "sim below real time: UNSAFE"
-            elif level == "degraded":
-                detail = f"sim below real time: DEGRADED, rtf_5s {r5:.2f} (< 0.95)" if isinstance(r5, (int, float)) \
-                    else "sim below real time: DEGRADED"
-            else:
-                detail = f"rtf {r1:.2f}" if isinstance(r1, (int, float)) else "ok"
-            self.rtf_monitor.force(level, detail)
+        """sim.health (P1.9): world applies its own thresholds, dwell and hysteresis (world/sim_health.py) to P1's
+        rtf_3s / rtf_5s windows; P1's instant `level` (rtf_5s < 0.95, no dwell) is used only when a message carries
+        no numbers. rtf_1s is the number shown."""
+        self.rtf_monitor.update(msg.get("rtf_1s"), rtf_3s=msg.get("rtf_3s"), rtf_5s=msg.get("rtf_5s"),
+                                level=str(msg.get("level") or "") or None, source="p1:sim.health")
 
     # ------------------------------------------------------------------ link poses (P1.5)
     def _links(self) -> dict | None:

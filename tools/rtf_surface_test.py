@@ -51,7 +51,8 @@ from body.client import BodyClient  # noqa: E402
 from body.config import ep, port_offset_from_env  # noqa: E402
 from body.p1_client import P1Rpc, PoseSub  # noqa: E402
 
-DEGRADED_BELOW, DEGRADED_HOLD_S = 0.95, 5.0            # world/sim_health.py SimHealthConfig defaults
+DEGRADED_BELOW, DEGRADED_HOLD_S = 0.95, 5.0            # the floor this study measured against (world/sim_health.py
+                                                       # since 2026-09-29: rtf_5s < 0.90 held 3 s, back at >= 0.94)
 UNSAFE_BELOW, UNSAFE_HOLD_S = 0.85, 3.0
 GATE_P10 = 0.98                                        # PLAN §0.10 b
 

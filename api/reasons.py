@@ -59,6 +59,8 @@ REACHABILITY = _r("reachability", {
 MANIPULATION = _r("manipulation", {
     "grasp_failed": "the grasp failed; wait_and_observe(timeout_s=0), then retry once or tell the user",
     "grasp_missed": "the hand closed on nothing; check reachability again",
+    "held_not_lifted": "it is in the hand but did not come up; wait_and_observe(timeout_s=0) to confirm the hand, "
+                       "then carry it on or put it back",
     "object_dropped": "the object fell; look for it",
     "not_in_ego_view": "the object is not in the hand camera's view; check reachability again",
     "no_surface_here": "there is no surface here; navigate to one first",

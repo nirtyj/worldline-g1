@@ -14,7 +14,7 @@ the page cannot cause. Before this work none of them could run live (wave 2, eva
 | G6 `blocked_path` | a box in the corridor | P1 `spawn_box`, placed across the robot's own A* route (`tools/hooks/obstacle.py`) | P1 `clear_box` |
 | G7 `fall_recovery` | 250 N lateral push (escalated, labelled, while it does not fell SONIC) | P1 `push_robot {force_n: 250, dir: left, duration_s: 0.5}`, then 400 N, then 600 N, each only if the one before left the robot up for `G7_FALL_WAIT_S` (8 s) | `tools.hooks recover` (body path A) |
 | G8 `deploy_restart` | (a) P2 crash, (b) kill button | (a) SIGKILL of the deploy; (b) the page's `estop` (the deliberate estop test) | `tools.hooks recover` (operator path B) |
-| G9 `rtf_degraded` | RTF 0.9 | P1 `rtf_throttle {target: 0.9}` | `rtf_throttle {off}` |
+| G9 `rtf_degraded` | RTF 0.87 (between world's DEGRADED floor, rtf_5s < 0.90 held 3 s, and UNSAFE, rtf_3s < 0.85) | P1 `rtf_throttle {target: 0.87}` | `rtf_throttle {off}` |
 
 ## 1. The pieces
 
@@ -77,7 +77,7 @@ suite on the main box cannot stop the dev-box server: its outage is the link cut
   note say which push felled the robot.
 - G13 (live) waits for at least one planner call before the outage, so schemas exist on both sides of it; P4 always
   comes back (`finally`).
-- G9 throttles after the scene reset (a reset and a stand at RTF 0.9 are not the test) and always restores.
+- G9 throttles after the scene reset (a reset and a stand at a low RTF are not the test) and always restores.
 - G4 fails at once when the delay cannot be set (the proxy must be in P5's loop).
 - `clear_all` runs at the end of every live run; the result JSON carries `hooks` and `hooks_log` (every hook's exit
   code, seconds and JSON reply).
@@ -107,7 +107,7 @@ bash scripts/m2_up.sh --profile full --scene procthor-train-40 --viz min --p5-po
   the harness pauses on `fell`/`deploy_lost` and nothing recovers. The body's `recover` op (path A) and the
   `restart-deploy` sequence (path B) both exist and are what the fixtures run, so a supervisor only has to call them
   and emit the events. Until then G7's and G8's recovery criteria fail honestly.
-- **No walking cap under DEGRADED** [world + runtime]: PLAN §3.5 caps walking below RTF 0.95; nothing publishes a
+- **No walking cap under DEGRADED** [world + runtime]: PLAN §3.5 caps walking under DEGRADED; nothing publishes a
   cap, so G9's "walking capped" is UNVERIFIED.
 - **The stand after a P1 reset sags** [isaac + body]. After P1 `reset_robot` (root at the spawn, `default_q`, the
   band on) under SONIC control, the body's `stand` (band release) often drops the pelvis below the body's 0.55 m

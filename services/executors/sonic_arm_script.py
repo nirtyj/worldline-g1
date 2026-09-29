@@ -16,7 +16,12 @@ labelled fallback behind groot_arms (policy groot_then_script) and the pick exec
             lift           arm_script lift (+lift_m, world up)
             carry          arm_script carry: the carry pose, kept above the support's top so the tuck clears its edge;
                            the script ends into a `target` hold with the hand closed = CarryLock (body.state.arm.carry)
-            verify         GT: the hand holds it and it rose >= min_lift_m -> succeeded, else failed(grasp_failed)
+            verify         GT, what is in the hand at the end: the object is held (P1 held_by / the attach) and its
+                           centre rose >= min_lift_m within the verify window (sampled for verify_window_s right
+                           after the lift phase, while the carry tuck starts, plus once at the end) -> succeeded;
+                           held but never that high -> failed(held_not_lifted) (still holding it); not held ->
+                           failed(grasp_failed). The carry pose may end lower than the start (it hangs the object
+                           below the palm once it is off the support), so the end sample alone is not the lift.
     place   lower          arm_script lower: the palm above the free spot the service chose
             detach         P1 detach {id, pose: the spot} (STEPPING STONE: the object is set down there, upright)
             release        arm_script release (the hand opens)
@@ -60,7 +65,9 @@ class ArmScriptConfig:
     attach_mode: str = "fixed_joint"     # P1.3: fixed_joint (the mass hangs on the arm) | follow
     attach_max_m: float = 0.10           # GT gate: the palm this close to the grasp point, else grasp_missed
     lift_m: float = 0.06
-    min_lift_m: float = 0.03             # verify: the object rose at least this much
+    min_lift_m: float = 0.03             # verify: the object rose at least this much ...
+    verify_window_s: float = 0.6         # ... within this window after the lift phase (P1 streams object poses at
+    verify_dt_s: float = 0.05            # 10 Hz: one sample can be stale) or at the end
     carry: bool = True                   # tuck into the carry pose after the lift
     carry_x_m: float = 0.22              # carry pose, pelvis frame (the body's CARRY_B, body/arm_script.py)
     carry_y_m: float = 0.20
@@ -325,6 +332,23 @@ class SonicArmScriptExecutor:
             if why is not None or res.get("state") != "succeeded":
                 return
 
+    async def _sample_rise(self, job: ManipJob, zc0: float, window_s: float) -> dict:
+        """The object's rise (GT centre z minus its start) sampled every verify_dt_s for `window_s`: the lift's
+        evidence, taken right after the lift phase."""
+        rises: list[float] = []
+        t_end = time.monotonic() + max(0.0, window_s)
+        while True:
+            try:
+                o = self.world.object(job.object_id)
+            except Exception:  # noqa: BLE001
+                o = None
+            if o is not None:
+                rises.append(float(o.pos[2]) - zc0)
+            if time.monotonic() >= t_end:
+                break
+            await asyncio.sleep(self.cfg.verify_dt_s)
+        return {"max_m": max(rises) if rises else None, "n": len(rises)}
+
     # ------------------------------------------------------------------ run
     async def run(self, job: ManipJob, handle: Any) -> ArmScriptOutcome:
         self._cancel = False
@@ -415,32 +439,46 @@ class SonicArmScriptExecutor:
         if res.get("state") != "succeeded":
             return self._outcome("failed", self._fail_reason(res, why, "grasp_failed"), job, "lift", phases, t_run,
                                  f"lift {res.get('state')}: {(res.get('data') or {}).get('reason')}", **extra)
-        if c.carry:
-            p = self.world.robot_pose()
-            side = 1.0 if job.arm == "left" else -1.0
-            zb = max(c.carry_z_min_m, support_top + c.carry_clear_m - float(p.z))
-            carry_b = [c.carry_x_m, side * c.carry_y_m, zb]
-            extra["carry_b"] = _r(carry_b)
-            res, why = await self._phase(job, handle, phases, "carry", carry_b=carry_b, settle_s=c.settle_s)
-            if why is not None:
-                return self._stop_outcome(why, job, "carry", phases, t_run, **extra)
-            if res.get("state") != "succeeded":
-                # the lift hold (hand closed) stays: CarryLock at the lift pose
-                extra["carry_note"] = f"carry tuck {res.get('state')} ({(res.get('data') or {}).get('reason')}); " \
-                                      f"holding the lift pose"
-        # verify on GT
+        # the lift's evidence: the object's height over a short window from here (the carry tuck starts meanwhile;
+        # it pulls back at the lift height first)
+        sampler = asyncio.ensure_future(self._sample_rise(job, zc0, c.verify_window_s))
+        try:
+            if c.carry:
+                p = self.world.robot_pose()
+                side = 1.0 if job.arm == "left" else -1.0
+                zb = max(c.carry_z_min_m, support_top + c.carry_clear_m - float(p.z))
+                carry_b = [c.carry_x_m, side * c.carry_y_m, zb]
+                extra["carry_b"] = _r(carry_b)
+                res, why = await self._phase(job, handle, phases, "carry", carry_b=carry_b, settle_s=c.settle_s)
+                if why is not None:
+                    return self._stop_outcome(why, job, "carry", phases, t_run, **extra)
+                if res.get("state") != "succeeded":
+                    # the lift hold (hand closed) stays: CarryLock at the lift pose
+                    extra["carry_note"] = f"carry tuck {res.get('state')} ({(res.get('data') or {}).get('reason')}); " \
+                                          f"holding the lift pose"
+            window = await sampler
+        finally:
+            if not sampler.done():
+                sampler.cancel()
+        # verify on GT: what is in the hand at the end, and whether it came up within the window
+        extra["carry_lock"] = await self._carry()
         o2 = self.world.object(job.object_id)
         held = self._holding(job)
-        rose = None if o2 is None else float(o2.pos[2]) - zc0
-        extra["verify"] = {"held_by": job.arm if held else None, "rose_m": _r(rose)}
-        extra["carry_lock"] = await self._carry()
-        phases.append({"phase": "verify", "ok": bool(held and rose is not None and rose >= c.min_lift_m)})
+        rose_end = None if o2 is None else float(o2.pos[2]) - zc0
+        rises = [v for v in (window.get("max_m"), rose_end) if v is not None]
+        rose = max(rises) if rises else None
+        lifted = rose is not None and rose >= c.min_lift_m
+        extra["verify"] = {"held_by": job.arm if held else None, "rose_m": _r(rose),
+                           "rose_after_lift_m": _r(window.get("max_m")), "rose_end_m": _r(rose_end),
+                           "window_s": c.verify_window_s, "samples": window.get("n"), "min_lift_m": c.min_lift_m}
+        phases.append({"phase": "verify", "ok": bool(held and lifted), "held": held, "lifted": lifted})
         if not held:
             return self._outcome("failed", "grasp_failed", job, "verify", phases, t_run,
                                  "the object is not in the hand after the lift", **extra)
-        if rose is None or rose < c.min_lift_m:
-            return self._outcome("failed", "grasp_failed", job, "verify", phases, t_run,
-                                 f"the object rose {0.0 if rose is None else rose:.3f} m (< {c.min_lift_m:.2f})", **extra)
+        if not lifted:
+            return self._outcome("failed", "held_not_lifted", job, "verify", phases, t_run,
+                                 f"in the hand, but it rose only {0.0 if rose is None else rose:.3f} m "
+                                 f"(< {c.min_lift_m:.2f}) within {c.verify_window_s:.1f} s of the lift", **extra)
         return self._outcome("succeeded", None, job, "verify", phases, t_run,
                              f"lifted {rose:.2f} m; CarryLock {'engaged' if extra['carry_lock'].get('engaged') else 'not reported'}",
                              **extra)

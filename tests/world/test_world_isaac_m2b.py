@@ -171,14 +171,21 @@ def test_detections_best_uses_p1_segmentation(m2b):
 
 
 def test_sim_health_levels_and_events(m2b):
-    w = _client(m2b.off)
+    """World applies its own floor and dwell to P1's windows (world/sim_health.py; the holds are short here)."""
+    from world.isaac_client import IsaacGTWorldModel
+    from world.sim_health import SimHealthConfig
+    w = IsaacGTWorldModel(port_offset=m2b.off, camera="head_sim", rpc_timeout_s=3.0,
+                          sim_health_cfg=SimHealthConfig(degraded_hold_s=0.2, unsafe_hold_s=0.2, recover_s=0.2))
     try:
         assert _wait(lambda: w.sim_health().source == "p1:sim.health")
         assert w.sim_health().ok and w.sim_health().rtf == pytest.approx(1.0)
-        m2b.rtf = 0.91
+        m2b.rtf = 0.93                                   # P1's own level says degraded (< 0.95): world's floor is 0.90
+        time.sleep(0.5)
+        assert w.sim_health().ok
+        m2b.rtf = 0.87
         assert _wait(lambda: w.sim_health().state == "degraded")
         h = w.sim_health()
-        assert "DEGRADED" in h.detail and h.rtf == pytest.approx(0.91)
+        assert "DEGRADED" in h.detail and h.rtf == pytest.approx(0.87) and h.rtf_5s == pytest.approx(0.87)
         m2b.rtf = 0.8
         assert _wait(lambda: w.sim_health().state == "unsafe")
         m2b.rtf = 1.0

@@ -10,6 +10,10 @@
                      reason but halted / fell / cancelled and nothing is in the hand, the next healthy non-GR00T
                      candidate runs at once (sonic_arm_script, else kinematic_attach) and the result is that
                      attempt's, so it carries the fallback's executor and label; data.attempts lists both.
+                     The verdict is what is in the hand at the end (GT hands, read after the executor ended): a
+                     failure that says the grasp failed or missed while the hand holds the object is reported as
+                     failed(held_not_lifted) with holding=true (data.executor_reason keeps the executor's word),
+                     never grasp_failed + holding.
     execute(place)   target served from where the robot stands (else failed(target_not_here)) -> a free spot on
                      it within reach from here (else no_room_in_reach / no_room_on_surface) -> executor -> verify
                      where == target.
@@ -50,6 +54,7 @@ STEPPING = ("kinematic_attach", "lite", "sonic_arm_script")
 POLICIES = ("first_healthy", "groot_then_script")
 NO_FALLBACK = ("halted", "fell", "cancelled", "stale_result", "body_busy")   # the user, safety or a fence ended it:
                                                                             # never retry with another executor
+GRASP_FAILED = ("grasp_failed", "grasp_missed")   # "nothing in the hand": contradicted by a hand that holds it
 LEASE_MODE = {"groot": "ARM_STREAM", "sonic_arm_script": "ARM_SCRIPT", "kinematic_attach": "MANIP"}   # lite: none
 # an executor outcome's `data` (GrootArmOutcome) -> ManipulationResult's typed fields; the service owns these keys
 TYPED_FROM_EXECUTOR = ("inferences", "chunks_dropped", "attempts")
@@ -321,10 +326,16 @@ class ManipulationService:
                 return self._result(ex, "failed", skill, reason="grasp_failed", phase="verify", holding=False,
                                     extra=extra, typed=typed, **kw)
             return self._result(ex, "succeeded", skill, holding=True, phase="verify", extra=extra, typed=typed, **kw)
+        holding = self.world.hands().get(arm) == oid      # what is in the hand at the end decides
         if out.status == "cancelled":
             return self._result(ex, "cancelled", skill, reason=out.reason, phase=out.phase, holding=holding,
                                 extra=extra, typed=typed, **kw)
-        return self._result(ex, "timed_out" if out.reason == "timeout" else "failed", skill, reason=out.reason,
+        reason = out.reason
+        if holding and reason in GRASP_FAILED:
+            # the executor says the grasp failed, but the hand holds the object: it is in the hand, not lifted
+            extra["executor_reason"] = reason
+            reason = "held_not_lifted"
+        return self._result(ex, "timed_out" if reason == "timeout" else "failed", skill, reason=reason,
                             phase=out.phase, holding=holding, extra=extra, typed=typed, **kw)
 
     @staticmethod
