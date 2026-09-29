@@ -57,6 +57,16 @@ def test_second_request_substitute_and_original():
     assert then == "Also bring me a book." and second == ["book_1", "book_2"]
 
 
+def test_fetch_targets_after_the_scenario_decisions():
+    """R.7: H15's apple is beyond a G1's reach, so the two apple scenarios fetch the dish sponge; --original
+    keeps THOR's apple."""
+    for name in ("fetch_search", "question_midtask"):
+        assert BIND.fetch_target(name) == ("dish_sponge_1", "dish sponge", "Bring me the dish sponge.")
+        assert BIND.fetch_target(name, original=True) == ("apple_1", "apple", "Bring me the apple.")
+        assert "apple_beyond_reach" in BIND.scenario(name)["flags"]
+    assert BIND.fetch_target("fetch_other_room") == ("alarm_clock_1", "alarm clock", "Bring me the alarm clock.")
+
+
 # ---------------------------------------------------------------------------------------------- vs the houses
 def _house_info(scene: str) -> dict:
     p = HOUSES / scene / "house_info.json"
@@ -157,9 +167,14 @@ def test_other_side_resolves_on_the_live_k10_map_and_in_the_layout_lines():
     lines = layout.build(w.lookup_keypoints(), {b["landmark"]: {"label": lm["label"], "near": lm["near"],
                                                                "pos": [lm["x"], lm["z"]]}})
     text = layout.render(lines, w.lookup_keypoints())
-    assert any(g in text for g in sc.golden_lines(b["landmark"], b["start_surface"], b["target_surface"],
-                                                  label=lm["label"])), text
-    assert b["golden"] in sc.golden_lines(b["landmark"], b["start_surface"], b["target_surface"], label=lm["label"])
+    # the line the planner reads names the stove's two neighbours; the target is one of them, and the start surface
+    # sits on the same layout line on the stove's other side (bowl_1 on counter_2c: 2c, 2b, the stove, 2a)
+    assert b["golden"] in text, text
+    assert b["target_surface"] in b["golden"]
+    row = next(ln for ln in text.splitlines() if b["landmark"] in ln and "·" in ln)
+    names = [x.strip().split(" ")[0] for x in row.split(":", 1)[1].split("·")]
+    i_lm, i_start, i_tgt = names.index(b["landmark"]), names.index(b["start_surface"]), names.index(b["target_surface"])
+    assert (i_start - i_lm) * (i_tgt - i_lm) < 0, row
 
 
 def test_fixture_check_reads_truth_only():
@@ -195,3 +210,138 @@ def test_no_yaml_key_is_a_boolean():
             for i, v in enumerate(d):
                 walk(v, f"{path}[{i}]")
     walk(BIND.data)
+
+
+# ---------------------------------------------------------------------------------------------- the G1 can do it
+DELIVERIES = [("fetch_other_room", None, ["alarm_clock_1"]), ("fetch_search", None, ["dish_sponge_1"]),
+              ("addition", "g1_alternative", ["alarm_clock_1", "wine_bottle_1"])]
+
+
+def _g1_stack(scene: str):
+    """A lite service stack built as an Isaac world is: the R.7 stands (config mapgen, not mapgen.lite_world) and a
+    reachability (and the place reach test that reads it) that judges with the calibrated G1 arm (config workspace,
+    not workspace.lite_world)."""
+    from services.reachability import G1Workspace
+    from tests.services.conftest import Stack
+    from world.mapgen import MapParams
+    real = MapParams.for_source
+    MapParams.for_source = lambda self, source: real(self, "isaac-gt")
+    try:
+        s = Stack(house=scene, profile="lite")
+    finally:
+        MapParams.for_source = real
+    ws = G1Workspace.from_dict({k: v for k, v in s.robot.stack_profile.g1["workspace"].items() if k != "lite_world"})
+    s.robot.reach.ws = ws
+    assert s.world.static_map().params.stand_off_m[0] < 0.30
+    return s
+
+
+def _at(s, kp: str, pose=None) -> None:
+    k = s.world.static_map().keypoints[kp]
+    x, y, yaw = pose if pose is not None else (k.x, k.y, k.yaw)
+    s.world.set_robot_pose(x, y, yaw)
+    s.robot.nav._last_at = kp
+    s.robot.nav._anchor = (kp, x, y)
+
+
+async def _pick_from_stand_or_one_stance(s, oid: str) -> str:
+    o = s.world.object(oid)
+    surf = o.where
+    _at(s, surf)
+    await s.run("observe", {"mode": "scan"})
+    r = s.robot.reach.check(o.type, oid)
+    how = "keypoint"
+    if r.reason == "needs_reposition":
+        st = r.stance
+        assert st["distance_m"] <= s.robot.reach.ws.approach_max_m + 1e-6
+        _at(s, surf, (st["x"], st["y"], st["yaw"]))
+        r = s.robot.reach.check(o.type, oid)
+        how = "one_approach"
+    assert r.reachable, (oid, r.reason, getattr(r, "detail", None))
+    pick = await s.run("manipulate", {"action": "pick", "object_type": o.type, "object_id": oid})
+    assert pick.status == "succeeded", (oid, pick.summary)
+    return how
+
+
+@pytest.mark.parametrize("name, part, oids", DELIVERIES)
+def test_every_bound_delivery_is_reachable_and_placeable_with_the_calibrated_arm(name, part, oids):
+    """R.7: with the calibrated G1 arm (config/g1.yaml workspace) each object is reachable from its surface's stand
+    or after one reach_stance, the pick succeeds, and it can be put down on the user surface from that surface's stand
+    (place never repositions). Through the runtime's own services on the lite stack; the stance is reached by setting
+    the pose (navigate(reach_stance) itself is services/navigation.py's)."""
+    pytest.importorskip("scipy")
+    b = BIND.scenario(name)
+    if part:
+        assert b[part]["second"] == oids[1:]
+    scene = BIND.scene(b["house"])
+    if not (HOUSES / scene / "occupancy.npz").exists():
+        pytest.skip(f"no recorded house {scene}")
+    from tests.services.conftest import run
+    s = _g1_stack(scene)
+    user = s.robot.lookup_keypoints()["people"]["user"]["deliver_to_surface"]
+    assert user == BIND.house(b["house"])["user_surface"]
+
+    async def main():
+        out = []
+        for oid in oids:
+            how = await _pick_from_stand_or_one_stance(s, oid)
+            _at(s, user)
+            o = s.world.object(oid)
+            place = await s.run("manipulate", {"action": "place", "object_type": o.type, "target": "user"})
+            assert place.status == "succeeded", (oid, place.summary)
+            assert s.world.object(oid).where == user
+            out.append((oid, how))
+        return out
+
+    got = run(main())
+    assert [o for o, _ in got] == oids
+
+
+def test_the_g1_alternative_for_other_side_goes_round_the_stove():
+    """K10 other_side with the calibrated arm: the spatula is beyond reach; the proposed bowl_1 goes from counter_2c
+    (one reach_stance) down onto counter_2a from its stand."""
+    pytest.importorskip("scipy")
+    b = BIND.scenario("other_side")
+    alt = b["g1_alternative"]
+    from tests.services.conftest import run
+    s = _g1_stack(BIND.scene("K10"))
+
+    async def main():
+        spatula = s.world.object(b["object"])
+        _at(s, spatula.where)
+        await s.run("observe", {"mode": "scan"})
+        assert s.robot.reach.check(spatula.type, spatula.id).reason == "beyond_reach"
+        o = s.world.object(alt["object"])
+        assert o.where == alt["start_surface"]
+        await _pick_from_stand_or_one_stance(s, o.id)
+        _at(s, alt["target_surface"])
+        pl = await s.run("manipulate", {"action": "place", "object_type": o.type, "target": alt["target_surface"]})
+        assert pl.status == "succeeded", pl.summary
+        return s.world.object(o.id).where
+
+    assert run(main()) == alt["target_surface"]
+
+
+def test_the_apple_is_beyond_a_g1s_reach_and_the_mugs_beyond_one_reposition():
+    """The evidence behind the scenario decisions, with the calibrated arm."""
+    pytest.importorskip("scipy")
+    from tests.services.conftest import run
+    s = _g1_stack(BIND.scene("H15"))
+
+    async def h15():
+        apple = s.world.object("apple_1")
+        _at(s, apple.where)
+        await s.run("observe", {"mode": "scan"})
+        r = s.robot.reach.check("apple", "apple_1")
+        assert r.reason == "beyond_reach" and "0.64 m from the nearest spot" in r.detail, r.detail
+    run(h15())
+    s = _g1_stack(BIND.scene("H40"))
+
+    async def h40():
+        for oid in ("mug_1", "mug_2"):
+            o = s.world.object(oid)
+            _at(s, o.where)
+            await s.run("observe", {"mode": "scan"})
+            # mug_1: no stance within one reposition; mug_2 is not even in view from its stand's scan (1.45 m away)
+            assert s.robot.reach.check("mug", oid).reason in ("too_far", "beyond_reach", "not_seen_here"), oid
+    run(h40())

@@ -29,12 +29,18 @@ furniture keeps its AABB stretches exactly. So an L- or U-shaped counter's stand
 really there (H15: the back run inside the U, not the open side of a 1.84 m-deep box), and a stretch never covers a
 stove top (K10 counter_2b). A segment with (almost) nothing left is skipped (`skipped`, "built-in appliance").
 
-Stand points (G1): 0.35-0.50 m from the stretch's front edge, facing the edge normal (so layout's 4-axis facing
-holds), free with >= 0.30 m clearance, in the furniture's room, reachable from the spawn, >= 0.5 m from other
-stands. (PLAN §7.1 said 0.45-0.60; with the G1 workspace's reach_fwd_m <= 0.55 from the pelvis that leaves only
-0.10 m of the surface within reach from the keypoint, and place never repositions, so the band moved 10 cm in;
-M3.5 re-tunes both together.) If nothing qualifies, a relaxed pass allows up to 1.0 m and 0.25 m clearance (`stand_relaxed`); otherwise
-the stretch is skipped (listed in `skipped`, like THOR).
+Stand points (G1): `stand_off_m` from the stretch's front edge (config/g1.yaml: 0.27-0.45 m), facing the edge normal
+(so layout's 4-axis facing holds), `stand_clearance_m` from every obstacle (0.25: a keypoint is an A* go_to goal
+outside the body's 0.25 m inflation), in the furniture's room, reachable from the spawn, >= 0.5 m from other stands.
+(PLAN §7.1 said 0.45-0.60. R.7 measured the arm: it reaches 0.37-0.41 m ahead of the pelvis at counter height and
+place never repositions, so a stand 0.35 m back reached no spot on any user surface; from 0.27 m a spot 6 cm past the
+edge is in reach; docs/calibration.md §4.) If nothing qualifies, a relaxed pass allows up to 1.0 m and 0.25 m
+clearance (`stand_relaxed`); otherwise the stretch is skipped (listed in `skipped`, like THOR).
+
+L/U legs (`split_deep_m`, off by default): on furniture whose footprint fills less than `split_shaped_fill` of its
+AABB, a stretch deeper than `split_deep_m` and than it is wide is split along its depth, each part with stands on its
+own long sides (docs/calibration.md §4: +4 points of household coverage, but it renames the counter stretches the
+eval bindings use).
 
 Coordinates: everything inside StaticMap is Isaac world (x, y, yaw rad); `lookup_keypoints()` converts to
 Worldline's frame through world/coords.py only.
@@ -86,6 +92,9 @@ class MapParams:
     footprints: bool = True                 # cut stretches to the occupancy footprint (R.5); False: THOR's AABBs
     footprint_min_cut_m: float = 0.10       # an edge moves only when the footprint moves it more than this
     footprint_min_fill: float = 0.10        # a segment with less of its area left than this is skipped
+    split_deep_m: float = 0.0               # split a stretch deeper than this (an L/U leg) along its depth; 0: off
+    split_shaped_fill: float = 0.8          # ... only on furniture whose footprint fills less of its AABB than this
+    lite_world: tuple = ()                  # INTERIM overrides for a LiteWorld (config mapgen.lite_world), for_source
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "MapParams":
@@ -94,8 +103,21 @@ class MapParams:
         for f in cls.__dataclass_fields__:
             if f in d:
                 v = d[f]
-                kw[f] = tuple(v) if isinstance(v, list) else v
+                if f == "lite_world":
+                    kw[f] = tuple(sorted((str(k), tuple(x) if isinstance(x, list) else x)
+                                         for k, x in dict(v or {}).items()))
+                else:
+                    kw[f] = tuple(v) if isinstance(v, list) else v
         return cls(**kw)
+
+    def for_source(self, source: str | None) -> "MapParams":
+        """The parameters a world with this `source` builds its map with: a LiteWorld (lite-gt) takes the INTERIM
+        `lite_world` overrides (M2a's stands, matching the lite world's M2a arm, services/reachability.py
+        G1Workspace.for_world); the Isaac worlds build the R.7 stands."""
+        if not self.lite_world or source != "lite-gt":
+            return self
+        import dataclasses
+        return dataclasses.replace(self, lite_world=(), **dict(self.lite_world))
 
 
 @dataclass(frozen=True)
@@ -513,7 +535,10 @@ def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int 
         prefix = p.room_prefix if p.room_prefix is not None else scene.kind != "ithor"
         if room and prefix:
             base = f"{room}_{base}"
-        sibling_side = None
+        # the stretches after the footprint cut: (box, half, stand axis, end index, end count, split). Only a
+        # furniture whose footprint fills little of its AABB (an L or U: H40's counter 0.60, H15's 0.66) has legs
+        shaped = fp is not None and fp.fill((cx, cy), (ex / 2, ey / 2)) < p.split_shaped_fill
+        boxes: list[tuple] = []
         for i, (seg, half) in enumerate(segs):
             if fp is not None:
                 got = fp.cut(seg, half, p.footprint_min_cut_m)
@@ -522,14 +547,21 @@ def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int 
                                     "no footprint left in this stretch (built-in appliance)"))
                     continue
                 seg, half, _ = got
-            st = _find_stand(scene, grid, p, seg, half, along_x, i, n, room, used, comp, sibling_side)
+            boxes += _split_deep(seg, half, along_x, i, n, p) if shaped else [(seg, half, along_x, i, n, False)]
+        boxes = boxes[:len(LETTERS)]
+        n_parts = len(boxes)
+        sibling_side = None
+        for j, (seg, half, ax, i, n_i, deep) in enumerate(boxes):
+            st = _find_stand(scene, grid, p, seg, half, ax, i, n_i, room, used, comp,
+                             None if deep else sibling_side)
             if st is None:
-                skipped.append((o.scene_id + (f"#{LETTERS[i]}" if n > 1 else ""), "no free stand in the room"))
+                skipped.append((o.scene_id + (f"#{LETTERS[j]}" if n_parts > 1 else ""), "no free stand in the room"))
                 continue
             (px, py), yaw, side, d, relaxed = st
-            sibling_side = sibling_side or side
+            if not deep:
+                sibling_side = sibling_side or side
             used.append((px, py, yaw))
-            part = "" if n == 1 else LETTERS[i]
+            part = "" if n_parts == 1 else LETTERS[j]
             name = base + part
             where = f" in the {scene.room(room).label}" if room and scene.room(room) else ""   # type: ignore[union-attr]
             desc = f"{kind} {num}{', part ' + part if part else ''}{where}"
@@ -543,6 +575,31 @@ def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int 
             if home:
                 alias[sid] = home
     return out, alias, skipped
+
+
+def _split_deep(seg, half, along_x: bool, i: int, n: int, p: MapParams) -> list[tuple]:
+    """A stretch whose footprint runs deeper (across the furniture's long axis) than `split_deep_m` and than it is
+    wide is a leg of an L- or U-shaped top: a stand at its narrow end would face up to ~2 m of top that no arm
+    reaches (H40 kitchen_counter_1b, H15 kitchen_counter_1a/1c: 0.82-0.92 m wide, 1.83 m deep). It is split along
+    its depth into parts of at most segment_m, each with stands on its own long sides (the inside of the L or U), the
+    ends only at the ends of the leg. Other stretches pass unchanged: (box, half, stand axis, end index, end count,
+    split)."""
+    hx, hy = half
+    depth, width = (2 * hy, 2 * hx) if along_x else (2 * hx, 2 * hy)
+    if p.split_deep_m <= 0 or depth <= p.split_deep_m or depth <= width:
+        return [(seg, half, along_x, i, n, False)]
+    k = max(2, math.ceil(depth / p.segment_m - 1e-9))
+    out = []
+    for m in range(k):
+        if along_x:                               # the leg runs along y: parts stacked in y, stands on the +-x sides
+            y0 = seg[1] - hy + 2 * hy * m / k
+            y1 = seg[1] - hy + 2 * hy * (m + 1) / k
+            out.append(((seg[0], (y0 + y1) / 2), (hx, (y1 - y0) / 2), False, m, k, True))
+        else:
+            x0 = seg[0] - hx + 2 * hx * m / k
+            x1 = seg[0] - hx + 2 * hx * (m + 1) / k
+            out.append((((x0 + x1) / 2, seg[1]), ((x1 - x0) / 2, hy), True, m, k, True))
+    return out
 
 
 def _find_stand(scene: SceneData, grid: WorldGrid, p: MapParams, seg, half, along_x: bool, i: int, n: int,

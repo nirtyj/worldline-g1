@@ -22,12 +22,15 @@
 version: 1
 
 # Walking speed, pick and place times per profile come from api.types.PROFILES when it imports; these are the
-# fallbacks and the M1 measurements behind them (SONIC walks ~0.45 m/s, 0.4-1.1 s stops; THOR teleported 0.6 m/s).
+# fallbacks. R.7 (world-cal, live on SONIC, docs/calibration.md): a navigate averages 0.29 m/s (turns, stops and the
+# final approach included), the arm script's pick phases take 16.5-18.0 s and its place phases 8.8-10.1 s; a reach
+# stance adds an approach (15 s mean). full's pick is GR00T's attempt first (about 12.6 s to its timeout zero-shot,
+# wave 1) and then the fallback. THOR teleported at 0.6 m/s.
 profiles:
   lite:    {time_scale: 1.0, walk_mps: 0.45, t_pick_s: 6.0,  t_place_s: 5.0}
-  bringup: {time_scale: 1.3, walk_mps: 0.40, t_pick_s: 8.0,  t_place_s: 6.0}
-  sonic:   {time_scale: 2.0, walk_mps: 0.40, t_pick_s: 12.0, t_place_s: 10.0}
-  full:    {time_scale: 2.5, walk_mps: 0.40, t_pick_s: 15.0, t_place_s: 10.0}
+  bringup: {time_scale: 1.3, walk_mps: 0.29, t_pick_s: 8.0,  t_place_s: 6.0}
+  sonic:   {time_scale: 2.0, walk_mps: 0.29, t_pick_s: 17.0, t_place_s: 10.0}
+  full:    {time_scale: 2.5, walk_mps: 0.29, t_pick_s: 30.0, t_place_s: 10.0}
 
 # A scenario's time limit is  max(thor_limit_s * time_scale, 2 * humanoid_estimate_s)  with
 #   humanoid_estimate_s = planner_s + 1.25 * walk_m / walk_mps + legs * stop_s + scans * scan_s
@@ -55,15 +58,18 @@ houses:
                       flags: [static_prim, below_reach]}
       mug_1:         {type: mug, surface: bedroom_dresser_1a, room: bedroom, height_m: [0.97, 1.05], dynamic: true}
       mug_2:         {type: mug, surface: kitchen_counter_1b, room: kitchen, height_m: [0.94, 1.02], dynamic: true}
+      wine_bottle_1: {type: wine_bottle, surface: kitchen_dining_table_1a, room: kitchen, height_m: [0.78, 1.11],
+                      dynamic: true}
     absent_types: [banana]
     walk_m:                                            # world/mapgen edge lengths on the G1 nav grid
-      start>bedroom_dresser_1b: 4.90
-      bedroom_dresser_1b>kitchen_counter_1a: 7.27     # R.5: the stand faces the counter's real top run
-      start>bedroom_bed_1a: 5.94
-      bedroom_bed_1a>bedroom_dresser_1b: 3.09
-      start>kitchen_counter_1a: 2.52
-      bedroom_dresser_1a>kitchen_counter_1a: 8.00
-      start>kitchen_dining_table_1b: 1.98
+      start>bedroom_dresser_1b: 4.92                   # the Isaac map's R.7 stands; the lite world's M2a stands differ < 0.1 m
+      bedroom_dresser_1b>kitchen_counter_1a: 7.22     # R.5: the stand faces the counter's real top run
+      start>bedroom_bed_1a: 6.03
+      bedroom_bed_1a>bedroom_dresser_1b: 3.19
+      start>kitchen_counter_1a: 2.46
+      bedroom_dresser_1a>kitchen_counter_1a: 7.95
+      start>kitchen_dining_table_1b: 1.96
+      kitchen_counter_1a>kitchen_dining_table_1a: 5.00
   H15:
     scene: procthor-train-15
     thor_scene: procthor-train-15
@@ -73,16 +79,21 @@ houses:
                                                        # room; THOR's rule gives the armchair, whose AABB top is its backrest
     user_surface_thor: living_room_arm_chair_1
     objects:
-      apple_1:     {type: apple, surface: kitchen_counter_1b, room: kitchen, height_m: [0.94, 1.05], dynamic: true}
+      apple_1:       {type: apple, surface: kitchen_counter_1b, room: kitchen, height_m: [0.94, 1.05], dynamic: true,
+                      flags: [beyond_reach]}
+      dish_sponge_1: {type: dish_sponge, surface: bathroom_sink_basin_1, room: bathroom, height_m: [0.91, 0.93],
+                      dynamic: true}
     landmarks:
       microwave_1: {type: microwave, surface: kitchen_dining_table_1a, room: kitchen}
     absent_types: []
     walk_m:
-      start>kitchen_counter_1b: 7.22                   # R.5: the stand is inside the U-shaped counter, at its back run
-      kitchen_counter_1b>living_room_arm_chair_1a: 8.42
-      start>living_room_arm_chair_1a: 1.62
-      kitchen_counter_1b>living_room_dining_table_1a: 10.32
-      start>living_room_dining_table_1a: 3.24
+      start>kitchen_counter_1b: 7.25                   # R.5: the stand is inside the U-shaped counter, at its back run
+      kitchen_counter_1b>living_room_arm_chair_1a: 8.51
+      start>living_room_arm_chair_1a: 1.72
+      kitchen_counter_1b>living_room_dining_table_1a: 10.45
+      start>living_room_dining_table_1a: 3.34
+      start>bathroom_sink_basin_1: 13.50
+      bathroom_sink_basin_1>living_room_dining_table_1a: 16.77
   K10:
     scene: ithor-FloorPlan10
     thor_scene: FloorPlan10
@@ -92,13 +103,17 @@ houses:
                                                        # sink_basin_1
     user_surface_thor: sink_basin_1
     objects:
-      spatula_1:   {type: spatula, surface: counter_2b, room: kitchen, height_m: [0.90, 0.92], dynamic: true}
+      spatula_1:   {type: spatula, surface: counter_2b, room: kitchen, height_m: [0.90, 0.92], dynamic: true,
+                    flags: [beyond_reach]}
+      bowl_1:      {type: bowl, surface: counter_2c, room: kitchen, height_m: [0.90, 0.98], dynamic: true}
     landmarks:
       stove_1:     {type: stove, near: counter_2a, room: kitchen}   # the nearest stand facing it (R.5)
     absent_types: []
     walk_m:
-      start>counter_2b: 4.69                           # R.5: counter_2 is cut at the stove; 2b starts past it
-      counter_2b>counter_2a: 1.58
+      start>counter_2b: 4.72                           # R.5: counter_2 is cut at the stove; 2b starts past it
+      counter_2b>counter_2a: 1.63
+      start>counter_2c: 5.37
+      counter_2c>counter_2a: 2.29
 
 # The scenarios. `thor_limit_s` is the THOR suite's wall-clock limit; the G1 limit is derived as above.
 # `status`: ok | flagged (runs as written, but part of it cannot be exercised on the G1 today; see `flags`) |
@@ -166,32 +181,47 @@ scenarios:
   fetch_search:
     house: H15
     forget: true
-    say: "Bring me the apple."
-    target: apple_1
+    say: "Bring me the dish sponge."
+    target: dish_sponge_1
+    label: dish sponge
     thor_limit_s: 200
-    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_dining_table_1a]
+    legs: [start>bathroom_sink_basin_1, bathroom_sink_basin_1>living_room_dining_table_1a]
     work: {scans: 3, picks: 1, places: 1}
     grasp: true
-    status: flagged
+    status: substituted
+    original: {say: "Bring me the apple.", target: apple_1, label: apple,
+               legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_dining_table_1a]}
+    substitute: {say: "Bring me the dish sponge.", target: dish_sponge_1, label: dish sponge}
+    use: substitute
     flags: [apple_beyond_reach]
     note: >-
-      The apple is on kitchen_counter_1b (0.94 m, dynamic) with the start in the living room, as on THOR. Since R.5 the
-      stand is inside the U-shaped counter at its back run, but the apple sits 0.44 m deep on the 0.59 m-deep top,
-      15 cm from the wall: the nearest spot the robot can stand (its 0.25 m body radius clear of the counter) is
-      about 0.7 m from it, and the G1 reaches 0.55 m (config/g1.yaml reach_fwd_m; a 20 deg waist lean puts the palm
-      at about 0.50 m in the arm kinematics). check_reachability answers `beyond_reach`, so on the G1 this scenario
-      ends with an honest "I can't reach it", not a delivery. The user surface is the dining table (M2 gap 2).
+      Scenario decision (R.7, world-cal, 2026-09-29): THOR's apple is genuinely out of a G1's reach. It lies 0.44 m
+      deep on the 0.59 m-deep back run of the U-shaped kitchen_counter_1b, 15 cm from the wall. The nearest spot the
+      pelvis can stand (0.20 m from every obstacle; the toes are 0.13 m ahead of the pelvis; live, the body stood
+      0.15-0.20 m from a counter 9/9 with no fall) is 0.64 m from it, while the arm reaches at most 0.50 m from the
+      pelvis at the apple's grasp height (body/arm_script.py's own IK envelope, sphere fit rms 4 mm; straight ahead
+      0.43 m). No stand, stance or reposition can help (world/workspace_cal.py coverage: `beyond_reach`). The
+      substitute keeps the scenario's point (a forgotten house, an object in another room, a search, a delivery to the
+      user): dish_sponge_1, the only sponge in H15, lies on the bathroom sink (0.91-0.93 m, dynamic) and is reachable
+      after one reach_stance from the sink's stand. `use: original` (--original) runs THOR's apple text; it ends with
+      an honest "I can't reach it".
   question_midtask:
     house: H15
-    say: "Bring me the apple."
+    say: "Bring me the dish sponge."
     then: "What are you holding right now?"
-    target: apple_1
+    target: dish_sponge_1
+    label: dish sponge
     thor_limit_s: 200
-    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_dining_table_1a]
+    legs: [start>bathroom_sink_basin_1, bathroom_sink_basin_1>living_room_dining_table_1a]
     work: {scans: 2, picks: 1, places: 1}
     grasp: true
-    status: flagged
+    status: substituted
+    original: {say: "Bring me the apple.", target: apple_1, label: apple,
+               legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_dining_table_1a]}
+    substitute: {say: "Bring me the dish sponge.", target: dish_sponge_1, label: dish sponge}
+    use: substitute
     flags: [apple_beyond_reach]
+    note: "The same scenario decision as fetch_search (the apple is beyond a G1's reach); the question is unchanged."
   note_only:
     house: H15
     say: "By the way, my keys are usually on the kitchen counter."
@@ -238,14 +268,25 @@ scenarios:
     original: {then: "Also bring me a book.", second: [book_1, book_2]}
     substitute: {then: "Also bring me a mug.", second: [mug_1, mug_2]}
     use: substitute
-    flags: [second_object_not_graspable]
+    flags: [second_object_not_graspable, mugs_out_of_the_calibrated_arm]
+    g1_alternative: {then: "Also bring me the wine bottle.", second: [wine_bottle_1],
+                     legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a,
+                            kitchen_counter_1a>kitchen_dining_table_1a, kitchen_counter_1a>kitchen_dining_table_1a]}
     note: >-
       THOR's second delivery was a book. Both H40 books are static prims (MolmoSpaces is_static) lying at
-      0.53-0.57 m on the bed, below the G1's 0.55 m reach floor, so no G1 profile can pick one: the scenario would
-      measure the fixture, not the runtime. The substitute keeps the scenario's point (a second request added
-      while the first is running, two objects on the user surface): mug_1 is on bedroom_dresser_1a next to the
-      alarm clock (0.97-1.05 m, dynamic) and mug_2 on kitchen_counter_1b; either counts. `use: original` (or
-      --original) runs THOR's text once a fixture raises a book onto the dresser (needs world/sim fixture support).
+      0.53-0.57 m on the bed, below the G1's reach band, so no G1 profile can pick one: the scenario would measure
+      the fixture, not the runtime. The substitute keeps the scenario's point (a second request added while the first
+      is running, two objects on the user surface): mug_1 is on bedroom_dresser_1a next to the alarm clock
+      (0.97-1.05 m, dynamic) and mug_2 on kitchen_counter_1b; either counts. `use: original` (or --original) runs
+      THOR's text once a fixture raises a book onto the dresser. R.7 (world-cal, 2026-09-29): with the calibrated G1
+      arm (config/g1.yaml workspace) neither mug is in one reposition's reach (mug_1 sits 0.36 m deep at the far end
+      of bedroom_dresser_1a, its only stance 0.77 m from the stand; mug_2 has none near its stand), so on sonic/full
+      this binding cannot deliver; the lite world still uses M2a's arm (INTERIM, workspace.lite_world), where mug_1 is
+      reachable after one reach_stance. `g1_alternative` (not read by the suite yet; a request to eval) is the
+      G1-feasible second object, checked with the calibrated arm in tests/eval/test_scenes.py: wine_bottle_1 on
+      kitchen_dining_table_1a (0.78-1.11 m, dynamic, seen by both visibility methods), reachable after one
+      reach_stance and placeable on kitchen_counter_1a next to the alarm clock. The CD next to the alarm clock is not
+      an option: it is not rendered (the 20-view audit: P1's segmentation never sees it).
   observations:
     house: H40
     say: "Bring me the alarm clock."
@@ -284,11 +325,21 @@ scenarios:
     legs: [start>counter_2b, counter_2b>counter_2a]
     work: {scans: 2, picks: 1, places: 1}
     grasp: true
-    status: ok
+    status: flagged
+    flags: [spatula_beyond_reach]
+    g1_alternative: {say: "move the bowl to the other side of the stove", object: bowl_1, start_surface: counter_2c,
+                     target_surface: counter_2a, legs: [start>counter_2c, counter_2c>counter_2a]}
     note: >-
       MolmoSpaces FloorPlan10 has one wall counter prim (counter_top_2, y -2.40..0.50) with the stove built into it
       (y -1.70..-0.90), where THOR had counter_1 and counter_2 either side of the stove. Since R.5 (world/mapgen.py
-      cuts stretches to the occupancy footprint minus built-in appliances) no stretch covers the stove top: counter_2a
-      is the coffee-machine side, counter_2b runs from the stove to the middle (with the spatula), counter_2c is the
-      toaster side. The golden line, regenerated from agent/layout.py on that map, is unchanged (either order is
-      accepted). The suite also resolves both surfaces from the live map and truth at run time.
+      cuts stretches to the occupancy footprint minus built-in appliances) no stretch covers the stove top: the layout
+      line is counter_2c, counter_2b, the stove, counter_2a. The golden line, regenerated from agent/layout.py on that
+      map, is unchanged (either order is accepted). The suite also resolves both surfaces from the live map and truth
+      at run time. Flagged (R.7, world-cal, 2026-09-29): a G1 cannot do this one as written. The spatula lies 0.70 m
+      from the nearest spot the pelvis can stand (0.20 m from every obstacle) while the arm reaches at most 0.49 m
+      from the pelvis at its grasp height (world/workspace_cal.py; `beyond_reach` with the calibrated arm and with
+      M2a's), and it is 0.30 m long across the counter, so its centre cannot come within reach of counter_2a's edge
+      either. `g1_alternative` (a request to eval; checked with the calibrated arm in tests/eval/test_scenes.py) keeps
+      the point, reading "the other side of the stove" off the LAYOUT line: bowl_1 on counter_2c (0.90-0.98 m,
+      dynamic), reachable after one reach_stance, the stove two stretches along, a spot on counter_2a within reach of
+      its stand.

@@ -318,8 +318,11 @@ def derive_tool_state(active: list[dict[str, Any]], paused: bool, reconciling: b
 class Session:
     """One house, one robot stack, one runtime, one brain, fed by the chat box."""
 
-    def __init__(self, scene: str, agent: str, model: str, profile: str, deps: Deps) -> None:
+    def __init__(self, scene: str, agent: str, model: str, profile: str, deps: Deps,
+                 reset_sim: dict[str, Any] | None = None) -> None:
         self.scene, self.agent, self.model, self.profile, self.deps = scene, agent, model, profile, deps
+        self.reset_sim = reset_sim                  # {"robot": bool}: P1 reset_scene before the runtime starts
+        self.sim_reset: dict[str, Any] | None = None    # what that reset did (init.config.sim_reset)
         self.error: str | None = None
         self.runtime: Any = None
         self.planner: Any = None
@@ -351,6 +354,8 @@ class Session:
             built = await built
         built = list(built) + [None, None, None]
         self.world, self.robot, self.frames = built[0], built[1], built[2]
+        if self.reset_sim is not None:
+            self.sim_reset = await self._reset_sim(**self.reset_sim)
         self.map = self.robot.lookup_keypoints()
         self.grid = world_grid(self.world)
         self.layout = layout_message(self.scene, self.map, self.world, self.grid, profile=self.profile,
@@ -379,6 +384,63 @@ class Session:
             self.error = "The runtime could not start:\n" + traceback.format_exc()
             return
         self.task = asyncio.create_task(self.runtime.run())
+
+    async def _reset_sim(self, robot: bool = True) -> dict[str, Any]:
+        """Put the house back as it loaded before the runtime starts, so an eval scenario or a page reset starts
+        clean on the Isaac profiles (docs/contracts/p1_m2b.md §8, P1.7). P1 `reset_scene` releases every held object
+        and puts every dynamic object back at its load pose. With `robot`, P1 also puts the robot back at the spawn
+        with the band on, and the body stands it again (P1 measured it standing 8.1 s after the call, p1_m2b.md §13).
+        A world without the op is left alone and says so: lite builds a new, clean LiteWorld on every reset, and an M1
+        P1 has no reset_scene. Never raises: a failed reset is reported in init.config.sim_reset and a notice."""
+        caps = _call(self.world, "capabilities", default=None) or {}
+        if not caps.get("reset_scene"):
+            return {"ok": False, "skipped": True,
+                    "why": "the world has no reset_scene (lite rebuilds clean on every reset; an M1 P1 has none)"}
+        t0 = time.monotonic()
+        out: dict[str, Any] = {"ok": False, "robot": bool(robot)}
+        try:
+            rep = await asyncio.to_thread(self.world.reset_scene, "default", robot=True if robot else None)
+        except Exception as e:  # noqa: BLE001
+            out["why"] = f"P1 reset_scene failed: {e}"
+            return out
+        rep = dict(rep or {})
+        out["p1"] = {"objects_reset": rep.get("objects_reset"), "robot_reset": rep.get("robot_reset"),
+                     "released": list(rep.get("released") or []), "ms": rep.get("ms")}
+        if robot:
+            # the robot is in the band at the spawn: the body stands it again (release the band, verify upright)
+            stand = getattr(getattr(getattr(self.robot, "body", None), "client", None), "stand", None)
+            if not callable(stand):
+                out["why"] = "the robot was reset into the band, but this body has no stand op"
+                out["s"] = round(time.monotonic() - t0, 2)
+                return out
+            client = self.robot.body.client
+            try:
+                h = await asyncio.to_thread(stand, wait=True, timeout=90.0)
+                res = dict(getattr(h, "result", None) or {})
+                if getattr(h, "state", None) != "succeeded" and "halted" in str(res.get("reason") or ""):
+                    # a halt latch left by the last session (the user's "stop"): a reset is a fresh start, so it is
+                    # released at the body's own halt epoch (m1.md §3.10) and the stand is tried once more
+                    fences = (await asyncio.to_thread(client.status) or {}).get("fences") or {}
+                    epoch = fences.get("halt_epoch")
+                    if isinstance(epoch, int):
+                        await asyncio.to_thread(client.resume, epoch)
+                        out["resumed_halt_epoch"] = epoch
+                        h = await asyncio.to_thread(stand, wait=True, timeout=90.0)
+            except Exception as e:  # noqa: BLE001
+                out["why"] = f"stand after the robot reset failed: {e}"
+                out["s"] = round(time.monotonic() - t0, 2)
+                return out
+            res = dict(getattr(h, "result", None) or {})
+            out["stand"] = {"state": getattr(h, "state", None), "band_released": res.get("band_released"),
+                            "reason": res.get("reason") or res.get("error")}
+            if getattr(h, "state", None) != "succeeded":
+                out["why"] = f"stand after the robot reset ended {getattr(h, 'state', None)}" + (
+                    f" ({out['stand']['reason']})" if out["stand"]["reason"] else "")
+                out["s"] = round(time.monotonic() - t0, 2)
+                return out
+        out["ok"] = True
+        out["s"] = round(time.monotonic() - t0, 2)
+        return out
 
     async def stop(self) -> None:
         for t in self._bg:
@@ -454,7 +516,7 @@ class Session:
                 "config": {"scene": self.scene, "agent": self.agent, "model": self.model, "profile": self.profile,
                            "stepping_stones": sorted(self.stones), "profile_fallbacks": list(profile_fallbacks(self.profile)),
                            "fallback_labels": FALLBACK_LABELS,
-                           "truth_label": GT_LABEL},
+                           "truth_label": GT_LABEL, "sim_reset": self.sim_reset},
                 "map": self.map, "layout": self.layout,
                 "events": self._events_from(0), "trace": self._trace_from(0),
                 "calls": self.recorder.calls if self.recorder else [],
@@ -913,7 +975,11 @@ class Hub:
         broadcast(self.clients, dumps({"type": "notice", "text": text}))
 
     # ------------------------------------------------------------------
-    async def reset(self, scene: str, agent: str, model: str, forget: bool = False, profile: str | None = None) -> None:
+    async def reset(self, scene: str, agent: str, model: str, forget: bool = False, profile: str | None = None,
+                    reset_sim: dict[str, Any] | None = None) -> None:
+        """A new session. `reset_sim` ({"robot": bool}) first puts the simulated house back as it loaded (Isaac
+        profiles: P1 reset_scene, and the robot back at the spawn, standing); the page and the eval suite send it on
+        every reset, the server's own first load does not (the stack has just come up clean)."""
         async with self._lock:
             profile = profile or self.profile
             old, self.session = self.session, None
@@ -923,7 +989,7 @@ class Hub:
                 self._forget(scene)
                 self._notice(f"Forgot everything about {scene}: no seen objects, landmarks, looks or notes.")
             broadcast(self.clients, dumps({"type": "loading", "scene": scene, "profile": profile}))
-            new = Session(scene, agent, model, profile, self.deps)
+            new = Session(scene, agent, model, profile, self.deps, reset_sim=reset_sim)
             try:
                 await new.start()
             except Exception:  # noqa: BLE001
@@ -931,6 +997,14 @@ class Hub:
                 self._notice("Could not load this house:\n" + traceback.format_exc()[-800:])
                 return
             self.session, self.profile = new, profile
+            sr = new.sim_reset
+            if sr and not sr.get("skipped"):
+                if sr.get("ok"):
+                    robot = ", the robot back at the start, standing" if sr.get("robot") else ""
+                    self._notice(f"Scene reset in {sr.get('s')} s: {(sr.get('p1') or {}).get('objects_reset')} "
+                                 f"objects back at their load poses{robot}.")
+                else:
+                    self._notice(f"Scene reset failed: {sr.get('why')}")
             if self.s1_gate is not None:
                 self.s1_gate.reset()                  # a new house: the first frame is new again
             if callable(getattr(new.runtime, "set_persona", None)):
@@ -1088,8 +1162,12 @@ class Hub:
                 profile = msg.get("profile") or None
                 if profile is not None and profile not in {p for p, _ in PROFILES}:
                     raise ValueError(f"unknown profile {profile!r}")
+                # every reset from the page (or the eval suite) starts the simulated house clean; `reset_sim: false`
+                # keeps the sim as it is, `reset_robot: false` resets only the objects
+                sim = None if msg.get("reset_sim") is False else {"robot": msg.get("reset_robot") is not False}
                 await self.reset(msg.get("scene") or self.default, msg.get("agent") or "agent",
-                                 msg.get("model") or MODELS[0][0], forget=bool(msg.get("forget")), profile=profile)
+                                 msg.get("model") or MODELS[0][0], forget=bool(msg.get("forget")), profile=profile,
+                                 reset_sim=sim)
         except Exception as e:  # noqa: BLE001
             await ws.send(dumps({"type": "notice", "text": str(e)}))
 

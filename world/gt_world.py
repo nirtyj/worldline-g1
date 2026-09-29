@@ -61,7 +61,7 @@ class GTWorld:
                  user_surface: str | None = None, topdown: dict | None = None):
         self._lock = threading.RLock()
         self.scene_data = scene
-        mp = map_params or MapParams()
+        mp = (map_params or MapParams()).for_source(self.source)
         self.grid = WorldGrid(occ, robot_radius=mp.robot_radius)
         self.map: StaticMap = build_static_map(scene, self.grid, mp, scene_key=scene_key, source=self.source,
                                                topdown=topdown, user_surface=user_surface)

@@ -46,7 +46,9 @@ def _free_offset() -> int:
 @pytest.fixture
 def fake(tmp_path):
     off = _free_offset()
-    p1 = FakeP1(off, str(tmp_path / "p1"), log=lambda *_: None).start()
+    # rtf pinned to 1.0: the fake's measured RTF is t_sim over wall time, which reads DEGRADED whenever the suite
+    # starves its physics thread (the wave-1 flake); the health test drives the level through rtf_override
+    p1 = FakeP1(off, str(tmp_path / "p1"), log=lambda *_: None, rtf=1.0).start()
     rpc = P1Rpc(ep(5600 + off), timeout_s=3.0)
     yield p1, rpc, off
     rpc.close()
@@ -232,15 +234,17 @@ def test_reset_scene_and_topdown_modes(fake):
 def test_health_and_robot_fell(fake):
     p1, rpc, off = fake
     sub = Sub(5601 + off, [b"sim.health", b"gt.event"])
-    _, h = sub.wait(lambda t, m: t == "sim.health", timeout=2.5)
-    assert h["level"] == "ok" and set(h) >= {"rtf_1s", "rtf_3s", "rtf_5s", "level", "cameras", "held"}
+    _, h = sub.wait(lambda t, m: t == "sim.health", timeout=5.0)
+    assert h is not None and h["level"] == "ok" and h["rtf_1s"] == 1.0
+    assert set(h) >= {"rtf_1s", "rtf_3s", "rtf_5s", "level", "cameras", "held"}
+    # a message built before the override may still be queued: wait for the first one that carries it
     p1.rtf_override = 0.9
-    _, h = sub.wait(lambda t, m: t == "sim.health", timeout=2.5)
-    assert h["level"] == "degraded"
+    _, h = sub.wait(lambda t, m: t == "sim.health" and m["rtf_1s"] == 0.9, timeout=5.0)
+    assert h is not None and h["level"] == "degraded"
     p1.rtf_override = 0.8
     assert rpc.call("get_health")["level"] in ("degraded", "unsafe")
-    _, h = sub.wait(lambda t, m: t == "sim.health", timeout=2.5)
-    assert h["level"] == "unsafe"
+    _, h = sub.wait(lambda t, m: t == "sim.health" and m["rtf_1s"] == 0.8, timeout=5.0)
+    assert h is not None and h["level"] == "unsafe"
     with p1._lock:
         p1.collapsed = True
     _, ev = sub.wait(lambda t, m: t == "gt.event" and m["event"] == "robot_fell", timeout=2.0)
@@ -280,3 +284,19 @@ def test_world_isaac_client_on_the_fake(tmp_path):
         if w is not None:
             w.close()
         p1.stop()
+
+
+def test_measured_rtf_is_sim_time_over_wall_time(tmp_path):
+    """rtf=None (the CLI default) measures t_sim over wall time; clock values injected, no threads started."""
+    p1 = FakeP1(_free_offset(), str(tmp_path / "p1"), log=lambda *_: None)
+    assert p1.rtf_override is None
+    p1.t_sim = 10.0
+    assert p1._health(10.0)["level"] == "ok" and p1._health(10.0)["rtf_1s"] == 1.0
+    assert p1._health(8.0)["rtf_1s"] == 1.0                              # capped at 1 (a fake cannot run ahead)
+    h = p1._health(10.0 / 0.9)
+    assert h["rtf_1s"] == pytest.approx(0.9) and h["level"] == "degraded"
+    assert p1._health(12.5)["level"] == "unsafe"                          # 0.8
+    assert p1._pose_msg(12.5)["rtf"] == pytest.approx(0.8)
+    pinned = FakeP1(_free_offset(), str(tmp_path / "p2"), log=lambda *_: None, rtf=1.0)
+    pinned.t_sim = 1.0
+    assert pinned._health(100.0)["level"] == "ok" and pinned._pose_msg(100.0)["rtf"] == 1.0

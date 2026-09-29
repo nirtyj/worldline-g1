@@ -180,7 +180,7 @@ class FakeP1:
     def __init__(self, port_offset: int = 200, out_dir: str = "/tmp/fake_p1", pose_hz: float = 50.0,
                  cam_hz: float = 10.0, physics_hz: float = 200.0, ctx: zmq.Context | None = None,
                  robot_radius: float = 0.15, log=print, house_dir: str | None = None, objects_hz: float = 10.0,
-                 health_hz: float = 1.0):
+                 health_hz: float = 1.0, rtf: float | None = None):
         self.P = _ports(port_offset)
         self.P["ego"] = W.EGO_PORT + port_offset
         self.out_dir = out_dir
@@ -248,7 +248,10 @@ class FakeP1:
         self.events: list[dict] = []
         self._evq: queue.Queue = queue.Queue()
         self.attach_count = self.detach_count = self.object_writes = 0
-        self.rtf_override: float | None = None      # test hook: the rtf gt.pose / sim.health report
+        # The RTF gt.pose and sim.health report. None: measured, t_sim over wall time since start (the CLI default).
+        # A number pins it: a kinematic fake has no real-time budget, so on a loaded test machine the measured ratio
+        # reads as a DEGRADED sim that is not there (sim_isaac/tests pin 1.0). Tests change it at run time.
+        self.rtf_override: float | None = rtf
         self.render_seq = 0
         self.cams = {"head": {"spec": W.HEAD, "on": True, "hz": float(cam_hz), "consumers": W.Consumers(),
                               "seq": 0},

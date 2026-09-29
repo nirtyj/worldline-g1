@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from api.results import validate_envelope
 from services.reachability import G1Workspace, ReachabilityModel
 from tests.services.conftest import Stack, run
@@ -163,6 +165,7 @@ def test_no_skill_when_the_registry_lacks_the_type(tmp_path):
 
 
 def test_needs_reposition_stance_is_free_and_close():
+    """The lite world's (INTERIM M2a) arm: stance_via go_to, so a stance is in A*'s free space."""
     s = Stack()
 
     async def main():
@@ -173,5 +176,80 @@ def test_needs_reposition_stance_is_free_and_close():
         assert st["distance_m"] <= 0.40 + 1e-6
         g = s.world.map.grid
         assert g.is_free(st["x"], st["y"]) and g.clearance(st["x"], st["y"]) >= 0.25
-        assert {"x", "y", "yaw", "dx", "dy", "dyaw"} <= set(st)
+        assert {"x", "y", "yaw", "dx", "dy", "dyaw", "object_fwd", "object_left"} <= set(st)
+        assert s.robot.reach.lite_arm_note and "INTERIM" in s.robot.reach.lite_arm_note
+    run(main())
+
+
+def _g1_arm(s):
+    """The calibrated G1 arm of config/g1.yaml (what an Isaac world uses), on this lite stack."""
+    ws = {k: v for k, v in s.robot.stack_profile.g1["workspace"].items() if k != "lite_world"}
+    return ReachabilityModel(s.world, G1Workspace.from_dict(ws), registry=s.robot.skill_registry,
+                             observation=s.robot.obs, nav=s.robot.nav)
+
+
+def test_the_lite_world_gets_the_interim_arm_and_an_isaac_world_the_calibrated_one():
+    s = Stack()
+    ws = G1Workspace.from_dict(s.robot.stack_profile.g1["workspace"])
+    assert ws.arm_reach_m < 0.45 and ws.stance_via == "approach" and ws.lite_world
+    lite = ws.for_world(s.world)
+    assert lite.arm_reach_m == 0.65 and lite.stance_via == "go_to" and lite.obj_z_min_m == 0.55 and not lite.lite_world
+
+    class IsaacLike:
+        source = "isaac-gt"
+    assert ws.for_world(IsaacLike()) is ws
+
+
+def test_calibrated_arm_sphere_matches_the_ik_envelope():
+    """shoulder_dist is the fitted sphere: body/arm_script.py's IK reaches points just inside it and misses points
+    well outside (world/workspace_cal.py samples the whole envelope)."""
+    pytest.importorskip("numpy")
+    from world.workspace_cal import EnvelopeSpec, grasp_ok
+    s = Stack()
+    m = _g1_arm(s)
+    spec = EnvelopeSpec()
+    floor = s.world.map.floor_z
+    pz = m.ws.shoulder_z_m - 0.299                     # the standing pelvis height the sphere was measured at
+    for h, lat in ((0.95, -0.15), (1.10, -0.30), (1.05, -0.05)):
+        z = floor + h
+        # the sphere's forward reach at this height and lateral offset
+        f = m.ws.shoulder_fwd_m + math.sqrt(m.ws.arm_reach_m ** 2 - (abs(lat) - m.ws.shoulder_lat_m) ** 2
+                                            - (z - (floor + m.ws.shoulder_z_m)) ** 2)
+        assert m.shoulder_dist(f, lat, z) == pytest.approx(m.ws.arm_reach_m, abs=1e-6)
+        assert grasp_ok(spec, f - 0.01, lat, h - pz)[0], (h, lat, f)
+        assert not grasp_ok(spec, f + 0.06, lat, h - pz)[0], (h, lat, f)
+
+
+def test_calibrated_stance_is_an_approach_stance_close_to_the_furniture():
+    """The calibrated arm's reach stance: the pelvis stance_clearance_m (0.20) from the furniture on a straight
+    segment from here (the body's approach), within approach_max_m, the object inside the sphere with margin."""
+    s = Stack(house="procthor-train-40")
+    m = _g1_arm(s)
+
+    async def main():
+        await _scan_at(s, "bedroom_dresser_1b")
+        r = m.check("alarm_clock", "alarm_clock_1")
+        assert r.reason == "needs_reposition", r
+        st = r.stance
+        g = s.world.map.grid
+        assert st["distance_m"] <= m.ws.approach_max_m + 1e-6
+        assert g.clearance(st["x"], st["y"]) >= m.ws.stance_clearance_m and m.stance_ok(st["x"], st["y"])
+        o = s.world.object("alarm_clock_1")
+        assert m.shoulder_dist(st["object_fwd"], st["object_left"], m.grasp_z(o)) <= m.ws.arm_reach_m - 0.02 + 1e-9
+        s.world.set_robot_pose(st["x"], st["y"], st["yaw"])
+        s.robot.nav._anchor = ("bedroom_dresser_1b", st["x"], st["y"])
+        r2 = m.check("alarm_clock", "alarm_clock_1")
+        assert r2.reachable and r2.preferred_arm in ("left", "right", "either")
+    run(main())
+
+
+def test_beyond_reach_says_how_far_the_arm_reaches():
+    s = Stack(house="procthor-train-15")
+    m = _g1_arm(s)
+
+    async def main():
+        await _scan_at(s, "kitchen_counter_1b")
+        r = m.check("apple", "apple_1")
+        assert r.reason == "beyond_reach"
+        assert "0.64 m from the nearest spot the robot can stand" in r.detail and "arm reaches 0.50 m" in r.detail
     run(main())

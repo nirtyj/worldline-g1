@@ -3,27 +3,59 @@
 # tools/calibrate_workspace.py (IK sampling) and S1.9 measures arrival/reposition accuracy (PLAN §6.4, §11).
 robot: unitree_g1
 
-workspace:                      # PLAN §6.4 G1Workspace (object positions in the CURRENT pelvis frame)
-  shoulder_z_m: 1.08            # shoulder height standing (torso_link + 0.248 m, pelvis ~0.78)
-  shoulder_lat_m: 0.10          # shoulder pitch joint y offset (g1 URDF: +-0.1002)
-  arm_reach_m: 0.65             # shoulder -> object, straight arm + Dex3 hand + ~5 cm waist lean (out_of_workspace)
-  obj_z_min_m: 0.55             # object centre height below this -> too_low (squat mode deferred)
-  obj_z_max_m: 1.20             # above this -> too_high
-  approach_max_m: 0.40          # the largest navigate(reach_stance) reposition
-  reach_fwd_m: [0.20, 0.55]     # object forward of the pelvis for a manipulable pose
+workspace:                      # PLAN §6.4 G1Workspace (object positions in the CURRENT pelvis frame): the G1's arm, R.7 /
+                                # M3.5 calibration (docs/calibration.md): world/workspace_cal.py samples body/arm_script.py's
+                                # own IK (grasp + pregrasp, wrist pitch/yaw locked) and fits a sphere (rms 4 mm);
+                                # world/live_cal.py measured the pelvis height and checked the palm live
+  shoulder_z_m: 1.083           # reach-sphere centre above the floor: standing pelvis 0.784 (live, n=24) + 0.299 (IK fit)
+  shoulder_lat_m: 0.136         # ... 0.136 m out on the reaching arm's side (shoulder pitch + roll joint offsets)
+  shoulder_fwd_m: 0.0           # ... fit 0.004 m forward
+  arm_reach_m: 0.405            # reach-sphere radius: the IK boundary 0.4255 minus 2 cm (live: the only 2 IK misses of 24
+                                # grasps were on the boundary itself)
+  grasp_above_top_m: 0.03       # sonic_arm_script's grasp point = the object's AABB top centre + this (B.7 top grasp)
+  obj_z_min_m: 0.70             # object centre below this -> too_low (grasp point < ~0.78 m: the palm reaches <= 0.30 m
+                                # ahead there, IK envelope; squat mode deferred)
+  obj_z_max_m: 1.25             # above this -> too_high (grasp point > ~1.33 m: <= 0.34 m ahead)
+  approach_max_m: 0.60          # the largest navigate(reach_stance): the body approach's max_dist (live: 0.53-0.55 m
+                                # repositions 3/4, 0.1-0.3 m 15/15)
+  reach_fwd_m: [0.15, 0.43]     # grasp point forward of the pelvis: in front of the torso .. the sphere's best reach
   reach_lat_max_m: 0.40
   either_deadband_m: 0.10       # |lateral| below this -> preferred_arm "either"
-  stance_fwd_m: [0.30, 0.45]    # where a reposition puts the object (forward of the pelvis)
-  stance_lat_m: [0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15]
-  stance_clearance_m: 0.25      # the body's robot radius
+  stance_fwd_m: [0.22, 0.36]    # the comfortable band a reach stance aims the object at (forward of the pelvis)
+  stance_lat_m: [0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15, 0.20, -0.20]
+  stance_clearance_m: 0.20      # reach stance: pelvis to the nearest obstacle, raw occupancy (toes 0.13 m ahead of the
+                                # pelvis; live, the body stood 0.15-0.20 m from a counter in 15/15 approaches, no fall)
+  stance_via: approach          # reach_stance is the body's `approach` (B.6, R.2): a straight segment, not A*'s free space
   stance_margin_m: 0.02         # stances keep this much inside arm_reach_m (arrival error)
   max_held: 1                   # one object at a time (Worldline rule; two hands, one object)
   reach_fresh_s: 30.0
+  lite_world:                   # INTERIM: a LiteWorld (the `lite` profile, the laptop test stacks) keeps M2a's optimistic
+                                # arm until the tests that pick H38's bed alarm clock (0.62 m: below the calibrated band,
+                                # grasp point 0.69 m where the palm reaches 0.18 m ahead) move to an object the G1 can
+                                # reach; then this block goes (services/reachability.py G1Workspace.for_world)
+    shoulder_z_m: 1.08
+    shoulder_lat_m: 0.10
+    shoulder_fwd_m: 0.0
+    arm_reach_m: 0.65
+    grasp_ref: centre
+    obj_z_min_m: 0.55
+    obj_z_max_m: 1.20
+    approach_max_m: 0.40
+    reach_fwd_m: [0.20, 0.55]
+    stance_fwd_m: [0.30, 0.45]
+    stance_lat_m: [0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15]
+    stance_clearance_m: 0.25
+    stance_via: go_to
+    stance_search: band
 
 walking:
-  cruise_mps: 0.45              # body go_to speed (m1: SONIC walks ~0.45 m/s)
-  nav_speed_mps: 0.40           # effective average incl. turns and 0.4-1.1 s stops (timeouts, prompt slot)
-  arrive_tol_m: 0.30            # "at a keypoint" radius (PLAN §5.6)
+  cruise_mps: 0.45              # go_to's commanded speed (navigate). R.7 live: a straight SLOW_WALK runs faster than
+                                # commanded (0.45 -> 0.57 m/s steady), a whole navigate slower (0.29 m/s, below)
+  nav_speed_mps: 0.29           # effective navigate speed incl. the turn at the start, stops and the final approach: R.7
+                                # live, go_to legs between H40 keypoints at 0.45 m/s: 17 legs that passed the timing gate
+                                # 97.6 m in 335.8 s = 0.291 m/s (all 24 legs 0.297). The bridge sets it from
+                                # api.types.PROFILES (walk_speed_mps) for the timeouts and the prompt
+  arrive_tol_m: 0.30            # "at a keypoint" radius (PLAN §5.6); R.7 live go_to arrival error 0.11 m mean, 0.18 p90
   final_pos_tol_m: 0.25         # body go_to success bar (contract m1.md §3.4)
   final_yaw_tol_deg: 12.0
   reposition_mps: 0.20
@@ -34,10 +66,17 @@ walking:
   timeout_base_s: 12.0
   timeout_min_s: 20.0
   timeout_max_s: 240.0
-  cancel_settle_s: 1.5          # PathFollower IDLE settle bound (PLAN §5.6)
+  cancel_settle_s: 1.5          # PathFollower IDLE settle bound (PLAN §5.6); R.7 live stop 0.89 s mean (0.77-1.10, n=6)
   # lite body only (kinematic stand-in)
   lite_turn_dps: 45.0
   lite_stop_s: 0.6
+  measured:                     # R.7 on SONIC, docs/calibration.md (dev box, H40, 2 sessions, 6 runs). Not read by code
+    walk_cmd_to_steady_mps: [[0.30, 0.40], [0.45, 0.57], [0.60, 0.71]]   # SLOW_WALK commanded -> GT steady speed
+    walk_start_latency_s: [0.17, 0.30]
+    stop_to_rest_s: 0.89        # `stop` 3 s into a 0.45 m/s walk -> |v| < 0.05 (GT); glide 0.21 m
+    turn_dps: [[90, 17.8], [180, 25.7]]                                  # turn_to +-90 / 180 deg, final error 0.7-2.7 deg
+    navigate_mps: 0.29
+    approach_s: [15.1, 22.2]    # mean, p90 over 15 approaches of 0.1-0.3 m (all within 5 cm); 0.53-0.55 m: 3 of 4
 
 scan:
   executor: turn_in_place       # INTERIM (M2a): in-place turn_to steps; M2b: waist_scan via upper_body_position
@@ -91,12 +130,17 @@ sim_health:                     # world/sim_health.py (PLAN §3.5; R.6): used wh
 
 mapgen:                         # world/mapgen.py MapParams (PLAN §7.1 table)
   segment_m: 1.0
-  stand_off_m: [0.35, 0.50]     # PLAN: 0.45-0.60; moved in so place spots <= 0.20 m past the edge are reachable
+  stand_off_m: [0.27, 0.45]     # PLAN: 0.45-0.60. R.7: the arm reaches 0.37-0.41 m ahead at counter height, and place
+                                # never repositions: from 0.27 m a spot 6 cm past the edge is in reach (0.35: none is)
   stand_off_relaxed_m: 1.0
   stand_min_sep_m: 0.5
-  stand_clearance_m: 0.30
+  stand_clearance_m: 0.25      # A* go_to goal: outside the body's 0.25 m inflation (keypoints are go_to goals)
   robot_radius: 0.25
-  nav_speed_mps: 0.40
+  nav_speed_mps: 0.29           # R.7 measured navigate speed (the bridge overrides it from the profile)
   max_reach_height_m: 1.20
   min_reach_height_m: 0.55
   user_surface_rule: placeable  # THOR's nearest-to-start rule among surfaces a G1 can place on from the stand
+  lite_world:                   # INTERIM: a LiteWorld keeps M2a's stands, with its M2a arm (workspace.lite_world); the
+                                # Isaac worlds build the R.7 stands above (world/mapgen.py MapParams.for_source)
+    stand_off_m: [0.35, 0.50]
+    stand_clearance_m: 0.30

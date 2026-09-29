@@ -1,6 +1,7 @@
 """The eval's bindings on the G1 stack: eval/scenes.yaml plus the rules that use it (PLAN 9.1).
 
   load()                      the houses, profiles and 17 scenario bindings
+  Bindings.fetch_target()     a fetch scenario's object, label and sentence after scenes.yaml's scenario decision
   Bindings.time_limit()       a scenario's wall-clock limit on a profile (THOR limit x time scale, never
                               below twice the humanoid estimate from walk distance, scans, picks and places)
   executors_used()            which executors and skills produced the results (trace rows + executions)
@@ -125,6 +126,16 @@ class Bindings:
         return float(scale if scale is not None else self.profile(profile)["time_scale"])
 
     # ------------------------------------------------------------------ what a scenario says and waits for
+    def fetch_target(self, name: str, original: bool = False) -> tuple[str, str, str]:
+        """(object id, label, what the user says) of a fetch scenario, after scenes.yaml's scenario decision
+        (`status: substituted` keeps THOR's binding under `original`; --original runs it)."""
+        sc = self.scenarios[name]
+        part = (sc.get("original") or {}) if original and sc.get("status") == "substituted" else {}
+        oid = str(part.get("target") or sc["target"])
+        label = str(part.get("label") or sc.get("label") or oid.rsplit("_", 1)[0].replace("_", " "))
+        say = str(part.get("say") or sc.get("say") or f"Bring me the {label}.")
+        return oid, label, say
+
     def second_request(self, name: str, original: bool = False) -> tuple[str | None, list[str]]:
         sc = self.scenarios[name]
         use = "original" if original else sc.get("use", "original")
