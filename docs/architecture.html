@@ -114,7 +114,7 @@ svg.bd { display: block; width: 100%; min-width: 820px; height: auto; color: var
   <h1>Worldline G1 Architecture</h1>
   <p class="lede">How GEAR-SONIC, Isaac Sim, the ProcTHOR house and our drive API fit together to make a simulated Unitree G1 walk through a home, and where Worldline and GR00T plug in next.</p>
   <div class="meta">
-    <span>Revision <b>r6</b></span>
+    <span>Revision <b>r7</b></span>
     <span>Updated <b>2026-09-28</b></span>
     <span>Milestone <b>M1 verified · M2 in progress</b></span>
     <span>Box <b>Brev ludo-g1-brev2 · 1× L40S</b></span>
@@ -488,25 +488,23 @@ sequenceDiagram
       <tbody>
         <tr><td class="num">1</td><td>Infra: Brev main box, scripts, pinned upstream stacks</td><td>–</td><td><span class="pill ok">Done</span></td></tr>
         <tr><td class="num">2</td><td>M1: SONIC G1 walks a ProcTHOR house in Isaac through the drive API; viz + recorder</td><td>1</td><td><span class="pill ok">Verified</span></td></tr>
-        <tr><td class="num">3</td><td>Decisions: walk diagnosis, Nav2 backend (fakes), Arena spike → GR00T drives arms, SONIC keeps legs</td><td>2</td><td><span class="pill ok">Done</span></td></tr>
+        <tr><td class="num">3</td><td>Decisions: walk diagnosis, Arena spike → GR00T drives arms, SONIC keeps legs</td><td>2</td><td><span class="pill ok">Done</span></td></tr>
         <tr><td class="num">4</td><td>M2a: Worldline port offline (api contract, world model, services, UI, runtime, eval)</td><td>2</td><td><span class="pill warn">In progress</span></td></tr>
         <tr><td class="num">5</td><td>Arm channel + SONIC arm-tracking test + GR00T arm design (GO/NO-GO)</td><td>2</td><td><span class="pill warn">In progress</span></td></tr>
-        <tr><td class="num">6</td><td>Dev box: full-stack install and verification</td><td>1</td><td><span class="pill warn">In progress</span></td></tr>
-        <tr><td class="num">7</td><td>Nav2 on real SONIC, compared with A*, then default backend</td><td>6</td><td><span class="pill todo">Next</span></td></tr>
-        <tr><td class="num">8</td><td>M2b: Worldline drives the live G1 (System 1 live, planner, navigate → SONIC, scripted arms, 17 scenarios on H40/H15)</td><td>4, 5</td><td><span class="pill todo">Next</span></td></tr>
-        <tr><td class="num">9</td><td>GR00T plumbing: server → 40-step arm/hand chunks → arm op at 50 Hz</td><td>5</td><td><span class="pill todo">Next</span></td></tr>
-        <tr><td class="num">10</td><td>Demo collection in Isaac through the arm op (LeRobot, 50–150 per skill)</td><td>5, 8</td><td><span class="pill todo">Later</span></td></tr>
-        <tr><td class="num">11</td><td>Fine-tune GR00T N1.7 on arm/hand joints (dev box, Isaac off)</td><td>10</td><td><span class="pill todo">Later</span></td></tr>
-        <tr><td class="num">12</td><td>GR00T in the Worldline loop, hardening, interview snapshot</td><td>8, 11</td><td><span class="pill todo">Later</span></td></tr>
+        <tr><td class="num">6</td><td>Dev box: full-stack install and verification (backup)</td><td>1</td><td><span class="pill warn">In progress</span></td></tr>
+        <tr><td class="num">7</td><td><b>Whole loop, end to end:</b> M2b live integration (System 1 live, planner, navigate → SONIC on A*, scripted arms) + <code>groot_arms</code> with the off-the-shelf N1.7 G1 checkpoint + GR00T inside <code>manipulate</code>. Tests prove plumbing and control semantics; grasp success is reported honestly, not expected</td><td>4, 5</td><td><span class="pill todo">Next</span></td></tr>
+        <tr><td class="num">8</td><td>Hardening, demo recordings, interview snapshot</td><td>7</td><td><span class="pill todo">After 7</span></td></tr>
+        <tr><td class="num">–</td><td>Deferred: Nav2 on real SONIC; GR00T demo collection + fine-tuning; COMPASS; no-GT perception</td><td>–</td><td><span class="pill todo">Deferred</span></td></tr>
       </tbody>
     </table>
   </div>
-  <p class="caption">Critical path 4 → 8 → 10 → 11 → 12. The arm-tracking GO/NO-GO (5) gates the arm work in 8 and everything from 9 on.</p>
+  <p class="caption">Critical path 4 + 5 → 7 → 8. The arm-tracking GO/NO-GO (5) gates every arm path in 7.</p>
 </section>
 
 <section>
   <h2>Status log</h2>
   <div class="log">
+    <div class="entry"><time>2026-09-29</time><p><b>r7.</b> Build order changed by the owner: Nav2 deferred (A* stays the <code>go_to</code> backend); GR00T demo collection and fine-tuning deferred. Next is one combined build, M2b + <code>groot_arms</code> + GR00T in the Worldline loop, tested end to end with the off-the-shelf N1.7 G1 checkpoint.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r6.</b> Added the build order. Decision (b): GR00T will drive arms and hands through SONIC's upper-body channel; SONIC keeps the legs. Arena spike closed: official G1 checkpoints do not navigate houses (N1.6 walks one memorized route; N1.7 static ~22%) and need Isaac Sim 6. The second Brev box becomes a full-stack dev box. Nav2 fixes verified on fakes (16/16 goals incl. the narrow doorway).</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r5. M1 verified.</b> Independent verification from a clean state passed E1–E7 and adversarial checks. Across 9 integrated runs: 0 falls, go_to 27/27 legs through kitchen, bedroom and living room (position error 3–16 cm, heading 0.4–4.9°), walk 3.3–3.6 m, strafe 1.5–1.7 m, stop 0.9–1.2 s, 90° turns within 0.5–5°. Proof of SONIC walking: rt/lowcmd 499 Hz with leg targets changing at 50 Hz, planner mode in the deploy log, alternating single support, no root-pose writes. Up in 58 s, down in 6 s. Next: M2 (Worldline on this stack) and Nav2 as the go_to backend.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r4.</b> Walking diagnosis: SONIC walks in its MuJoCo reference on a quiet box (3/3 runs, all checks: 2.7 m forward at ~0.45 m/s, heading error 2–3°, no falls). Falls came from CPU/GPU contention by other agents' Isaac jobs, plus harness bugs (measuring across fall-reset teleports, commands from measured yaw, one 90° turn step). Fixed in the body layer: zero-movement commands go IDLE and turns step at most 30° from the commanded facing. Official NVIDIA G1 GR00T checkpoints (Arena, with navigation) found; an Arena spike runs on a second L40S box; Nav2 is being added as the navigation backend.</p></div>
