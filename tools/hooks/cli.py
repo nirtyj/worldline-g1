@@ -13,9 +13,13 @@
                                          m1_up.sh starts it), then the body `stand`: an operator path B
   recover [--timeout 120]                back to standing: deploy dead -> restart-deploy (path B); fault fallen -> the
                                          body's `recover` (path A), else P1 reset_robot + clear_fault + stand
+  home [--timeout 120]                   the robot back at the spawn, standing (P1 reset_scene {robot} + stand), as a
+                                         page reset does; for a robot upright but pinned somewhere (a wall)
   delay-proxy start|set|stop|status [--ms N]      tools/hooks/delay_proxy.py in tmux 'hooks-delay' (G4)
   p5-endpoint proxy|direct               restart P5 (scripts/m2_p5.sh restart) with WL_GROOT_ENDPOINT on the proxy
                                          (tcp://127.0.0.1:5551) or back on the PolicyServer (unset)
+  policy cut|restore [--via link|local] [--port 5550]   G5/G13's P4 outage as this box sees it: link = the OD3 link
+                                         to the dev-box server cut / back (PLAN 0.12), local = groot_server.sh here
   status                                 what is active: P1 test ops, body mode/fault, deploy pid, delay proxy
   clear-all                              unthrottle, clear-box, delay 0 (never touches the deploy)
 
@@ -45,6 +49,7 @@ LOG_ROOT = Path(os.environ.get("WL_LOG_ROOT", "/work/logs/wl"))
 DEPLOY_BIN_NAME = "g1_deploy_onnx_ref"
 PROXY_SESSION = "hooks-delay"
 PROXY_PORTS = {"listen": 5551, "upstream": 5550, "ctl": 5549}
+HOME_STANDS = 3                 # `home`: stands after the reset, at most (the reset sag, see home())
 
 
 def say(msg: str) -> None:
@@ -215,6 +220,45 @@ def recover(st: Stack, a: argparse.Namespace) -> dict:
     return out
 
 
+def home(st: Stack, a: argparse.Namespace) -> dict:
+    """The robot back at the spawn, standing: P1 reset_scene {robot: true} (objects back at their load poses, the robot
+    at the spawn in the band), then the body `stand` (releases the band) -- what a page reset does (ui/server.py
+    Session._reset_sim), without a page. The suite's reset_fixup after a page reset that left the robot down, and the
+    way back for a robot left upright but somewhere awkward (pushed against a wall), where `recover` has nothing to do.
+    Like the page's reset, a halt latch left by the last session is released at the body's own halt epoch (a reset is
+    a fresh start). Needs a live deploy (else run `recover` first)."""
+    if deploy_pid(st.session, st.P["sonic_debug"]) is None:
+        return {"ok": False, "error": "no deploy running: run `recover` (path B) first"}
+    t0 = time.monotonic()
+    b = st.body()
+    b.request("stop")
+    rs = st.p1("reset_scene", timeout_s=30.0, variant="default", robot=True)
+    out: dict[str, Any] = {"reset_scene": {k: rs.get(k) for k in ("ok", "objects_reset", "robot_reset", "ms", "error")}}
+    if not _ok(rs):
+        return {"ok": False, **out, "error": f"P1 reset_scene: {rs.get('error')}"}
+    # after the reset under SONIC control, the stand often drops the pelvis below the body's 0.55 m fall line and ends
+    # `fallen` (live, 2026-09-29, the wl-m2 body log 17:21-17:27 UTC: 4 of 12 stands right after a P1 reset_robot):
+    # clear the latched fall and stand again, at most HOME_STANDS stands in all
+    tries = []
+    for _ in range(HOME_STANDS):
+        time.sleep(1.0)
+        s0 = b.status()
+        cleared = resumed = None
+        if s0.get("fault"):
+            cf = b.request("clear_fault")
+            cleared = (cf.get("data") or {}).get("cleared") if cf.get("ok") else f"FAILED {cf.get('error')}"
+        if s0.get("latched") and isinstance(s0.get("halt_epoch"), int):
+            rz = b.resume(s0["halt_epoch"])
+            resumed = s0["halt_epoch"] if rz.get("ok") else f"FAILED {rz.get('error')}"
+        sd = _stand(st, a.timeout)["stand"]
+        tries.append({"fault_before": s0.get("fault"), "cleared": cleared, "resumed_halt_epoch": resumed, **sd})
+        if sd["state"] == "succeeded" or not any(k in str(sd.get("reason")) for k in ("fallen", "halted")):
+            break
+    out.update(ok=tries[-1]["state"] == "succeeded", stand=tries[-1], tries=tries, pose=_pose(st).get("base_pos"),
+               total_s=round(time.monotonic() - t0, 1))
+    return out
+
+
 # ------------------------------------------------------------------------------------------------ P1 test ops
 def push(st: Stack, a: argparse.Namespace) -> dict:
     d: Any = a.dir
@@ -246,6 +290,15 @@ def unthrottle(st: Stack, a: argparse.Namespace) -> dict:
     return {"ok": _ok(rep), "p1": rep}
 
 
+def find_object(st: Stack, key: str) -> dict | None:
+    """A P1 object by its P1 id (THOR's 'AlarmClock|surface|2|25') or by its Worldline name ('alarm_clock_1', the
+    `name` P1 reports for it; get_objects ids= only takes P1 ids)."""
+    rep = st.p1("get_objects", ids=[key])
+    if _ok(rep) and rep.get("objects"):
+        return rep["objects"][0]
+    return next((o for o in st.p1("get_objects").get("objects") or [] if key in (o.get("id"), o.get("name"))), None)
+
+
 def spawn_box(st: Stack, a: argparse.Namespace) -> dict:
     placed = None
     if a.toward or a.toward_xy:
@@ -257,10 +310,10 @@ def spawn_box(st: Stack, a: argparse.Namespace) -> dict:
         if a.toward_xy:
             gx, gy = (float(v) for v in a.toward_xy.split(","))
         else:
-            objs = st.p1("get_objects", ids=[a.toward]).get("objects") or []
-            if not objs:
-                return {"ok": False, "error": f"no object {a.toward!r}"}
-            gx, gy = float(objs[0]["pos"][0]), float(objs[0]["pos"][1])
+            obj = find_object(st, a.toward)
+            if obj is None:
+                return {"ok": False, "error": f"no object {a.toward!r} (P1 id or name)"}
+            gx, gy = float(obj["pos"][0]), float(obj["pos"][1])
         bp = _pose(st).get("base_pos") or [0.0, 0.0]
         grid = NavGrid.from_p1_reply(st.p1("get_occupancy", timeout_s=30.0, robot_radius=0.25), robot_radius=0.25)
         placed = place_across_path(grid, (float(bp[0]), float(bp[1])), (gx, gy), tuple(status["box_size"]),
@@ -329,6 +382,52 @@ def p5_endpoint(st: Stack, a: argparse.Namespace) -> dict:
             "m2_p5": (p.stdout + p.stderr).strip().splitlines()[-1:]}
 
 
+# ------------------------------------------------------------------------------------------------ P4 (GR00T)
+def policy_ping(port: int, timeout_s: float = 3.0) -> dict:
+    """One PolicyServer ping on 127.0.0.1:port (groot/policy_client.py): {ok, latency_ms}."""
+    from groot.policy_client import PolicyClient
+    with PolicyClient(f"tcp://127.0.0.1:{port}", timeout_s=timeout_s) as c:
+        ok = c.ping()
+        lat = None if (not ok or c.last_latency_s is None) else round(c.last_latency_s * 1e3, 2)
+    return {"ok": ok, "latency_ms": lat}
+
+
+def _script(*args: str, timeout: float) -> dict:
+    p = subprocess.run(["bash", *args], cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
+    return {"rc": p.returncode, "tail": (p.stdout + p.stderr).strip().splitlines()[-2:]}
+
+
+def policy(st: Stack, a: argparse.Namespace) -> dict:
+    """G5/G13's P4 outage as the main box sees it (eval/hooks.py). --via link (PLAN 0.12: the server on the dev box
+    behind the OD3 link): cut = groot_link.sh down, restore = groot_link.sh ensure; --via local (PLAN 0.11: the server
+    on this box): cut = groot_server.sh stop, restore = start --warm. ok iff the ping afterwards says what was meant
+    (cut: no answer; restore: an answer). The dev-box server itself is only stopped from the laptop (eval/hooks.py
+    laptop_hooks), because the link key is port-forward only."""
+    t0 = time.monotonic()
+    before = policy_ping(a.port, 2.0)
+    if a.action == "cut":
+        run = (_script("scripts/groot_link.sh", "down", "--local-port", str(a.port), timeout=30) if a.via == "link"
+               else _script("scripts/groot_server.sh", "stop", "--port", str(a.port), timeout=120))
+        time.sleep(0.5)
+        after = policy_ping(a.port, 2.0)
+        ok = not after["ok"]
+        what = ("P4 unreachable from the main box: the OD3 link cut (the dev-box server keeps running)"
+                if a.via == "link" else "P4 stopped (groot_server.sh stop, this box)")
+    else:
+        run = (_script("scripts/groot_link.sh", "ensure", "--local-port", str(a.port), timeout=90) if a.via == "link"
+               else _script("scripts/groot_server.sh", "start", "--port", str(a.port), "--warm", timeout=900))
+        after = {"ok": False}
+        for _ in range(20):
+            after = policy_ping(a.port, 3.0)
+            if after["ok"]:
+                break
+            time.sleep(1.0)
+        ok = after["ok"]
+        what = "P4 answers again" if ok else "P4 still not answering"
+    return {"ok": ok, "action": a.action, "via": a.via, "port": a.port, "what": what, "ping_before": before,
+            "ping_after": after, "script": run, "s": round(time.monotonic() - t0, 2), "label": "test-only"}
+
+
 # ------------------------------------------------------------------------------------------------ status
 def status(st: Stack, a: argparse.Namespace) -> dict:
     from tools.hooks.delay_proxy import ctl_call
@@ -346,6 +445,10 @@ def status(st: Stack, a: argparse.Namespace) -> dict:
     out["deploy"] = {"pid": pid, "alive": pid is not None}
     px = ctl_call(_ctl_ep(), {"op": "get"}, timeout_s=0.5)
     out["delay_proxy"] = px if _ok(px) else None
+    try:
+        out["policy"] = policy_ping(PROXY_PORTS["upstream"], 1.0)      # P4 as P5 reaches it (link or local)
+    except Exception as e:  # noqa: BLE001
+        out["policy"] = {"ok": False, "error": repr(e)}
     out["hooks_active"] = bool((out["p1"] or {}).get("active")) or bool(_ok(px) and px.get("ms"))
     return out
 
@@ -365,7 +468,9 @@ def clear_all(st: Stack, a: argparse.Namespace) -> dict:
 # ------------------------------------------------------------------------------------------------ main
 COMMANDS = {"push": push, "throttle": throttle, "unthrottle": unthrottle, "spawn-box": spawn_box,
             "clear-box": clear_box, "kill-deploy": kill_deploy, "restart-deploy": restart_deploy, "recover": recover,
-            "delay-proxy": delay_proxy, "p5-endpoint": p5_endpoint, "status": status, "clear-all": clear_all}
+            "home": home,
+            "delay-proxy": delay_proxy, "p5-endpoint": p5_endpoint, "policy": policy, "status": status,
+            "clear-all": clear_all}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -393,7 +498,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--ttl-s", type=float, default=600.0)
     sp.add_parser("clear-box")
     sp.add_parser("kill-deploy")
-    for name in ("restart-deploy", "recover"):
+    for name in ("restart-deploy", "recover", "home"):
         s = sp.add_parser(name)
         s.add_argument("--wait-init", type=float, default=180.0)
         s.add_argument("--taskset", default=os.environ.get("DEPLOY_TASKSET", "0-3"))
@@ -404,6 +509,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--ms", type=float, default=0.0)
     s = sp.add_parser("p5-endpoint")
     s.add_argument("to", choices=["proxy", "direct"])
+    s = sp.add_parser("policy")
+    s.add_argument("action", choices=["cut", "restore"])
+    s.add_argument("--via", choices=["link", "local"], default="link")
+    s.add_argument("--port", type=int, default=5550)
     sp.add_parser("status")
     sp.add_parser("clear-all")
     return ap

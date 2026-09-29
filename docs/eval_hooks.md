@@ -10,9 +10,9 @@ the page cannot cause. Before this work none of them could run live (wave 2, eva
 | Scenario | Fault | Injection | Fixture after the scoring window |
 |---|---|---|---|
 | G4 `stale_chunk_after_correction` | +600 ms on the GR00T link | `tools/hooks/delay_proxy.py` on 5551 → 5550 (P5 on `WL_GROOT_ENDPOINT=tcp://127.0.0.1:5551`) | delay back to 0 ms |
-| G5 / G13 `policy_down` | P4 dies | `scripts/groot_server.sh stop` (main box, PLAN §0.11) | `groot_server.sh start --warm` |
+| G5 / G13 `policy_down` | P4 unreachable | P4 runs on the dev box behind the OD3 link (PLAN §0.12). Suite on the main box: `tools.hooks policy cut` (`groot_link.sh down`, then a ping must fail). Suite on the laptop: `groot_server.sh stop` on the dev box | `policy restore` (`groot_link.sh ensure`, a ping must answer) / `groot_server.sh start --warm` on the dev box, then `policy restore` from the main box |
 | G6 `blocked_path` | a box in the corridor | P1 `spawn_box`, placed across the robot's own A* route (`tools/hooks/obstacle.py`) | P1 `clear_box` |
-| G7 `fall_recovery` | 250 N lateral push | P1 `push_robot {force_n: 250, dir: left, duration_s: 0.5}` | `tools.hooks recover` (body path A) |
+| G7 `fall_recovery` | 250 N lateral push (escalated, labelled, while it does not fell SONIC) | P1 `push_robot {force_n: 250, dir: left, duration_s: 0.5}`, then 400 N, then 600 N, each only if the one before left the robot up for `G7_FALL_WAIT_S` (8 s) | `tools.hooks recover` (body path A) |
 | G8 `deploy_restart` | (a) P2 crash, (b) kill button | (a) SIGKILL of the deploy; (b) the page's `estop` (the deliberate estop test) | `tools.hooks recover` (operator path B) |
 | G9 `rtf_degraded` | RTF 0.9 | P1 `rtf_throttle {target: 0.9}` | `rtf_throttle {off}` |
 
@@ -46,10 +46,15 @@ per command, exit 0 iff ok.
 | `recover` | deploy dead → `restart-deploy` (path B); fault `fallen` → the body's `recover` (path A), else P1 `reset_robot` + `clear_fault` + `stand`; healthy → "none needed" |
 | `delay-proxy start\|set\|stop\|status [--ms]` | the proxy in tmux `hooks-delay`: ROUTER 5551 → DEALER 5550, control REP 5549; `--where reply` (default) holds each reply |
 | `p5-endpoint proxy\|direct` | sets/unsets `WL_GROOT_ENDPOINT` in the stack's tmux session environment, then `scripts/m2_p5.sh restart` (the p5 window inherits it) |
-| `status`, `clear-all` | `clear-all`: unthrottle, clear-box, delay 0; never touches the deploy |
+| `home [--timeout]` | the robot back at the spawn, standing: P1 `reset_scene {robot}`, then up to 3 stands, each after clearing a latched `fallen` and releasing a halt latch at the body's own epoch (as the page's reset does). The suite's `reset_fixup`; also the way back from a wall |
+| `policy cut\|restore [--via link\|local] [--port 5550]` | G5/G13's outage as the main box sees it: `link` = `groot_link.sh down` / `ensure` (the dev-box server keeps running), `local` = `groot_server.sh stop` / `start --warm` on this box (PLAN §0.11's layout). ok iff a PolicyServer ping afterwards says what was meant |
+| `status`, `clear-all` | `status` includes a P4 ping on 5550; `clear-all`: unthrottle, clear-box, delay 0; never touches the deploy |
 
-**Hook maps** (`eval/hooks.py`): `--hooks box` (the suite runs on the box) or `--hooks laptop` (each command through
-`00_infra/ssh.sh`). `--hook name=cmd` overrides an entry, `--no-hook name` drops one.
+**Hook maps** (`eval/hooks.py`): `--hooks box` (the suite runs on the main box; `--hooks-policy link|local|none`
+says where P4 is, default `link`) or `--hooks laptop` (each main-box command through `00_infra/ssh.sh`; P4 is
+stopped and started on the dev box itself, `BREV_NAME=ludo-g1-arena`, then the link is checked from the main box).
+`--hook name=cmd` overrides an entry, `--no-hook name` drops one. The main box's link key is port-forward only, so a
+suite on the main box cannot stop the dev-box server: its outage is the link cut, and the result says so.
 
 **Scoring changes** (`eval/stack_suite.py`):
 
@@ -60,6 +65,18 @@ per command, exit 0 iff ok.
   the robot back for the next scenario; it is recorded in `extra.fixtures` with its timing and labelled
   "operator fixture", never scored.
 - Before every live scenario, `recover_robot` runs as a preflight (a no-op, "none needed", on a healthy stack).
+- **Page resets that leave the robot down.** Every scenario starts with a page reset (ui/server.py `_reset_sim`:
+  P1 `reset_scene {robot}` + the body `stand`). Live, the stand right after P1's `reset_robot` often ends `fallen`
+  (§3), and the new session then pauses itself on the fall. When `init.config.sim_reset.ok` is false, the suite
+  runs `reset_fixup` (`tools.hooks home`) and loads the page once more with `reset_robot: false` (the objects reset,
+  the standing robot kept), so the scenario starts from a fresh session and a standing robot. Recorded per scenario
+  in `extra.reset_fixups` (the failed page reset, the fixture's stands and time, the reload), labelled operator
+  fixture, never scored.
+- G7 escalates the push, labelled: PLAN's 250 N first; live, SONIC steps out of it standing (§6), so 400 N and then
+  600 N follow, each only when the push before did not bring a `fell` safety event within 8 s. `extra.pushes` and a
+  note say which push felled the robot.
+- G13 (live) waits for at least one planner call before the outage, so schemas exist on both sides of it; P4 always
+  comes back (`finally`).
 - G9 throttles after the scene reset (a reset and a stand at RTF 0.9 are not the test) and always restores.
 - G4 fails at once when the delay cannot be set (the proxy must be in P5's loop).
 - `clear_all` runs at the end of every live run; the result JSON carries `hooks` and `hooks_log` (every hook's exit
@@ -68,14 +85,19 @@ per command, exit 0 iff ok.
 ## 2. Running E4 live (main box)
 
 ```bash
-# the stack with the test ops (P1 must be (re)started with the flag; the page and viz ports as in bringup.md §6.1)
+# hold the MAIN stack lock (and the DEV lock first when the run sends GR00T inference: full, G3/G4/G5)
+# the stack with the test ops (P1 must be (re)started with the flag; the page and viz ports as in bringup.md §6.1);
+# full also needs the OD3 link up (bash scripts/groot_link.sh ensure; docs/groot_serving.md §5)
 bash scripts/m2_up.sh --profile full --scene procthor-train-40 --viz min --p5-port 8766 --isaac-args "--test-ops"
 # G4 only: the proxy in the loop (then back: delay-proxy stop; p5-endpoint direct)
 .venv-rt/bin/python -m tools.hooks delay-proxy start && .venv-rt/bin/python -m tools.hooks p5-endpoint proxy
 # the suite, on the box, against P5
-.venv-rt/bin/python -m eval.stack_suite --url ws://127.0.0.1:8766/ws --profile full --hooks box \
+.venv-rt/bin/python -m eval.stack_suite --url ws://127.0.0.1:8766/ws --profile full --hooks box --hooks-policy link \
     --out outputs/m2b_finish/hooks/e4_full.json --trace-dir outputs/m2b_finish/hooks/e4_traces
 .venv-rt/bin/python -m tools.hooks status          # hooks_active must be false afterwards
+# the hooks one by one on the live stack (every step's replies in <out>/smoke.json)
+.venv-rt/bin/python -m tools.hooks.live_smoke --out outputs/m2b_finish/hooks/smoke-<ts>
+# afterwards: the demo stack again WITHOUT --test-ops (bringup.md §6.1)
 ```
 
 ## 3. What the hooks cannot make pass (open, owners in brackets)
@@ -87,6 +109,14 @@ bash scripts/m2_up.sh --profile full --scene procthor-train-40 --viz min --p5-po
   and emit the events. Until then G7's and G8's recovery criteria fail honestly.
 - **No walking cap under DEGRADED** [world + runtime]: PLAN §3.5 caps walking below RTF 0.95; nothing publishes a
   cap, so G9's "walking capped" is UNVERIFIED.
+- **The stand after a P1 reset sags** [isaac + body]. After P1 `reset_robot` (root at the spawn, `default_q`, the
+  band on) under SONIC control, the body's `stand` (band release) often drops the pelvis below the body's 0.55 m
+  fall line and ends `fallen` (the wl-m2 body log, 2026-09-29 17:21-17:27 UTC: 4 of 12 stands right after a
+  `reset_robot`; §6 has the smoke's own count). Every page reset on an Isaac profile does this (ui/server.py
+  `_reset_sim`), so a demo reset can leave the robot down. The suite works around it with a labelled fixture (§1);
+  the fix belongs in P1's reset (e.g. hold the band until SONIC has settled on the new state) or the body's stand.
+- **PLAN's 250 N does not fell SONIC standing** [lead]: it steps 2.4-2.8 m sideways and stays up (§6). G7 escalates,
+  labelled; whether 250 N fells it mid-walk is what the G7 run shows.
 - **F7 / G5 conflict** [lead]: PLAN §2.2 F7 (running call `failed(policy_unavailable)` ≤ 3 s, then HOLD) vs PLAN §6.4
   (`groot_then_script` falls back after any GR00T failure). Unchanged here.
 - G14's `place_object` hook is not built: G14 relies on the object needing a reposition by itself.

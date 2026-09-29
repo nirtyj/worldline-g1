@@ -4,15 +4,19 @@
 
 Steps (each one's hook replies, P1 health samples and body status go to <out>/smoke.json):
   preflight   nothing active, the body standing in control
+  home        --home-n x `home` (P1 reset_scene {robot} + clear a latched fall + stand, up to 3 stands): what the
+              suite's reset_fixup runs when the page's own reset leaves the robot down; each run's stands counted
   nudge       a small push (60 N, 0.2 s) standing: balance holds (informational: SONIC's own push recovery)
-  push        PLAN G7's push (250 N lateral, 0.5 s) standing: a fall is detected (P1 fallen, body fault `fallen`),
-              then `recover` (the body's path A, operator-triggered) stands it again
+  push        PLAN G7's push (250 N lateral, 0.5 s) standing, then --push-n's stronger ones, each from the spawn
+              (`home`), until the body latches `fallen`; then `recover` (the body's path A, operator-triggered)
   throttle    RTF 0.9 for 25 s standing: P1 sim.health rtf/level sampled at 1 Hz, the robot stays up; then off
   box         spawn-box across the route to --toward; a body go_to along that route must end failed (stuck /
               off_path) with >= 1 replan and no fall; clear-box; go_to back to the start
   deploy      kill-deploy: the body's fault `deploy_lost` and the band (no fall); then `recover` (operator path B:
               run_deploy.sh start + stand) with its timing
   proxy       the delay proxy between a PolicyServer ping and 5550: RTT at 0 ms and at 600 ms (needs P4 up)
+  policy      G5/G13's outage as the main box sees it (PLAN 0.12): `policy cut` (the OD3 link down: no ping answers),
+              then `policy restore` (groot_link.sh ensure: the ping answers again), with timings (needs P4 up)
   final       `status`: hooks_active false, the body standing in control
 Every step runs even when an earlier one failed (after a `recover`), and the last step always runs.
 """
@@ -30,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-STEPS = ("preflight", "nudge", "push", "throttle", "box", "deploy", "proxy", "final")
+STEPS = ("preflight", "home", "nudge", "push", "throttle", "box", "deploy", "proxy", "policy", "final")
 
 
 def hook(*args: str, timeout: float = 400.0) -> dict[str, Any]:
@@ -116,6 +120,20 @@ def run(steps: list[str], a: argparse.Namespace) -> dict[str, Any]:
                 st = hook("status")
                 rec(step, pr.standing() and not st.get("hooks_active") and st["p1"].get("ok", True) is not False,
                     status=st, pose=pr.pose(), health=pr.health())
+            elif step == "home":
+                pre = ensure_standing(step)
+                runs = []
+                for _ in range(a.home_n):
+                    hm = hook("home", timeout=200)
+                    tries = hm.get("tries") or []
+                    runs.append({"ok": hm.get("ok"), "stands": len(tries),
+                                 "stand_reasons": [t.get("reason") for t in tries],
+                                 "faults_before": [t.get("fault_before") for t in tries],
+                                 "total_s": hm.get("total_s"), "pose": hm.get("pose"), "standing": pr.standing()})
+                first = [r["stand_reasons"][:1] == [None] for r in runs]
+                rec(step, all(r["ok"] and r["standing"] for r in runs), runs=runs, pre_recover=pre,
+                    first_stand_ok=f"{sum(first)}/{len(runs)}",
+                    label="operator fixture (the suite's reset_fixup); the first-stand rate is the P1 reset sag")
             elif step == "nudge":
                 pre = ensure_standing(step)
                 r = hook("push", "--force-n", str(a.nudge_n), "--duration-s", "0.2", "--dir", "left",
@@ -125,15 +143,28 @@ def run(steps: list[str], a: argparse.Namespace) -> dict[str, Any]:
                 if r.get("fell"):
                     res["steps"][step]["recover"] = hook("recover")
             elif step == "push":
+                # PLAN G7's 250 N first, then stronger pushes until the body latches `fallen` (SONIC steps out of
+                # 250 N standing: 2.4 m sideways, upright, 2026-09-29). Each push starts at the spawn (`home`), so
+                # the robot is never pushed into a wall; a fall is the body's fault `fallen` (pelvis below 0.55 m),
+                # which is what the stack acts on (P1's own `fallen` flag uses a lower threshold)
                 pre = ensure_standing(step)
-                p0 = pr.pose()
-                r = hook("push", "--force-n", "250", "--duration-s", "0.5", "--dir", "left", "--watch-s", "5")
-                ok_f, t_f, b_f = pr.wait_body(lambda b: b.get("fault") == "fallen", 5.0)
-                rv = hook("recover", "--timeout", "90")
+                tries = []
+                for n in a.push_n.split(","):
+                    hm = hook("home", timeout=200)
+                    p0 = pr.pose()
+                    r = hook("push", "--force-n", n, "--duration-s", "0.5", "--dir", "left", "--watch-s", "5")
+                    ok_f, t_f, b_f = pr.wait_body(lambda b: b.get("fault") == "fallen", 2.0)
+                    t = {"force_n": float(n), "home": hm.get("ok"), "pose_before": p0, "push": r, "body_fault": b_f,
+                         "fallen": b_f.get("fault") == "fallen", "pose_after": pr.pose()}
+                    tries.append(t)
+                    if t["fallen"]:
+                        t["recover"] = hook("recover", "--timeout", "90")
+                        break
+                last = tries[-1]
                 ok_up = pr.standing()
-                rec(step, bool(r.get("fell")) and ok_f and rv.get("ok") and ok_up, push=r, pose_before=p0,
-                    body_fault=b_f, fault_after_s=t_f, recover=rv, standing_after=ok_up, pose_after=pr.pose(),
-                    pre_recover=pre)
+                rec(step, last["fallen"] and (last.get("recover") or {}).get("ok") and ok_up, tries=tries,
+                    fell_at_n=last["force_n"] if last["fallen"] else None, standing_after=ok_up, pre_recover=pre,
+                    home_after=hook("home", timeout=200))
             elif step == "throttle":
                 pre = ensure_standing(step)
                 h0 = pr.health()
@@ -154,6 +185,7 @@ def run(steps: list[str], a: argparse.Namespace) -> dict[str, Any]:
                     rtf_5s_range=[min(r5), max(r5)] if r5 else None, standing_after=pr.standing(), pre_recover=pre)
             elif step == "box":
                 pre = ensure_standing(step)
+                hm = hook("home", timeout=200)          # the route from the spawn, as a page reset starts it
                 p0 = pr.pose()
                 sb = hook("spawn-box", "--toward", a.toward, "--ttl-s", "300")
                 placed = sb.get("placed") or {}
@@ -169,8 +201,9 @@ def run(steps: list[str], a: argparse.Namespace) -> dict[str, Any]:
                 cb = hook("clear-box")
                 back = pr.bc.go_to(p0["x"], p0["y"], yaw=p0["yaw"], timeout_s=90.0)
                 ok = (sb.get("ok") and walk is not None and walk["state"] == "failed"
-                      and str(walk["reason"]) in ("stuck", "off_path") and not p_mid["fallen"] and cb.get("ok"))
-                rec(step, ok, spawn=sb, walk=walk, pose_at_box=p_mid, clear=cb,
+                      and str(walk["reason"]).startswith(("stuck", "off_path")) and not p_mid["fallen"]
+                      and cb.get("ok"))           # stuck, or stuck_then_<replan failure> (body/path_follower.py)
+                rec(step, ok, home=hm, spawn=sb, walk=walk, pose_at_box=p_mid, clear=cb,
                     back={"state": back.state, "reason": back.reason}, standing_after=pr.standing(), pre_recover=pre)
             elif step == "deploy":
                 pre = ensure_standing(step)
@@ -202,6 +235,12 @@ def run(steps: list[str], a: argparse.Namespace) -> dict[str, Any]:
                       and p6["s"] - p0["s"] >= 0.55 and sp.get("ok"))
                 rec(step, ok, direct=direct, ping_0ms=p0, ping_600ms=p6, ping_0ms_again=p00, proxy=stat,
                     start=st, set_600=s6, set_0=s0, stop=sp, added_s=round(p6["s"] - p0["s"], 3))
+            elif step == "policy":
+                cut = hook("policy", "cut", "--via", a.policy_via, timeout=120)
+                back = hook("policy", "restore", "--via", a.policy_via, timeout=900)
+                ok = (cut.get("ok") and (cut.get("ping_before") or {}).get("ok") and back.get("ok")
+                      and (back.get("ping_after") or {}).get("ok"))
+                rec(step, ok, cut=cut, restore=back, cut_s=cut.get("s"), restore_s=back.get("s"))
             elif step == "final":
                 pre = ensure_standing(step)
                 st = hook("status")
@@ -222,7 +261,10 @@ def main(argv=None) -> int:
     ap.add_argument("--port-offset", type=int, default=0)
     ap.add_argument("--toward", default="alarm_clock_1")
     ap.add_argument("--nudge-n", type=float, default=60.0)
+    ap.add_argument("--home-n", type=int, default=5, help="the home step's runs")
+    ap.add_argument("--push-n", default="250,400,600", help="the push step's forces, in order, until a fall")
     ap.add_argument("--throttle-s", type=float, default=25.0)
+    ap.add_argument("--policy-via", choices=["link", "local"], default="link", help="where P4 is (PLAN 0.12: link)")
     a = ap.parse_args(argv)
     steps = [s for s in STEPS if not a.only or s in a.only.split(",") or s == "final"]
     out = Path(a.out)

@@ -87,6 +87,7 @@ class StackRun(suite.Run):
         self.injector = injector or Injector()
         self.track: set[str] = set()
         self.injected: list[str] = []
+        self.reset_fixups: list[dict[str, Any]] = []
 
     def ingest(self, m: dict[str, Any]) -> None:
         if m.get("type") == "init":
@@ -357,12 +358,53 @@ async def _fetch_start(r: StackRun, scenario: str = "fetch_other_room", oid: str
     r.current = scenario
     b = suite.BIND.scenario(scenario)
     r.track = {oid, "mug_1"}
-    await r.load(suite.BIND.scene(b["house"]), forget=forget)
+    scene = suite.BIND.scene(b["house"])
+    await r.load(scene, forget=forget)
+    await _after_load(r, scene, forget)
     if before is not None:
         await before()
     t = r.now()
     await r.say(f"Bring me the {label}.")
     return t
+
+
+async def _after_load(r: StackRun, scene: str, forget: bool) -> None:
+    """Live: every page reset puts the house back and stands the robot at the spawn (ui/server.py _reset_sim: P1
+    reset_scene + the body `stand`) and says how that went in init.config.sim_reset. When it left the robot down (live
+    2026-09-29: the stand after a P1 reset_robot often drops the pelvis under the body's fall line and ends `fallen`),
+    the new session has already paused itself on the fall. The `reset_fixup` hook (tools.hooks home: reset_scene +
+    clear the latched fall + stand, retried) stands the robot at the spawn, and the page is loaded once more with
+    `reset_robot: false` (objects reset, the standing robot kept), so the scenario starts from a fresh session and a
+    standing robot. An operator fixture: recorded in extra.reset_fixups with both page resets, never scored."""
+    if isinstance(r.injector, LocalInjector) or not r.injector.has("reset_fixup"):
+        return
+    sr = ((r.init or {}).get("config") or {}).get("sim_reset") or {}
+    if not sr or sr.get("ok") or sr.get("skipped"):
+        return
+    ok, note = await r.inject("reset_fixup")
+    last = r.injector.last("reset_fixup") if isinstance(r.injector, HookInjector) else None
+    js = (last or {}).get("json") or {}
+    await _load_keeping_robot(r, scene, forget)
+    sr2 = ((r.init or {}).get("config") or {}).get("sim_reset") or {}
+    r.reset_fixups.append({
+        "scenario": r.current, "page_sim_reset": {k: sr.get(k) for k in ("why", "stand", "s")},
+        "fixture_ok": ok, "fixture_s": (last or {}).get("s"), "stands": len(js.get("tries") or []) or None,
+        "reload_keeping_robot": {k: sr2.get(k) for k in ("ok", "robot", "why", "s")},
+        "label": "operator fixture (tools/hooks home + a page reload that keeps the robot), not the page's own reset"})
+
+
+async def _load_keeping_robot(r: StackRun, scene: str, forget: bool) -> None:
+    """eval/suite.py Run.load, with the page's `reset_robot: false` (ui/server.py: the objects reset, the robot kept)."""
+    r.init = None
+    await r.send(type="persona", level="off")
+    await r.send(type="step", mode="off")
+    await r.send(type="reset", scene=scene, forget=forget, profile=r.profile, reset_robot=False)
+    ok = await r.until(lambda: r.init is not None and r.init["config"]["scene"] == scene
+                       and r.init["config"].get("profile", r.profile) == r.profile, suite.LOAD_TIMEOUT_S)
+    if not ok:
+        raise TimeoutError(f"{scene} did not reload within {suite.LOAD_TIMEOUT_S:.0f} s")
+    await asyncio.sleep(1.0)
+    r.trace_mark = len(r.trace)
 
 
 def _res_of(r: StackRun, started: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -635,6 +677,17 @@ def _sim_recovery_after(r: StackRun, t: float) -> dict[str, Any] | None:
                 None)
 
 
+G7_PUSHES_N = (250, 400, 600)  # PLAN's 250 N first. Live (2026-09-29, standing, 0.5 s lateral): SONIC stepped
+G7_FALL_WAIT_S = 8.0           # 2.4-2.6 m sideways out of 250 N and stayed up; 400 N put the pelvis under the body's
+                               # 0.55 m fall line (fault `fallen`). A stronger push is used only when the one before
+                               # did not fell the robot, and the result says which one did (extra.pushes)
+
+
+def _fell_after(r: StackRun, t: float) -> dict[str, Any] | None:
+    return next((x for x in r.trace if x.get("type") == "safety_event" and x.get("kind") == "fell"
+                 and (x.get("t") or 0) >= t - 0.5), None)
+
+
 async def g7_fall_recovery(r: StackRun, o: Outcome) -> None:
     t0 = await _fetch_start(r)
     nav = await r.wait_row(lambda x: x.get("type") == "started" and x.get("tool") == "navigate", r.wait(60))
@@ -643,16 +696,27 @@ async def g7_fall_recovery(r: StackRun, o: Outcome) -> None:
         return
     await r.wait_sim(2.0, 30)
     t_push = r.now()
-    ok, note = await r.inject("push_robot", newtons=250)
-    o.notes.append(f"injected: {note}")
-    if not ok:
-        o.check("push injected", False, note)
-        return
+    fell, pushes = None, []
     try:
-        fell = await r.wait_row(lambda x: x.get("type") == "safety_event" and x.get("kind") == "fell"
-                                and (x.get("t") or 0) >= t_push - 0.5, 30)
-        o.check("safety_event(fell)", fell is not None, None if fell is None else {"t": fell.get("t"),
-                                                                                    "source": fell.get("source")})
+        for n in G7_PUSHES_N:
+            t_n = r.now()
+            ok, note = await r.inject("push_robot", newtons=n)
+            pushes.append({"newtons": n, "t": t_n, "ok": ok})
+            o.notes.append(f"injected: push {n} N: {note}")
+            if not ok:
+                o.check("push injected", False, note)
+                return
+            await r.until(lambda: _fell_after(r, t_n) is not None, G7_FALL_WAIT_S)
+            fell = _fell_after(r, t_n)
+            pushes[-1]["fell"] = fell is not None
+            if fell is not None:
+                break
+        o.extra["pushes"] = pushes
+        if fell is not None and len(pushes) > 1:
+            o.notes.append(f"PLAN's 250 N did not fell SONIC; the fall came from the {pushes[-1]['newtons']} N push "
+                           "(escalated, labelled)")
+        o.check("safety_event(fell)", fell is not None, None if fell is None else {
+            "t": fell.get("t"), "source": fell.get("source"), "push_n": pushes[-1]["newtons"]})
         stop = await r.wait_row(lambda x: x.get("type") == "stop" and "fell" in str(x.get("reason")), 10)
         o.check("paused", stop is not None or any(f["paused"] for f in r.frames if f["t"] >= t_push))
         await r.until(lambda: bool(r.said_after(t_push, r"balance|fell|fall|steady")), 15)
@@ -868,17 +932,25 @@ async def g13_schema_parity(r: StackRun, o: Outcome) -> None:
     o.check("one envelope schema", bool(envelope_schema().get("required")))
     local = isinstance(r.injector, LocalInjector)
     before = r.injector.schemas() if local else None
+    if not local:
+        # live: the page shows the schemas only through planner calls, so at least one must come BEFORE the outage
+        # (killing P4 right after the request would leave every call on the far side of it: nothing to compare)
+        await r.until(lambda: len(r.tool_schemas()) >= 1, r.wait(60))
+    n_before = len(r.tool_schemas())
     ok, note = await r.inject("policy_down" if local else "kill_policy")
     o.notes.append(f"policy outage mid-session: {note}")
-    await r.wait_sim(5.0, 30)
-    await r.until(r.idle, r.wait(120))
-    await r.inject("policy_up" if local else "restore_policy")
+    try:
+        await r.wait_sim(5.0, 30)
+        await r.until(r.idle, r.wait(120))
+    finally:
+        await r.inject("policy_up" if local else "restore_policy")
     if local:
         o.check("schemas unchanged across the session, through a policy outage", ok and r.injector.schemas() == before)
     else:
         sch = r.tool_schemas()
         o.check("schemas unchanged across the session, through a policy outage",
-                None if (len(sch) < 2 or not ok) else all(s == sch[0] for s in sch), {"model calls": len(sch)})
+                None if (not ok or n_before < 1 or len(sch) <= n_before) else all(s == sch[0] for s in sch),
+                {"model calls": len(sch), "before the outage": n_before})
     o.extra["t0"] = t0
 
 
@@ -1033,6 +1105,7 @@ SPEED = {"G12": 5.0}             # offline: at most this sim speed (the correcti
 async def _begin_plain(self: StackRun, house: str) -> None:
     self.current = ""
     await self.load(house, forget=False)
+    await _after_load(self, house, False)
 StackRun.begin_plain = _begin_plain      # type: ignore[attr-defined]
 
 
@@ -1040,7 +1113,7 @@ async def run_one(spec: Spec, run: StackRun, local: bool) -> dict[str, Any]:
     o = Outcome()
     t0 = time.monotonic()
     run.injected = []
-    run.fixtures, run.frames_seen = {}, []
+    run.fixtures, run.frames_seen, run.reset_fixups = {}, [], []
     if run.profile not in spec.profiles:
         verdict, o.notes = "N/A", [f"not a {run.profile} scenario (PLAN 9.3: {', '.join(spec.profiles)})"]
     elif (missing := _needs(spec, run, local)):
@@ -1065,6 +1138,8 @@ async def run_one(spec: Spec, run: StackRun, local: bool) -> dict[str, Any]:
     groot = sorted({s for s in (used.get("skills") or {}) if str(s).startswith("groot.")})
     labels = list(hon["labels"]) + (["experimental GR00T skill: " + ", ".join(groot)] if groot else [])
     shown = "PASS*" if verdict == "PASS" and hon["fallback"] else verdict
+    if run.reset_fixups:
+        o.extra["reset_fixups"] = list(run.reset_fixups)
     return {"id": spec.id, "name": spec.name, "verdict": shown, "passed": verdict == "PASS",
             "fallback_pass": verdict == "PASS" and hon["fallback"], "target_pass": verdict == "PASS" and not hon["fallback"],
             "profile": run.profile, "applies": run.profile in spec.profiles, "lite_mode": spec.lite,
@@ -1157,6 +1232,9 @@ def main() -> int:
                     help="eval/hooks.py's hook map: 'box' when the suite runs on the box, 'laptop' through 00_infra/"
                          "ssh.sh; --hook entries override it")
     ap.add_argument("--hooks-session", default="wl-m2", help="the stack's tmux session for --hooks")
+    ap.add_argument("--hooks-policy", default="link", choices=["link", "local", "none"],
+                    help="--hooks box: where P4 is (link: the dev box behind the OD3 link, PLAN 0.12, so kill_policy "
+                         "cuts the link; local: this box, PLAN 0.11). --hooks laptop always stops the dev-box server")
     ap.add_argument("--no-hook", action="append", default=[], help="drop a hook of the --hooks map (e.g. kill_policy)")
     ap.add_argument("--time-scale", type=float, default=None)
     ap.add_argument("--out", default=None)
@@ -1164,7 +1242,7 @@ def main() -> int:
     args = ap.parse_args()
     ids = [x.strip().upper() for x in args.only.split(",") if x.strip()] or [s.id for s in SPECS if s.id != "E5"]
     from eval import hooks as hook_maps
-    hooks = hook_maps.preset(args.hooks, session=args.hooks_session)
+    hooks = hook_maps.preset(args.hooks, session=args.hooks_session, policy=args.hooks_policy)
     hooks.update(dict(h.split("=", 1) for h in args.hook if "=" in h))
     for name in args.no_hook:
         hooks.pop(name, None)
