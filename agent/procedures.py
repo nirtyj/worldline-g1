@@ -52,6 +52,8 @@ def step_of(row: dict[str, Any]) -> str | None:
     look (the robot looked: an arrival scan or wait_and_observe), verify (a harness check
     after a manipulate or a cancel), speak / ask, recall, list_locations, rejected:<tool>."""
     t = row.get("type")
+    if t == "result" and row.get("kind", "tool") != "tool":
+        return None                                  # speech / recall / rejection rows: their own rows are the step
     if t == "result":
         tool, status, d = row.get("tool") or row.get("skill"), str(row.get("status") or ""), row.get("data") or {}
         ok = status == "succeeded"

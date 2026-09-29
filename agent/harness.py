@@ -423,8 +423,9 @@ class Runtime:
         answer = self.recaller.answer(query, self.belief, self.memory, self.map, self.clock.now(), self.tracer.rows)
         res = finish(e, "succeeded", {"answer": answer}, t_end=round(self.clock.now(), 3),
                      observation_id=self._obs_id())
-        self._store(e, res)
+        res = self._store(e, res)
         self.tracer.log("recall", query=query, answer=answer, execution_id=e.execution_id)
+        self._log_result(res, kind="recall")
 
     # ------------------------------------------------------------------
     # System 1: what it is told, and what it notices
@@ -1046,11 +1047,28 @@ class Runtime:
         self._results = (self._results + [res])[-RESULTS_KEPT:]
         return res
 
+    def _log_result(self, res: ToolResult, *, kind: str = "tool", action: str | None = None,
+                    data: dict[str, Any] | None = None, **extra: Any) -> None:
+        """Write the trace's `result` row. Every row, whatever produced it, carries the envelope's identity and
+        fences so a referee can check them without the execution table (api.results.RESULT_ROW_FIELDS):
+        kind (tool | speech | recall | rejection), execution_id, tool (skill: its old name), action, status,
+        observation_id, generation, control_epoch, t_start, t_end, late, source, executor, summary, data."""
+        d = dict(res.data if data is None else data)
+        self.tracer.log("result", kind=kind, skill=res.tool, tool=res.tool, action=action,
+                        execution_id=res.execution_id, status=res.status, observation_id=res.observation_id,
+                        generation=res.generation, control_epoch=res.control_epoch, t_start=res.t_start,
+                        t_end=res.t_end, late=bool(res.late), source=res.source,
+                        executor=res.data.get("executor"), summary=res.summary, data=d, **extra)
+
     def _speech_result(self, e: Execution, res: ToolResult) -> None:
         if res.observation_id is None:
             res = dataclasses.replace(res, observation_id=self._obs_id())
         e.result = res
         self._results = (self._results + [res])[-RESULTS_KEPT:]
+        self._log_result(res, kind="speech",
+                         data={k: v for k, v in res.data.items() if k in ("speech", "status", "utterance_id",
+                                                                         "played", "reason")},
+                         text=str(e.args.get("text", "")))
 
     def _speak(self, call: ToolCall, verdict: Verdict, v: int, epoch: int | None = None) -> None:
         text = str(verdict.args.get("text", "")).strip()
@@ -1089,6 +1107,8 @@ class Runtime:
         self._rejects += 1
         self.tracer.log("rejected", tool=call.tool, args=call.args, why=verdict.message, stage=stage,
                         code=verdict.code, execution_id=e.execution_id)
+        self._log_result(e.result, kind="rejection", action=verdict.action or e.action or args.get("action"),
+                         stage=stage, code=verdict.code)
 
     def _timeout(self, e: Execution) -> float:
         fn = getattr(self.robot, "timeout_s", None)
@@ -1119,10 +1139,8 @@ class Runtime:
         src = "persona" if self.persona.goal is not None else "brain"
         e = self._new_exec(call.tool, verdict.args, v, call.tag, source=src)
         res = await run_execution(self.robot, self.clock, e, self._timeout(e), profile=self.profile)
-        self._store(e, res)
-        self.tracer.log("result", skill=call.tool, tool=call.tool, action=None, execution_id=e.execution_id,
-                        status=res.status, late=False, data={k: v for k, v in res.data.items()},
-                        source=src, summary=res.summary)
+        res = self._store(e, res)
+        self._log_result(res)
 
     async def _run_sense(self, call: ToolCall, verdict: Verdict, v: int) -> None:
         src = "persona" if self.persona.goal is not None else "brain"
@@ -1276,10 +1294,8 @@ class Runtime:
         if tool in ("observe", "look") and res.ok:
             brief["saw"] = sorted(v["id"] for items in (d.get("surfaces") or {}).values() for v in items)
             brief["landmarks"] = [lm["id"] for lm in d.get("landmarks") or []]
-        self.tracer.log("result", skill=tool, tool=tool, action=e.action, execution_id=e.execution_id,
-                        status=res.status, late=late, data=brief, source=e.source, executor=d.get("executor"),
-                        summary=res.summary, observation_id=res.observation_id,
-                        why=e.args.get("why") if tool in ("observe", "look") else None)
+        self._log_result(res, action=e.action, data=brief,
+                         why=e.args.get("why") if tool in ("observe", "look") else None)
         if late:
             self.tracer.log("late_result", tool=tool, execution_id=e.execution_id, generation=e.generation,
                             now=self.task.intent_version, status=res.status)
@@ -1363,12 +1379,9 @@ class Runtime:
             h_late = e.generation < self.task.intent_version
             if h_late:
                 res = dataclasses.replace(res, late=True)
-            self._store(e, res)
+            res = self._store(e, res)
             self.actions.pop(e.execution_id, None)
-            self.tracer.log("result", skill="wait_and_observe", tool="wait_and_observe", action=None,
-                            execution_id=e.execution_id, status=res.status, late=h_late,
-                            data={"status": status, "summary": summary, "changes": list(extra or [])},
-                            source=src, summary=res.summary, observation_id=obs_id)
+            self._log_result(res, data={"status": status, "summary": summary, "changes": list(extra or [])})
 
         def cancelled() -> bool:
             return (h.cancel_requested or self.task.intent_version != v or self.task.control_epoch != epoch)

@@ -180,7 +180,7 @@ class Narrator:
                     self._say("arm", "[fallback] attaching")
             elif tool == "check_reachability":
                 self._say("arm", f"Checking I can reach {self._thing(a.get('object_id') or a.get('object_type'))}")
-        elif t == "result":
+        elif t == "result" and r.get("kind", "tool") == "tool":
             tool, status, d = r.get("tool") or r.get("skill"), r.get("status"), r.get("data") or {}
             action = r.get("action")
             if tool == "navigate" and status == "succeeded" and action != "reposition":
