@@ -23,7 +23,7 @@ BASE_PORTS = {
     "body_ctl": 5610,   # P3 ROUTER (we connect a DEALER)
     "body_evt": 5611,   # P3 PUB events
     "http": 8765,       # viz/server.py
-    "rec_ctl": 5620,    # recorder control REP (server-spawned recorders pick a free port instead)
+    "rec_ctl": 5630,    # recorder control REP (server-spawned recorders pick a free port). NOT 5620: nav2 nav_bridge
 }
 
 

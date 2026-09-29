@@ -20,9 +20,9 @@ stream that has not delivered yet is black), so all videos stay aligned. t_sim a
 CLI (run in viz/.venv on the box):
     python viz/recorder.py --duration 30                       # record now, stop after 30 s
     python viz/recorder.py --until-event succeeded,failed,fallen   # stop 2 s after a body.event state / a fall
-    python viz/recorder.py --control tcp://127.0.0.1:5620      # record now; stop via the control socket or Ctrl-C
-    python viz/recorder.py --control tcp://127.0.0.1:5620 --idle   # daemon: wait for start/stop (many runs)
-    python viz/recorder.py ctl tcp://127.0.0.1:5620 start|stop|status|quit|note "text"
+    python viz/recorder.py --control tcp://127.0.0.1:5630      # record now; stop via the control socket or Ctrl-C
+    python viz/recorder.py --control tcp://127.0.0.1:5630 --idle   # daemon: wait for start/stop (many runs)
+    python viz/recorder.py ctl tcp://127.0.0.1:5630 start|stop|status|quit|note "text"
 Ports: --port-offset N (or WL_PORT_OFFSET) shifts every port; --head/--frames/--gt/--gt-rep/--body-ctl/--body-evt
 override one (viz/server.py passes all of them explicitly to the recorders it spawns).
 

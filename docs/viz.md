@@ -108,7 +108,7 @@ render (~3 ms per render at 640x360).
 | 5610 | DEALER -> body ROUTER | JSON `{"id","op","args"}` (contract 3.4). UI ops: `stand`, `stop`, `go_to{x,y}`, `turn_to{yaw}`, `status`, `clear_fault`, and for held keys `velocity{vx,vy,wz,stream,t_wall,watchdog_s,end?}` (body/velocity.py) or, on bodies without it, `walk{vx,vy,yaw_rate,duration_s}` (section 5). `shutdown_control` is deliberately not reachable from the UI |
 | 5611 | SUB body | `[b"body.event", JSON{id,op,state,data}]`, `[b"body.state", JSON]` 5 Hz |
 | 8765 | HTTP/WS (server) | section 5 |
-| free port | recorder control REP | the server picks one per recording; the CLI takes `--control tcp://127.0.0.1:5620` |
+| free port | recorder control REP | the server picks one per recording; the CLI example uses `--control tcp://127.0.0.1:5630` (not 5620: that is nav2's `nav_bridge` REP, `nav2/ros_bridge.py`) |
 
 VizCams and P1's `--tp-camera` both bind 5602: run one of them. With the hook, `viz_enabled()` refuses
 `--viz` together with `--tp-camera` at argument parsing, before Kit starts.
@@ -255,8 +255,8 @@ Hence two camera kinds:
 ```bash
 viz/.venv/bin/python viz/recorder.py --duration 30 [--label L] [--port-offset N] [--gt-rep P ...] [--top-long 768]
 viz/.venv/bin/python viz/recorder.py --until-event go_to:succeeded,failed,fallen [--post-roll 2]
-viz/.venv/bin/python viz/recorder.py --control tcp://127.0.0.1:5620 [--idle]      # start/stop via socket
-viz/.venv/bin/python viz/recorder.py ctl tcp://127.0.0.1:5620 start|stop|status|note "text"|quit
+viz/.venv/bin/python viz/recorder.py --control tcp://127.0.0.1:5630 [--idle]      # start/stop via socket
+viz/.venv/bin/python viz/recorder.py ctl tcp://127.0.0.1:5630 start|stop|status|note "text"|quit
 viz/pull_recordings.sh [all|latest|<run>]                                         # laptop, rsync via sync_wl.sh
 ```
 
@@ -488,6 +488,6 @@ embed `/stream/chase.mjpg`; that needs a second tunnel port.
 - Recordings are sampled on the wall clock at 10 fps. At RTF < 1, motion looks slower than real.
 - A viz-level switch stalls the sim loop once by 0.12-0.34 s (section 7.2). P1's lowstate heartbeat thread keeps
   `rt/lowstate` flowing through such a stall (contract 1.10), but do not switch while SONIC walks.
-- The held-key `velocity` path is tested against `viz/tests/fake_body.py`, which follows body/velocity.py; the body
-  agent's `velocity` op was uncommitted when this was written. Against the stand-in (no `velocity`) the walk fallback
-  ran end to end.
+- The held-key `velocity` path is tested against `viz/tests/fake_body.py`, which follows body/velocity.py (committed
+  in ec39532; same args: vx, vy, wz, stream, t_wall, watchdog_s, end), not yet against the real body with SONIC.
+  Against the stand-in (no `velocity`) the walk fallback ran end to end.
