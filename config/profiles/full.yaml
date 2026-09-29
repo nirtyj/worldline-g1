@@ -6,7 +6,7 @@
 profile: full
 world: isaac
 body: sonic
-perception_camera: ego_d435       # as sonic (head_sim once P1 renders the head camera, M2b)
+perception_camera: head_sim       # as sonic: P1.4 head camera (an M1 P1 falls back to its d435 model, labelled)
 scan_executor: turn_in_place      # as sonic (INTERIM)
 manipulation:
   executors: [groot_arms, sonic_arm_script, kinematic_attach]
