@@ -1,0 +1,12 @@
+# full: SONIC walking + GR00T manipulation (groot_sonic is a stub until M4: BodyServer vla_start + PolicyServer),
+# with the labelled script fallback (policy groot_then_script, PLAN §6.4).
+profile: full
+world: isaac
+body: sonic
+perception_camera: ego_d435
+scan_executor: turn_in_place
+manipulation:
+  executors: [groot_sonic, sonic_arm_script, kinematic_attach]
+  policy: groot_then_script
+nav_executor: sonic_walk
+frames: isaac

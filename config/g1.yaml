@@ -1,0 +1,84 @@
+# Unitree G1 constants for the runtime side: workspace (reachability), walking (navigation timeouts and the lite
+# body), cameras (GT perception), map generation and scans. Initial values; M3.5 calibrates the workspace with
+# tools/calibrate_workspace.py (IK sampling) and S1.9 measures arrival/reposition accuracy (PLAN §6.4, §11).
+robot: unitree_g1
+
+workspace:                      # PLAN §6.4 G1Workspace (object positions in the CURRENT pelvis frame)
+  shoulder_z_m: 1.08            # shoulder height standing (torso_link + 0.248 m, pelvis ~0.78)
+  shoulder_lat_m: 0.10          # shoulder pitch joint y offset (g1 URDF: +-0.1002)
+  arm_reach_m: 0.65             # shoulder -> object, straight arm + Dex3 hand + ~5 cm waist lean (out_of_workspace)
+  obj_z_min_m: 0.55             # object centre height below this -> too_low (squat mode deferred)
+  obj_z_max_m: 1.20             # above this -> too_high
+  approach_max_m: 0.40          # the largest navigate(reach_stance) reposition
+  reach_fwd_m: [0.20, 0.55]     # object forward of the pelvis for a manipulable pose
+  reach_lat_max_m: 0.40
+  either_deadband_m: 0.10       # |lateral| below this -> preferred_arm "either"
+  stance_fwd_m: [0.30, 0.45]    # where a reposition puts the object (forward of the pelvis)
+  stance_lat_m: [0.0, 0.10, -0.10, 0.15, -0.15]
+  stance_clearance_m: 0.25      # the body's robot radius
+  stance_margin_m: 0.02         # stances keep this much inside arm_reach_m (arrival error)
+  max_held: 1                   # one object at a time (Worldline rule; two hands, one object)
+  reach_fresh_s: 30.0
+
+walking:
+  cruise_mps: 0.45              # body go_to speed (m1: SONIC walks ~0.45 m/s)
+  nav_speed_mps: 0.40           # effective average incl. turns and 0.4-1.1 s stops (timeouts, prompt slot)
+  arrive_tol_m: 0.30            # "at a keypoint" radius (PLAN §5.6)
+  final_pos_tol_m: 0.25         # body go_to success bar (contract m1.md §3.4)
+  final_yaw_tol_deg: 12.0
+  reposition_mps: 0.20
+  reposition_tol_m: 0.10        # interim: body go_to has no 5 cm approach op yet (PLAN 0.05; M2b `approach`)
+  reposition_tol_deg: 8.0
+  reposition_timeout_s: 12.0
+  timeout_k: 1.8                # navigate timeout = clamp(k * path_m / v + base, min, max)
+  timeout_base_s: 12.0
+  timeout_min_s: 20.0
+  timeout_max_s: 240.0
+  cancel_settle_s: 1.5          # PathFollower IDLE settle bound (PLAN §5.6)
+  # lite body only (kinematic stand-in)
+  lite_turn_dps: 45.0
+  lite_stop_s: 0.6
+
+scan:
+  executor: turn_in_place       # INTERIM (M2a): in-place turn_to steps; M2b: waist_scan via upper_body_position
+  yaws_deg: [-35.0, 0.0, 35.0]
+  settle_s: 0.4
+  turn_tol_deg: 6.0
+  min_interval_s: 5.0           # wait_and_observe scans only if the last scan here is older (PLAN §5.1)
+
+manipulation:
+  pick_phases_s: {pregrasp: 1.2, grasp: 1.2, lift: 1.0}
+  place_phases_s: {lower: 1.2, release: 0.8, retract: 1.0}
+  stance_drift_m: 0.05          # pose moved more than this since the reachability -> failed(base_moving)
+  stance_drift_deg: 5.0
+  verify_hold_s: 0.3
+
+cameras:                        # GT perception camera models (world/perception.py)
+  ego_d435:                     # what P1 renders today (contract m1.md §1.4): d435_link on torso_link
+    width: 640
+    height: 480
+    vfov_deg: 45.0
+    mount_xyz: [0.0576235, 0.01753, 0.41987]
+    mount_pitch_rad: 0.8307767239493009
+    range_objects: 2.5
+    range_landmarks: 4.0
+  head_sim:                     # PLAN §1.3 #7: sim-added head camera, ~1.35 m, 15 deg down, 90 deg HFOV (M2b: P1)
+    width: 640
+    height: 480
+    vfov_deg: 73.74
+    mount_xyz: [0.06, 0.0, 0.526]
+    mount_pitch_deg: 15.0
+    range_objects: 2.5
+    range_landmarks: 4.0
+    sim_added: true
+
+mapgen:                         # world/mapgen.py MapParams (PLAN §7.1 table)
+  segment_m: 1.0
+  stand_off_m: [0.45, 0.60]
+  stand_off_relaxed_m: 1.0
+  stand_min_sep_m: 0.5
+  stand_clearance_m: 0.30
+  robot_radius: 0.25
+  nav_speed_mps: 0.40
+  max_reach_height_m: 1.20
+  min_reach_height_m: 0.55

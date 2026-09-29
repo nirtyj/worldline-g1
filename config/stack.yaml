@@ -1,0 +1,25 @@
+# How the runtime (P5) reaches the rest of the stack. Profiles (config/profiles/*.yaml) pick which of these are used.
+ports:                           # base ports; + port_offset (WL_PORT_OFFSET)
+  p1_rep: 5600
+  p1_pose: 5601
+  p1_frames: 5602
+  camera: 5565
+  body_ctl: 5610
+  body_evt: 5611
+  body_halt: 5612                # M2b
+  ui: 8765
+port_offset: 0
+host: 127.0.0.1
+houses_dirs:                     # recorded houses (house_info.json + occupancy.npz) for lite and laptop dev
+  - /work/worldline-g1/assets/houses
+  - tests/fakes/houses
+default_scene: procthor-train-38
+scenes:                          # scene key -> house id and per-scene overrides (eval/scenes.yaml may add more)
+  procthor-train-38: {house: procthor-train-38}
+  procthor-train-40: {house: procthor-train-40}
+  procthor-train-15: {house: procthor-train-15}
+  ithor-FloorPlan10: {house: ithor-FloorPlan10}
+rpc:
+  p1_timeout_s: 5.0
+  body_timeout_s: 10.0
+  halt_ack_budget_ms: 30

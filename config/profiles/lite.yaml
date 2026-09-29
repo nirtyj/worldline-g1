@@ -1,0 +1,11 @@
+# lite: pure Python on the laptop (PLAN §6.7). Recorded house + kinematic body; everything physical is simulated
+# and labelled (executor "lite"). Numbers follow the G1 so timings and prompts are humanoid-realistic.
+profile: lite
+world: lite                       # world/lite_world.py over a recorded house
+body: lite                        # robot/lite_body.py (kinematic, fault injection)
+perception_camera: head_sim       # the PLAN's head camera (lite renders no images, so nothing to disagree with)
+scan_executor: turn_in_place      # same interim executor as sonic, driven by the lite body
+manipulation:
+  executors: [lite]
+nav_executor: lite
+frames: none

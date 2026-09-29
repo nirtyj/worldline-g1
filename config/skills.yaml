@@ -1,0 +1,81 @@
+# Skill registry (PLAN §6.4 table). Loaded at session start by services/skills.py; the object_type tool enum is the
+# union of object_types over the skills whose backend the profile selects (api/skills.py BACKEND_ORDER), frozen for
+# the session. "@vocab:pickupable" expands the FIXED vocabulary (config/vocab/pickupable_types.yaml), never scene GT.
+version: 1
+skills:
+  - skill_id: groot.pick.bottle.cloudwalk.v0
+    action: pick
+    object_types: [bottle]
+    arms: [right]
+    backend: groot
+    label: experimental
+    status: unofficial
+    embodiment_tag: UNITREE_G1_SONIC
+    checkpoint: cloudwalk-research/gr00t-n17-g1-grab-bottle-rh-210ep-v2-finetune/checkpoint-20000
+    policy_port: 5550
+    prompt_template: "grab the bottle"
+    hand_type: inspire           # trained with Inspire hands; the deploy drives Dex3 -> UI flag hand_mismatch
+    max_duration_s: 25.0
+    stance: {stand_off_m: 0.40, lateral_m: -0.12, yaw_to_object: 0.0, tol: [0.05, 5.0]}
+    success: {kind: gt_lifted, min_lift_m: 0.05, max_dist_m: 0.12, hold_s: 1.0}
+    licence: "NVIDIA Open Model License (GR00T N1.7 base); community fine-tune"
+
+  - skill_id: groot.pick.household.isaac.v1
+    action: pick
+    object_types: [alarm_clock, apple, bottle]
+    arms: [left, right]
+    backend: groot
+    label: target
+    status: planned              # M6: fine-tuned off-box on Isaac Dex3 demos; not loaded until it exists
+    embodiment_tag: UNITREE_G1_SONIC
+    policy_port: 5552
+    prompt_template: "pick up the {label} with the {arm} hand"
+    max_duration_s: 25.0
+
+  - skill_id: sonic.script.pick.v0
+    action: pick
+    object_types: ["@vocab:pickupable"]
+    arms: [left, right]
+    backend: sonic_arm_script
+    label: stepping_stone        # SONIC reaches with planner-mode upper-body targets, then a GT attach (M3)
+    max_duration_s: 12.0
+
+  - skill_id: sonic.script.place.v0
+    action: place
+    object_types: ["@vocab:pickupable"]
+    arms: [left, right]
+    backend: sonic_arm_script
+    label: stepping_stone
+    max_duration_s: 10.0
+
+  - skill_id: bringup.attach.pick.v0
+    action: pick
+    object_types: ["@vocab:pickupable"]
+    arms: [left, right]
+    backend: kinematic_attach
+    label: stepping_stone        # kinematic attach grasp: the object is attached to the hand, no arm motion
+    max_duration_s: 8.0
+
+  - skill_id: bringup.attach.place.v0
+    action: place
+    object_types: ["@vocab:pickupable"]
+    arms: [left, right]
+    backend: kinematic_attach
+    label: stepping_stone
+    max_duration_s: 8.0
+
+  - skill_id: lite.pick.v0
+    action: pick
+    object_types: ["@vocab:pickupable"]
+    arms: [left, right]
+    backend: lite
+    label: stepping_stone        # the lite profile: pure Python, everything physical is simulated
+    max_duration_s: 8.0
+
+  - skill_id: lite.place.v0
+    action: place
+    object_types: ["@vocab:pickupable"]
+    arms: [left, right]
+    backend: lite
+    label: stepping_stone
+    max_duration_s: 8.0

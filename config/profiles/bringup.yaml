@@ -1,0 +1,11 @@
+# bringup: Isaac GT world + BodyServer kinematic backend + kinematic attach grasp (both STEPPING STONE, PLAN §6.7).
+# The M1 body has no kinematic backend yet (M2 plan item M2.2); until it lands this profile walks with SONIC.
+profile: bringup
+world: isaac
+body: sonic                       # M2.2: BodyServer --backend kinematic (then executor kinematic_nav)
+perception_camera: ego_d435       # what P1 renders today (contract m1.md §1.4); head_sim once P1 adds it (M2b)
+scan_executor: turn_in_place
+manipulation:
+  executors: [kinematic_attach]   # needs P1 attach/detach (M2b); NotSupported -> controller_unavailable
+nav_executor: sonic_walk
+frames: isaac                     # viz.tap.FrameTap (5565 head, 5602 chase/top)

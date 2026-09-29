@@ -1,0 +1,12 @@
+# real_g1: parity skeleton (PLAN §6.7). No SimControl, no GT; world/perception.py's PerceptionWorldModel (§13)
+# replaces the GT world. Not buildable in M2a.
+profile: real_g1
+world: perception
+body: sonic
+perception_camera: ego_d435
+scan_executor: turn_in_place
+manipulation:
+  executors: [groot_sonic]
+  allow_fallbacks: false
+nav_executor: sonic_walk
+frames: isaac
