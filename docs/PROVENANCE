@@ -29,13 +29,13 @@ Copied untouched in the import commit, then adapted in later commits (PLAN 4.4 d
   llmkit/brain.py              [adapt]
   llmkit/client.py             [keep]
   sim/__init__.py              [keep; goals export removed]
-  sim/clock.py                 [keep]
+  sim/clock.py                 [keep; wait_for now built on asyncio.timeout (3.11 wait_for can lose a cancel)]
   sim/log.py                   [keep]
   tests/test_frame_gate.py     -> tests/kept/test_frame_gate.py   [keep]
-  tests/test_layout.py         -> tests/kept/test_layout.py       [keep]
+  tests/test_layout.py         -> tests/kept/test_layout.py       [keep; one assertion moved from place to manipulate]
   tests/test_narrator.py       -> tests/kept/test_narrator.py     [adapt: tool names]
   tests/test_system1.py        -> tests/kept/test_system1.py      [keep]
-  tests/test_system1_jev.py    -> tests/kept/test_system1_jev.py  [keep]
+  tests/test_system1_jev.py    -> tests/kept/test_system1_jev.py  [keep; imports tests.kept.test_system1]
   tests/system1_stub.py        -> tests/kept/system1_stub.py      [keep]
   tests/system1_live_check.py  -> tests/kept/system1_live_check.py [adapt: env loading order]
   docs/robot-harness-landscape.md   [keep; historical, THOR era]
@@ -58,3 +58,6 @@ Not copied by the runtime agent:
       merged into the existing one (see .gitignore)
   .env, .venv-thor/, runs/
       never copied; ludo-runtime/.env is never read
+
+Import commits: 1e68154 (untouched copy of the files above), then the adaptation commits on top.
+tests/system1_live_check.py now lives at tests/kept/system1_live_check.py (import tests.kept.system1_live_check).
