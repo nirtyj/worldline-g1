@@ -52,6 +52,7 @@ from body.config import ep, port_offset_from_env  # noqa: E402
 from body.p1_client import P1Rpc, PoseSub  # noqa: E402
 
 DEGRADED_BELOW, DEGRADED_HOLD_S = 0.95, 5.0            # world/sim_health.py SimHealthConfig defaults
+UNSAFE_BELOW, UNSAFE_HOLD_S = 0.85, 3.0
 GATE_P10 = 0.98                                        # PLAN §0.10 b
 
 
@@ -173,6 +174,7 @@ def summarize(samples: list, s0: dict, s1: dict) -> dict:
             "rtf1s_min": round(float(rtf.min()), 4), "below_0p98": round(float((rtf < 0.98).mean()), 4),
             "below_0p95": round(float((rtf < DEGRADED_BELOW).mean()), 4),
             "longest_below_0p95_s": longest_below(samples, DEGRADED_BELOW),
+            "longest_below_0p85_s": longest_below(samples, UNSAFE_BELOW),
             "fallen": any(s[3] for s in samples),
             "heartbeat_pubs": d("heartbeat_pubs"), "overruns": d("overruns"), "hitches_gt25ms": d("hitches_gt25ms"),
             "lost_s": d("lost_s"), "render_hz": s1.get("render_hz"),
@@ -250,6 +252,7 @@ def verdict(res: dict, rates: list[float]) -> dict:
                         "mean_min": min(m["rtf1s_mean"] for m in rows),
                         "positions_p10_ge_0p98": sum(1 for m in rows if m["rtf1s_p10"] >= GATE_P10),
                         "positions_degraded_5s": sum(1 for m in rows if m["longest_below_0p95_s"] >= DEGRADED_HOLD_S),
+                        "positions_unsafe_3s": sum(1 for m in rows if m.get("longest_below_0p85_s", 0) >= UNSAFE_HOLD_S),
                         "heartbeat_pubs": sum(m.get("heartbeat_pubs") or 0 for m in rows),
                         "head_frames_per_s_min": min(m["head_frames_per_s"] for m in rows),
                         "pass_all_positions": all(m["rtf1s_p10"] >= GATE_P10 for m in rows)}
@@ -288,7 +291,8 @@ def main(argv=None) -> int:
            "gpu_apps_before": gpu_apps(), "load_before": os.getloadavg(),
            "p1_start": {**{k: s_start.get(k) for k in ("camera_hz_target", "render_hz", "rtf_total", "house")},
                         "head_hz": head0.get("hz"), "head_consumers": head0.get("consumers")},
-           "bars": {"gate_p10": GATE_P10, "degraded": f"rtf_1s < {DEGRADED_BELOW} held {DEGRADED_HOLD_S} s"},
+           "bars": {"gate_p10": GATE_P10, "degraded": f"rtf_1s < {DEGRADED_BELOW} held {DEGRADED_HOLD_S} s",
+                    "unsafe": f"rtf_1s < {UNSAFE_BELOW} held {UNSAFE_HOLD_S} s"},
            "stands": [], "walks": []}
     try:
         st = R.bc.status()
