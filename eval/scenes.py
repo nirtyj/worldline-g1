@@ -25,7 +25,12 @@ HERE = Path(__file__).resolve().parent
 SCENES_YAML = HERE / "scenes.yaml"
 STEPPING_STONES = frozenset({"kinematic_nav", "kinematic_attach", "sonic_arm_script"})
 # The target executors (PLAN 2.1): a pass counts as a target pass only if every body result came from these.
-TARGET_EXECUTORS = frozenset({"sonic_walk", "groot_sonic"})
+# One definition, api.results.TARGET_EXECUTORS; the literal is the fallback when api/ is not importable.
+try:
+    from api.results import TARGET_EXECUTORS as _API_TARGETS  # type: ignore
+    TARGET_EXECUTORS = frozenset(_API_TARGETS)
+except Exception:  # noqa: BLE001
+    TARGET_EXECUTORS = frozenset({"sonic_walk", "groot_sonic"})
 SHORTCUT_LABELS = {
     "kinematic_nav": "kinematic base (teleported along the nav path; no gait)",
     "kinematic_attach": "attach grasp (kinematic; no arm motion)",

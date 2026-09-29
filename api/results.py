@@ -29,11 +29,23 @@ ResultSource = Literal["brain", "harness", "persona"]
 # pure-Python profile: everything physical there is a stand-in (PLAN 2.1, L0).
 STEPPING_STONE_EXECUTORS: tuple[str, ...] = ("kinematic_nav", "kinematic_attach", "sonic_arm_script", "lite")
 NAV_EXECUTORS: tuple[str, ...] = ("sonic_walk", "kinematic_nav", "lite")
-MANIP_EXECUTORS: tuple[str, ...] = ("groot_sonic", "sonic_arm_script", "kinematic_attach", "lite")
+# groot_arms: GR00T N1.7 arm/hand joint chunks streamed through the body `arm` op (owner decision 7, 2026-09-29;
+# docs/groot_arms_design.md). It replaces the token route groot_sonic, which stays listed until M2b retires it.
+MANIP_EXECUTORS: tuple[str, ...] = ("groot_arms", "groot_sonic", "sonic_arm_script", "kinematic_attach", "lite")
+
+
+# The TARGET executors (PLAN 2.1): a result, and an eval pass, counts as a target result only when it came from
+# one of these. Everything else (the stepping stones, "lite", an unknown or missing executor) is a fallback.
+TARGET_EXECUTORS: tuple[str, ...] = ("sonic_walk", "groot_arms", "groot_sonic")
 
 
 def is_fallback(executor: str | None) -> bool:
     return executor in STEPPING_STONE_EXECUTORS
+
+
+def is_target(executor: str | None) -> bool:
+    """True only for the target executors; the UI and the eval share this one definition of a target pass."""
+    return executor in TARGET_EXECUTORS
 
 
 @dataclass(frozen=True)
@@ -113,6 +125,7 @@ class NavigateResult:                # doc 6.1 + [WL]
     observation_id: str | None = None
     kind: Literal["keypoint", "reposition"] = "keypoint"
     final_err_m: float = 0.0
+    detail: str | None = None       # a human-readable why for a failure (e.g. "stance 0.52 m away")
 
 
 @dataclass
@@ -129,6 +142,7 @@ class ReachabilityResult:            # doc 8.1 + [WL]
     height_m: float | None = None
     skill_id: str | None = None
     at: str | None = None                   # the keypoint it was judged from
+    detail: str | None = None               # a human-readable why (never a hidden position)
 
 
 @dataclass
@@ -143,7 +157,7 @@ class ManipulationResult:            # doc 10-12 + [WL]
     object_id: str | None = None
     target: str | None = None
     holding: bool | None = None
-    executor: Literal["groot_sonic", "sonic_arm_script", "kinematic_attach", "lite"] = "groot_sonic"
+    executor: Literal["groot_arms", "groot_sonic", "sonic_arm_script", "kinematic_attach", "lite"] = "groot_sonic"
     phase: str | None = None
     inferences: int = 0
     chunks_dropped: dict[str, int] = field(default_factory=dict)
@@ -310,7 +324,7 @@ def validate_envelope(d: Any) -> list[str]:
 
 
 __all__ = ["EnvelopeStatus", "ENVELOPE_STATUSES", "ResultSource", "STEPPING_STONE_EXECUTORS",
-           "NAV_EXECUTORS", "MANIP_EXECUTORS", "is_fallback", "ToolResult", "SpeakResult", "NamedLocation",
+           "NAV_EXECUTORS", "MANIP_EXECUTORS", "TARGET_EXECUTORS", "is_fallback", "is_target", "ToolResult", "SpeakResult", "NamedLocation",
            "ListLocationsResult", "NavigateResult", "ReachabilityResult", "ManipulationResult", "WaitResult",
            "RecallResult", "WAIT_TO_ENVELOPE", "LEGACY_STATUS", "envelope_status", "typed_data", "finish",
            "rejected", "envelope_schema", "REQUIRED_DATA", "validate_envelope"]

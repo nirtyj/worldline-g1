@@ -171,6 +171,12 @@
         },
         "final_err_m": {
           "type": "number"
+        },
+        "detail": {
+          "type": [
+            "null",
+            "string"
+          ]
         }
       },
       "required": [
@@ -248,6 +254,12 @@
             "null",
             "string"
           ]
+        },
+        "detail": {
+          "type": [
+            "null",
+            "string"
+          ]
         }
       },
       "required": [
@@ -319,6 +331,7 @@
         "executor": {
           "type": "string",
           "enum": [
+            "groot_arms",
             "groot_sonic",
             "sonic_arm_script",
             "kinematic_attach",

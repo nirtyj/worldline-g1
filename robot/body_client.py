@@ -20,7 +20,7 @@ import asyncio
 import threading
 import time
 import uuid
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from api.types import ServiceHealth
 
@@ -75,20 +75,8 @@ class BodyOp:
         return f"<BodyOp {self.op} {self.id} {'done' if self.done else 'running'}>"
 
 
-@runtime_checkable
-class BodyPort(Protocol):
-    name: str                                     # executor name: "sonic_walk" | "kinematic_nav" | "lite"
-
-    async def go_to(self, x: float, y: float, yaw: float | None = None, *, speed: float | None = None,
-                    timeout_s: float | None = None, final_pos_tol: float | None = None,
-                    final_yaw_tol_deg: float | None = None) -> BodyOp: ...
-    async def turn_to(self, yaw: float, *, tol_deg: float | None = None) -> BodyOp: ...
-    async def stop(self) -> BodyOp: ...
-    def halt(self, epoch: int) -> dict: ...
-    def resume(self, epoch: int) -> None: ...
-    def estop(self, reason: str) -> dict: ...
-    def state(self) -> dict: ...
-    def health(self) -> ServiceHealth: ...
+# BodyPort (what services call) is the api contract; re-exported here under its old name.
+from api.services import BodyPort  # noqa: E402,F401
 
 
 class SonicBody:

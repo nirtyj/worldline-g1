@@ -13,14 +13,15 @@ perception, truth) are converted to Worldline's frame through world/coords.py an
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 
 Arm = Literal["left", "right"]
 Box = tuple[tuple[float, float, float], tuple[float, float, float]]
 
 
-class NotSupported(RuntimeError):
-    """This backend cannot do that (real robot, or a P1 build without the op)."""
+# The Protocols themselves (WorldModel, SimControl, Localizer, RobotPoseLike) live in api/services.py, the one
+# contract; they are re-exported here under their old names. NotSupported is the api class.
+from api.services import Localizer, NotSupported, RobotPoseLike, SimControl, WorldModel  # noqa: E402,F401
 
 
 @dataclass(frozen=True)
@@ -139,49 +140,6 @@ class TruthSnapshot:
     things: dict[str, str] = field(default_factory=dict)      # every scene item id -> snake type (vocabulary)
     hands: dict[str, str | None] = field(default_factory=dict)
     source: str = "isaac-gt"
-
-
-@runtime_checkable
-class WorldModel(Protocol):
-    scene: str
-    source: str                                        # "isaac-gt" | "lite-gt" | "perception"
-
-    # static semantic map (doc §27)
-    def static_map(self) -> Any: ...                   # world.mapgen.StaticMap
-    def lookup_keypoints(self) -> dict: ...
-
-    # dynamic state
-    def robot_pose(self) -> RobotPose: ...
-    def detections(self, camera: str = "head", *, yaw_offset: float = 0.0) -> list[Detection]: ...
-    def look(self, views: list[dict] | None, *, at: str | None, detections: list[list[Detection]] | None = None
-             ) -> dict: ...
-    def object(self, object_id: str) -> ObjectState | None: ...
-    def objects(self) -> dict[str, ObjectState]: ...
-    def hands(self) -> dict[str, str | None]: ...
-    def grasp_state(self, object_id: str, arm: str) -> GraspState: ...
-    def free_spot(self, surface: str, object_id: str, near: tuple[float, float, float] | None = None,
-                  within=None) -> tuple[float, float, float] | None: ...
-    def path(self, a: tuple[float, float], b: tuple[float, float]) -> list[tuple[float, float]] | None: ...
-    def perception(self) -> dict: ...
-
-    # UI + eval only
-    def truth(self) -> TruthSnapshot: ...
-
-
-@runtime_checkable
-class SimControl(Protocol):
-    def teleport_robot(self, x: float, y: float, yaw: float) -> None: ...
-    def attach(self, object_id: str, arm: str, mode: str = "follow") -> None: ...
-    def detach(self, object_id: str, pose: tuple[float, float, float] | None = None) -> None: ...
-    def band(self, on: bool, ramp_s: float = 1.5) -> None: ...
-    def reset_robot(self, x: float, y: float, yaw: float) -> None: ...
-    def capabilities(self) -> dict[str, bool]: ...
-
-
-@runtime_checkable
-class Localizer(Protocol):
-    def pose(self) -> tuple[RobotPose, float, str]: ...     # pose, age_s, source
-    def velocity(self) -> tuple[float, float]: ...          # m/s, rad/s
 
 
 class WorldLocalizer:

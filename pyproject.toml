@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 # P5 wl-runtime (py3.11). api/ itself is stdlib only (imported by py3.11 and py3.12 processes).
 dependencies = [
     "numpy>=2",
+    "scipy",                # world/: csgraph Dijkstra (map edges), body.nav_grid distance transform, perception ndimage
     "pillow",
     "pyzmq",
     "msgpack",
@@ -22,9 +23,9 @@ test = ["pytest"]
 packages = []
 
 [tool.pytest.ini_options]
-# Run from the repo root: `.venv-rt/bin/python -m pytest tests/unit tests/contract tests/kept`
+# Run from the repo root: `.venv-rt/bin/python -m pytest` (every M2a suite; -m live / -m box are opt-in)
 pythonpath = ["."]
-testpaths = ["tests/unit", "tests/contract", "tests/kept"]
+testpaths = ["tests/unit", "tests/contract", "tests/kept", "tests/world", "tests/services", "tests/ui", "tests/eval"]
 markers = [
     "asyncio: an async test, run with asyncio.run by tests/*/conftest.py",
     "live: needs real API keys and network (opt-in: -m live)",

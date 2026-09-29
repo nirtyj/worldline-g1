@@ -32,7 +32,13 @@ DISPLAY_STEP = 0.25          # the page's nav-grid and explored-floor cell (THOR
 GT_LABEL = "sim ground truth: not visible to the planner"
 # STEPPING STONE executors (PLAN 12.2): results they produce count as fallback passes.
 STEPPING_STONES = frozenset({"kinematic_nav", "kinematic_attach", "sonic_arm_script"})
-TARGET_EXECUTORS = frozenset({"sonic_walk", "groot_sonic"})
+# The target executors (PLAN 2.1): a pass counts as a target pass only if every body result came from these.
+# One definition, api.results.TARGET_EXECUTORS; the literal is the fallback when api/ is not importable.
+try:
+    from api.results import TARGET_EXECUTORS as _API_TARGETS  # type: ignore
+    TARGET_EXECUTORS = frozenset(_API_TARGETS)
+except Exception:  # noqa: BLE001
+    TARGET_EXECUTORS = frozenset({"sonic_walk", "groot_sonic"})
 FALLBACK_LABELS = {
     "kinematic_nav": "KINEMATIC (fallback)",
     "kinematic_attach": "KINEMATIC ATTACH (fallback)",

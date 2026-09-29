@@ -35,17 +35,21 @@ Body executions honour cancel per PLAN 5.6; ``halt()`` returns within 30 ms.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_checkable
 
 from .execution import Execution, ExecutionHandle
 from .observation import LookData, RobotObservation, ViewSpec
 from .results import NamedLocation, NavigateResult, ReachabilityResult, ManipulationResult
-from .skills import SkillRegistry
+from .skills import SkillRegistry, SkillSpec
 from .types import (CameraFrame, Detection, GraspState, MapDict, ObjectState, Pose2D, Pose3D, RobotProfile,
                     ServiceHealth)
 
 if TYPE_CHECKING:                                     # pragma: no cover
     pass
+
+# A pose argument that SimControl and the WorldModel accept: an api Pose2D (x, y, yaw), anything with .x/.y/.yaw,
+# or an (x, y, yaw) tuple. Implementations normalise it with world.model.xyyaw.
+PoseLike = Any
 
 CAPABILITIES = ("navigation", "manipulation", "observation", "speech", "body")
 
@@ -95,18 +99,24 @@ class RobotBridge(Protocol):
 
 
 # ----------------------------------------------------------------------
-# Services behind the façade (PLAN 6.3-6.5)
+# Services behind the façade (PLAN 6.3-6.5). Implemented in services/ and wired by robot/bridge.py.
+# Each service also has a non-blocking ``start(...)`` that the bridge dispatches to; the async
+# ``navigate``/``execute``/``speak`` forms are the PLAN 6 names and just call ``start``.
+# tests/contract/test_protocols.py checks every implementation against these Protocols (names and
+# parameter names), so a drift fails a test instead of a live run.
 # ----------------------------------------------------------------------
 @runtime_checkable
 class NavigationService(Protocol):
-    async def list_locations(self, current_pose: Pose2D, query: str | None = None) -> list[NamedLocation]: ...
+    async def list_locations(self, current_pose: PoseLike = None, query: str | None = None
+                             ) -> list[NamedLocation]: ...
     async def navigate(self, location: str, *, execution: Execution,
                        timeout_s: float | None = None) -> ExecutionHandle: ...
     async def reposition(self, stance_w: Pose2D, *, anchor: str, execution: Execution) -> ExecutionHandle: ...
+    def start(self, execution: Execution) -> ExecutionHandle: ...   # keypoint or reposition, by args
     def resolve(self, location: str) -> str: ...                # user / room aliases -> real keypoint
-    async def status(self, execution_id: str) -> NavigateResult: ...
+    async def status(self, execution_id: str) -> NavigateResult | None: ...
     async def cancel(self, execution_id: str, reason: str = "cancelled") -> None: ...
-    def timeout_s(self, from_pose: Pose2D, location: str) -> float: ...
+    def timeout_s(self, from_pose: PoseLike = None, location: str = "") -> float: ...
     def at(self) -> tuple[str | None, list[str] | None]: ...    # keypoint within 0.30 m, or between [a, b]
     def health(self) -> ServiceHealth: ...
 
@@ -114,79 +124,162 @@ class NavigationService(Protocol):
 @runtime_checkable
 class ManipulationService(Protocol):
     async def list_skills(self) -> SkillRegistry: ...
+    def capability(self, action: str, object_type: str, arm: str | None = None) -> tuple[SkillSpec | None, str]: ...
     async def check_reachability(self, object_type: str, object_id: str | None = None, *,
-                                 candidates: list[str] = ..., at: str | None = None) -> ReachabilityResult: ...
+                                 candidates: Any = (), at: str | None = None) -> ReachabilityResult: ...
+    def start_reachability(self, execution: Execution) -> ExecutionHandle: ...
     async def execute(self, action: Literal["pick", "place"], object_type: str, *, arm: str | None = None,
                       target: str | None = None, object_id: str | None = None,
                       execution: Execution) -> ExecutionHandle: ...
-    async def status(self, execution_id: str) -> ManipulationResult: ...
+    def start(self, execution: Execution) -> ExecutionHandle: ...
+    async def status(self, execution_id: str) -> ManipulationResult | None: ...
     async def cancel(self, execution_id: str, reason: str = "cancelled") -> None: ...
     def health(self, skill_id: str | None = None) -> ServiceHealth: ...
 
 
 @runtime_checkable
 class ObservationService(Protocol):
-    async def observe(self, mode: Literal["glance", "scan"], *, at: str | None,
-                      execution: Execution) -> RobotObservation: ...
+    async def observe(self, mode: Literal["glance", "scan"], *, at: str | None = None,
+                      execution: Execution | None = None) -> RobotObservation: ...
+    def start(self, execution: Execution) -> ExecutionHandle: ...   # observe(glance|scan) as an execution
+    def start_wait(self, execution: Execution, *, wake: asyncio.Event | None = None,
+                   lease_held: bool = False) -> ExecutionHandle: ...  # wait_and_observe (service fallback)
     def perception(self) -> dict[str, Any]: ...
-    def latest_frame(self, camera: str) -> CameraFrame | None: ...
+    def latest_frame(self, camera: str = "head") -> CameraFrame | None: ...
     def glance_record(self) -> str: ...                         # "obs-g<rev>"
 
 
 @runtime_checkable
 class SpeechService(Protocol):
     async def speak(self, text: str, *, execution: Execution) -> ExecutionHandle: ...
+    def start(self, text: str, execution: Execution) -> ExecutionHandle: ...
     def cut_all(self) -> None: ...
 
 
+# ----------------------------------------------------------------------
+# Executors behind the services (PLAN 6.3, 6.4). Navigation's executor is the body itself
+# (robot/body_client.SonicBody = sonic_walk over wl-body, robot/lite_body.LiteBody = lite): a
+# ``BodyPort``. Manipulation's executors run one ManipJob (services/executors/).
+# ----------------------------------------------------------------------
 @runtime_checkable
-class NavExecutor(Protocol):
-    name: Literal["sonic_walk", "kinematic_nav", "lite"]
+class BodyOpHandle(Protocol):
+    """An in-flight body motion (robot/body_client.BodyOp). ``result()`` always resolves to
+    {"state": "succeeded"|"failed"|"canceled", "data": {...}} (docs/contracts/m1.md 3.4)."""
+    op: str
+    id: str
 
-    async def run(self, plan: Any, handle: ExecutionHandle) -> Any: ...
-    async def cancel(self) -> None: ...
+    @property
+    def done(self) -> bool: ...
+    async def result(self) -> dict[str, Any]: ...
+    def cancel(self, reason: str = "cancelled") -> None: ...   # planner IDLE; never command{stop}
+
+
+@runtime_checkable
+class BodyPort(Protocol):
+    """What services call to move the robot. ``halt`` latches HOLD (never command{stop}); ``estop``
+    is the operator kill button only (the deploy exits; P2 restart)."""
+    name: str                                     # executor name: "sonic_walk" | "kinematic_nav" | "lite"
+
+    async def go_to(self, x: float, y: float, yaw: float | None = None, *, speed: float | None = None,
+                    timeout_s: float | None = None, final_pos_tol: float | None = None,
+                    final_yaw_tol_deg: float | None = None) -> BodyOpHandle: ...
+    async def turn_to(self, yaw: float, *, tol_deg: float | None = None) -> BodyOpHandle: ...
+    async def stop(self) -> BodyOpHandle: ...
+    def halt(self, epoch: int | None = None) -> dict[str, Any]: ...
+    def resume(self, epoch: int | None = None) -> None: ...
+    def estop(self, reason: str) -> dict[str, Any]: ...
+    def state(self) -> dict[str, Any]: ...        # {mode, active, pose, halt_epoch, latched, gt_pose{rtf}, ...}
+    def health(self) -> ServiceHealth: ...
+
+
+NavExecutor = BodyPort                            # PLAN 6.3's name for navigation's executor
 
 
 @runtime_checkable
 class ManipExecutor(Protocol):
-    backend: Literal["groot", "sonic_arm_script", "kinematic_attach", "lite"]
+    backend: str                                  # "groot" | "sonic_arm_script" | "kinematic_attach" | "lite"
+    name: str                                     # the executor name results carry (api.skills.EXECUTOR_OF_BACKEND)
 
-    async def run(self, job: Any, handle: ExecutionHandle) -> Any: ...
+    async def run(self, job: Any, handle: Any) -> Any: ...     # ManipJob -> ManipOutcome (services/executors)
     async def cancel(self) -> None: ...
+    def health(self) -> ServiceHealth: ...
 
 
 # ----------------------------------------------------------------------
 # World (PLAN 6.2): the ONLY ground-truth readers on the runtime side live in world/
+# (world/gt_world.GTWorld -> LiteWorld, IsaacGTWorldModel). Geometry is REP-103 (x, y, yaw rad ccw);
+# dicts that reach agent/ (look, perception, truth) are already in Worldline's frame (world/coords.py).
 # ----------------------------------------------------------------------
+@runtime_checkable
+class RobotPoseLike(Protocol):
+    """``WorldModel.robot_pose()``: an upright pose (world.model.RobotPose). Duck-compatible with
+    ``Pose3D`` (qw..qz from yaw) and carries what services need beyond it."""
+    x: float
+    y: float
+    z: float                                      # pelvis, world
+    yaw: float                                    # rad, ccw from +x
+    t: float                                      # sample time
+    source: str                                   # "isaac-gt" | "lite" | a localizer name
+    fallen: bool
+    pelvis_z: float                               # above the floor
+    wz: float                                     # yaw rate, rad/s
+
+    @property
+    def speed(self) -> float: ...                 # planar m/s
+
+
 @runtime_checkable
 class WorldModel(Protocol):
     scene: str
+    source: str                                   # "isaac-gt" | "lite-gt" | "perception"
 
-    def static_map(self) -> Any: ...
+    # the static semantic map (doc 27)
+    def static_map(self) -> Any: ...              # world.mapgen.StaticMap (keypoints, surfaces, grid, ...)
     def lookup_keypoints(self) -> MapDict: ...
-    def robot_pose(self) -> Pose3D: ...
-    def detections(self, camera: str = "head") -> list[Detection]: ...
+    def keypoint_at(self, x: float, y: float, tol: float = 0.30) -> str | None: ...
+    def path(self, a: PoseLike, b: PoseLike) -> list[tuple[float, float]] | None: ...
+
+    # the robot and its head camera
+    def robot_pose(self) -> RobotPoseLike: ...
+    def camera_pose(self, **view: Any) -> Any: ...               # world.perception.CameraPose
+    def view_spec(self, cam_pose: Any) -> dict[str, Any]: ...    # an api.observation.ViewSpec as a dict
+
+    # what the robot can perceive (GT-backed hints in sim; a perception stack later, PLAN 13)
+    def detections(self, camera: str = "head", **view: Any) -> list[Any]: ...   # world.model.Detection
+    def look(self, views: list[dict] | None, *, at: str | None, detections: Any = None) -> dict[str, Any]: ...
     def scan(self, views: list[ViewSpec], *, at: str | None) -> LookData: ...
-    def object(self, object_id: str) -> ObjectState | None: ...
+    def perception(self) -> dict[str, Any]: ...
+    def latest_frame(self, camera: str = "head") -> CameraFrame | None: ...
+
+    # objects and hands
+    def object(self, object_id: str) -> Any: ...                # world.model.ObjectState (duck: api ObjectState)
+    def objects(self) -> dict[str, Any]: ...
     def hands(self) -> dict[str, str | None]: ...
-    def grasp_state(self, object_id: str, arm: str) -> GraspState: ...
-    def free_spot(self, surface: str, object_id: str, near: Pose2D) -> Pose3D | None: ...
-    def path(self, a: Pose2D, b: Pose2D) -> list[tuple[float, float]] | None: ...
-    def latest_frame(self, camera: Literal["head", "ego", "top"]) -> CameraFrame | None: ...
+    def grasp_state(self, object_id: str, arm: str) -> Any: ...
+    def free_spot(self, surface: str, object_id: str, near: PoseLike = None,
+                  within: Callable[[float, float, float], bool] | None = None) -> Pose3D | None: ...
+    # `within(x, y, z)`: the reach test from the current pose; lets place tell no_room_in_reach
+    # (room exists, not reachable from here) from no_room_on_surface.
+
     def truth(self) -> Any: ...                                 # UI + eval ONLY; never the runtime
 
 
-class NotSupported(Exception):
-    """SimControl on a real robot."""
+class NotSupported(RuntimeError):
+    """This backend cannot do that: SimControl on a real robot, or a P1 build without the op.
+    world.model.NotSupported is this class."""
 
 
 @runtime_checkable
 class SimControl(Protocol):
-    def teleport_robot(self, pose: Pose2D) -> None: ...
-    def attach(self, object_id: str, arm: str, mode: Literal["fixed_joint", "follow"]) -> None: ...
-    def detach(self, object_id: str, pose: Pose3D | None) -> None: ...
+    """Actuation only a simulator can do. Raises NotSupported (world.model.NotSupported) where the
+    backend lacks the op; ``capabilities()`` says which ops exist, e.g. the skill registry marks
+    kinematic_attach healthy only when {"attach", "detach"} are available."""
+    def capabilities(self) -> dict[str, bool]: ...              # {attach, detach, object_poses, band, teleport, ...}
+    def teleport_robot(self, pose: PoseLike, y: float | None = None, yaw: float | None = None) -> None: ...
+    def reset_robot(self, pose: PoseLike, y: float | None = None, yaw: float | None = None) -> None: ...
+    def attach(self, object_id: str, arm: str, mode: str = "follow") -> None: ...   # "follow" | "fixed_joint"
+    def detach(self, object_id: str, pose: Any = None) -> None: ...
     def band(self, on: bool, ramp_s: float = 1.5) -> None: ...
-    def reset_robot(self, pose: Pose2D) -> None: ...
     def reset_scene(self, variant: str) -> None: ...
     def set_render_rates(self, head_hz: float, ego_hz: float) -> None: ...
 
@@ -200,8 +293,9 @@ class Localizer(Protocol):
 @runtime_checkable
 class FrameSource(Protocol):
     def latest(self, camera: str = "head") -> CameraFrame | None: ...
+    def latest_frame(self, camera: str = "head") -> CameraFrame | None: ...
 
 
-__all__ = ["CAPABILITIES", "RobotBridge", "NavigationService", "ManipulationService", "ObservationService",
-           "SpeechService", "NavExecutor", "ManipExecutor", "WorldModel", "NotSupported", "SimControl",
-           "Localizer", "FrameSource"]
+__all__ = ["CAPABILITIES", "PoseLike", "RobotBridge", "NavigationService", "ManipulationService",
+           "ObservationService", "SpeechService", "BodyOpHandle", "BodyPort", "NavExecutor", "ManipExecutor",
+           "RobotPoseLike", "WorldModel", "NotSupported", "SimControl", "Localizer", "FrameSource"]

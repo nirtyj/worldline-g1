@@ -124,15 +124,16 @@ class RobotProfile:
 
 # Initial per-profile numbers (measured on M1: SONIC walks at about 0.45 m/s with
 # 0.4-1.1 s stops; the follower caps commanded speed at 0.40 m/s).
+# time_scale multiplies every eval scenario timeout (PLAN 9.1): lite 1.0, bringup 1.3, sonic 2.0, full 2.5.
 PROFILES: dict[str, RobotProfile] = {
-    "lite": RobotProfile(name="lite", walk_speed_mps=0.45, t_pick_s=6.0, t_place_s=5.0),
-    "bringup": RobotProfile(name="bringup", walk_speed_mps=0.40, t_pick_s=8.0, t_place_s=6.0,
+    "lite": RobotProfile(name="lite", walk_speed_mps=0.45, t_pick_s=6.0, t_place_s=5.0, time_scale=1.0),
+    "bringup": RobotProfile(name="bringup", walk_speed_mps=0.40, t_pick_s=8.0, t_place_s=6.0, time_scale=1.3,
                             stepping_stones=("kinematic_nav", "kinematic_attach")),
-    "sonic": RobotProfile(name="sonic", walk_speed_mps=0.40, t_pick_s=12.0, t_place_s=10.0,
+    "sonic": RobotProfile(name="sonic", walk_speed_mps=0.40, t_pick_s=12.0, t_place_s=10.0, time_scale=2.0,
                           stepping_stones=("sonic_arm_script",)),
-    "full": RobotProfile(name="full", walk_speed_mps=0.40, t_pick_s=15.0, t_place_s=10.0,
+    "full": RobotProfile(name="full", walk_speed_mps=0.40, t_pick_s=15.0, t_place_s=10.0, time_scale=2.5,
                          stepping_stones=("sonic_arm_script",)),
-    "real_g1": RobotProfile(name="real_g1", walk_speed_mps=0.40, t_pick_s=15.0, t_place_s=10.0),
+    "real_g1": RobotProfile(name="real_g1", walk_speed_mps=0.40, t_pick_s=15.0, t_place_s=10.0, time_scale=2.5),
 }
 
 
