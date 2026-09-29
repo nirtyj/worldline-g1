@@ -247,3 +247,11 @@ def test_the_referee_reads_ground_truth_only_through_the_page_and_world():
             assert p.name == "cameras.py", f"{p.name}: only ui/cameras.py may use viz (FrameTap)"
     src = (ROOT / "ui" / "server.py").read_text()
     assert "tap.pose(" not in src and "gt_pub" not in src, "the robot pose on the page comes from world.truth()"
+
+
+def test_only_target_executors_make_a_target_pass():
+    assert sc.honesty({"nav": {"sonic_walk": 1}, "manip": {"groot_sonic": 1}})["fallback"] is False
+    lite = sc.honesty({"nav": {"lite": 2}, "manip": {"lite": 2}}, grasp=True, profile="lite")
+    assert lite["fallback"] and lite["shortcuts"] == ["lite"] and "no physics" in lite["labels"][0]
+    odd = sc.honesty({"nav": {"sonic_walk": 1}, "manip": {"some_new_executor": 1}})
+    assert odd["fallback"] and odd["shortcuts"] == ["some_new_executor"], "unknown executors are never target passes"

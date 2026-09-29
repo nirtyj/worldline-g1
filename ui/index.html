@@ -639,6 +639,12 @@
       const [u, v] = uv(r.x, r.z);
       h += `<text x="${u}" y="${v}" text-anchor="middle" class="room-label">${esc(r.label.toUpperCase())}</text>`;
     }
+    for (const [id, lm] of Object.entries(lay.landmarks || {})) { // fixed things (fridge, stove, TV): ground truth
+      if (lm.x == null || lm.z == null) continue;
+      const [u, v] = uv(lm.x, lm.z);
+      h += `<g transform="translate(${u} ${v})"><rect x="-4" y="-4" width="8" height="8" rx="1.5" fill="var(--world)" stroke="#0b111b" stroke-width="1.2"/>
+        <title>${esc(id)} (${esc(lm.label || lm.type)}), near ${esc(lm.near || "?")}: sim ground truth</title></g>`;
+    }
     for (const [name, k] of Object.entries(lay.keypoints)) {
       const [u, v] = uv(k.x, k.z);
       const respondHere = lay.human && lay.human.keypoint === name;

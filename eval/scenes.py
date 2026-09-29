@@ -24,10 +24,13 @@ import yaml
 HERE = Path(__file__).resolve().parent
 SCENES_YAML = HERE / "scenes.yaml"
 STEPPING_STONES = frozenset({"kinematic_nav", "kinematic_attach", "sonic_arm_script"})
+# The target executors (PLAN 2.1): a pass counts as a target pass only if every body result came from these.
+TARGET_EXECUTORS = frozenset({"sonic_walk", "groot_sonic"})
 SHORTCUT_LABELS = {
     "kinematic_nav": "kinematic base (teleported along the nav path; no gait)",
     "kinematic_attach": "attach grasp (kinematic; no arm motion)",
     "sonic_arm_script": "attach grasp (SONIC arm-script reach + ground-truth attach)",
+    "lite": "lite body (pure Python; no physics)",
 }
 NAV_TOOLS = ("navigate",)
 MANIP_TOOLS = ("manipulate", "pick", "place")
@@ -174,10 +177,11 @@ def honesty(used: dict[str, dict[str, int]], *, grasp: bool = False, profile: st
     """Which sim shortcuts a result rests on (PLAN 12.2). A pass with any of them is a fallback pass,
     never a target pass. If a grasp scenario reports no manipulation executor at all, the profile's
     documented grasp executor is assumed (bringup: kinematic attach; sonic: arm script + attach)."""
-    stones = stepping_stones()
-    used_stones = sorted({ex for g in ("nav", "manip") for ex in (used.get(g) or {}) if ex in stones})
+    stones = stepping_stones() | {"lite"}
+    used_stones = sorted({ex for g in ("nav", "manip") for ex in (used.get(g) or {})
+                          if ex in stones or ex not in TARGET_EXECUTORS})
     if grasp and not used.get("manip"):
-        assumed = {"bringup": "kinematic_attach", "sonic": "sonic_arm_script"}.get(profile)
+        assumed = {"bringup": "kinematic_attach", "sonic": "sonic_arm_script", "lite": "lite"}.get(profile)
         if assumed:
             used_stones = sorted(set(used_stones) | {assumed})
     return {"shortcuts": used_stones, "labels": [SHORTCUT_LABELS.get(s, s) for s in used_stones],
