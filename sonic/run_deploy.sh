@@ -22,8 +22,12 @@
 #                          SCHED_RR priority N (sudo chrt). The main thread is left alone on purpose: it loops on
 #                          sleep(0) (g1_deploy_onnx_ref.cpp:4523-4526) and would spin a core at RT priority. On the
 #                          real robot the deploy runs privileged and requests SCHED_FIFO itself (cpp:2632-2640).
-#   --force                start even if another g1_deploy_onnx_ref is running (DDS domain 0 is shared!)
+#   --force                start even if another g1_deploy_onnx_ref runs in this network namespace (DDS domain 0
+#                          on the same lo is shared!). Deploys in other netns are ignored automatically.
 #   -- ARGS...             extra args passed verbatim to the binary (e.g. --planner-precision 32)
+#
+# tmux targets always use exact matching ("=session:=window"): tmux 3.4 prefix-matches bare names, so
+# "-t deploy-ref" would hit a session called "deploy-refq1" once "deploy-ref" is gone.
 #
 # Command line = what deploy.sh sim --input-type zmq_manager would run (deploy.sh:240-246, 404-406, 553-588),
 # without the [Y/n] prompt and the per-start `just build` (build with build_deploy.sh instead).
@@ -73,9 +77,9 @@ preflight() {
     [[ -e "$DEPLOY_DIR/$f" ]] || die "missing $DEPLOY_DIR/$f (build_deploy.sh step 5)"
   done
   if p=$(running_pid); then die "deploy already running for session $SESSION (pid $p)"; fi
-  others=$(pgrep -f 'target/release/g1_deploy_onnx_ref' || true)
-  if [[ -n "$others" && "$FORCE" != 1 ]]; then
-    die "another g1_deploy_onnx_ref is running (pid $others) on DDS domain 0; stop it or pass --force"
+  others=$(deploys_in_my_netns | tr '\n' ' ')
+  if [[ -n "${others// /}" && "$FORCE" != 1 ]]; then
+    die "another g1_deploy_onnx_ref is running in this network namespace (pid $others) on DDS domain 0; stop it or pass --force"
   fi
   if ss -ltn "sport = :$ZMQ_OUT_PORT" | grep -q LISTEN; then die "g1_debug port $ZMQ_OUT_PORT already bound"; fi
   ip link show "$IFACE" >/dev/null 2>&1 || die "no interface $IFACE"
@@ -101,12 +105,12 @@ case "$CMD" in
   start)
     preflight
     touch "$LOGF"; start_line=$(wc -l < "$LOGF")
-    if tmux has-session -t "$SESSION" 2>/dev/null; then
-      tmux new-window -d -t "$SESSION" -n "$WINDOW" "bash --noprofile --norc"
+    if tmux has-session -t "=$SESSION" 2>/dev/null; then
+      tmux new-window -d -t "=$SESSION" -n "$WINDOW" "bash --noprofile --norc"
     else
       tmux new-session -d -s "$SESSION" -n "$WINDOW" -x 200 -y 50 "bash --noprofile --norc"
     fi
-    tmux send-keys -t "$SESSION:$WINDOW" "$(inner_cmd)" C-m
+    tmux send-keys -t "=$SESSION:=$WINDOW" "$(inner_cmd)" C-m
     log "started deploy in tmux $SESSION:$WINDOW (log $LOGF)"
     if [[ "$WAIT_INIT" != 0 ]]; then
       for ((i = 0; i < WAIT_INIT * 2; i++)); do
@@ -130,16 +134,16 @@ case "$CMD" in
     ;;
   stop)
     pid=$(running_pid || true)
-    if [[ -z "$pid" ]]; then log "not running (session $SESSION)"; tmux kill-window -t "$SESSION:$WINDOW" 2>/dev/null || true; exit 0; fi
+    if [[ -z "$pid" ]]; then log "not running (session $SESSION)"; tmux kill-window -t "=$SESSION:=$WINDOW" 2>/dev/null || true; exit 0; fi
     # 1) EMERGENCY STOP on stdin (zmq_manager.hpp:166-175): Stop() sends a damping command and main() exits.
-    if tmux has-session -t "$SESSION" 2>/dev/null; then tmux send-keys -t "$SESSION:$WINDOW" o C-m 2>/dev/null || true; fi
+    if tmux has-session -t "=$SESSION" 2>/dev/null; then tmux send-keys -t "=$SESSION:=$WINDOW" o C-m 2>/dev/null || true; fi
     for ((i = 0; i < 20; i++)); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
     # 2) SIGINT, 3) SIGKILL
     if kill -0 "$pid" 2>/dev/null; then log "no exit after 'o'; SIGINT"; kill -INT "$pid" 2>/dev/null || true; sleep 2; fi
     if kill -0 "$pid" 2>/dev/null; then log "SIGKILL"; kill -KILL "$pid" 2>/dev/null || true; sleep 0.5; fi
     kill -0 "$pid" 2>/dev/null && die "pid $pid still alive"
     rm -f "$PIDF"
-    tmux kill-window -t "$SESSION:$WINDOW" 2>/dev/null || true
+    tmux kill-window -t "=$SESSION:=$WINDOW" 2>/dev/null || true
     log "deploy stopped (pid $pid)"
     ;;
   rt)

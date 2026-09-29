@@ -179,7 +179,8 @@ class Driver:
         return (min(zs) > zmin and max(zs) < zmax and f1 == f0), min(zs), max(zs), f1 - f0
 
     # ---------------------------------------------------------------- scenario
-    def run(self):
+    def startup(self) -> bool:
+        """Hand-over: band down -> command start -> band release -> rate checks. Returns False if control never started."""
         a = self.a
         self.log("wait_sim")
         t0 = time.time()
@@ -194,7 +195,19 @@ class Driver:
         p = self.pose()
         self.log("sim_pose", **p)
 
-        # 1) command start (after the deploy printed "Init Done"; the orchestrator waits for that)
+        # 1) hand-over, part 1: while the deploy only PD-holds its default pose (INIT ramp done, no policy yet,
+        #    g1_deploy_onnx_ref.cpp:2762-2793), lower the band until the feet carry the weight. Starting the policy
+        #    with the robot hanging 17 cm in the air (upstream ']' then '9') makes it flail out of distribution
+        #    (measured: hip-yaw targets up to 6 rad), and the later drop then fails.
+        if a.band_lower > 0:
+            for i in range(1, 21):
+                self.sim("band_length", length=-a.band_lower * i / 20)
+                time.sleep(0.1)
+            time.sleep(1.5)
+        p = self.pose()
+        self.log("band_lowered", pelvis_z=round(p["pelvis_z"], 3), foot_contact=p["foot_contact"])
+
+        # 2) command start (the orchestrator waited for "Init Done"; see docs/contracts/sonic_deploy.md)
         self.yaw0 = p["yaw"]
         self.keepalive_on = True  # IDLE, facing +X planner frame
         t_start = time.time()
@@ -204,27 +217,39 @@ class Driver:
         started = self.debug_count > 0
         self.check("control_started", started, secs=round(time.time() - t_start, 2), yaw0_deg=round(math.degrees(self.yaw0), 1))
         if not started:
-            return self.finish()
-        time.sleep(2.0)
-        dbg_rate = self.debug_count / max(1e-3, time.time() - self.debug_first_t)
-        self.check("g1_debug_rate", 40 <= dbg_rate <= 60, hz=round(dbg_rate, 1))
+            return False
 
-        # 2) band release (upstream procedure: start first, then '9')
-        if a.band_lower > 0:
-            # hand-over: lower the band until the feet carry the weight, then release (no free fall)
-            for i in range(1, 21):
-                self.sim("band_length", length=-a.band_lower * i / 20)
-                time.sleep(0.1)
-            time.sleep(1.0)
+        # 3) hand-over, part 2: release the band shortly after the policy took over
+        time.sleep(a.release_after)
         pz = self.pose()["pelvis_z"]
         self.sim("band", on=False)
         self.falls_at_release = self.pose()["falls"]
         self.log("band_released", pelvis_z=round(pz, 3), band_lower=a.band_lower)
         time.sleep(3.0)
+        dbg_rate = self.debug_count / max(1e-3, time.time() - self.debug_first_t)
+        self.check("g1_debug_rate", 40 <= dbg_rate <= 60, hz=round(dbg_rate, 1))
         st = self.sim("stats")
         self.check("lowcmd_rate", st["lowcmd_hz_2s"] > 300 and 35 <= st["lowcmd_leg_target_change_hz_2s"] <= 65,
                    msg_hz=st["lowcmd_hz_2s"], leg_target_change_hz=st["lowcmd_leg_target_change_hz_2s"],
                    mode_machine=st["lowcmd_mode_machine"], rtf=round(st["rtf"], 3))
+        return True
+
+    def send_stop_and_check(self):
+        """command stop=1 must terminate the deploy (zmq_manager.hpp:343-362 -> main() exits)."""
+        self.log("command_stop_sent")  # report_ref.py ends the controlled window here
+        n0 = self.debug_count
+        for _ in range(3):
+            self.send(build_command_message(start=False, stop=True, planner=True))
+            time.sleep(0.1)
+        time.sleep(2.0)
+        n1 = self.debug_count
+        time.sleep(1.0)
+        self.check("zmq_stop_ends_control", self.debug_count == n1, g1_debug_after_stop=self.debug_count - n0)
+
+    def run(self):
+        a = self.a
+        if not self.startup():
+            return self.finish()
 
         # 3) stand
         ok, zmin, zmax, nf = self.upright_window(a.stand_secs)
@@ -328,16 +353,9 @@ class Driver:
         nf = self.pose()["falls"] - self.falls_at_release
         self.check("no_falls_since_release", nf == 0, falls=nf)
 
-        # 10) command stop=1 must terminate the deploy (zmq_manager.hpp:343-362 -> main() exits)
+        # 10) command stop=1 must terminate the deploy
         if a.send_stop:
-            n0 = self.debug_count
-            for _ in range(3):
-                self.send(build_command_message(start=False, stop=True, planner=True))
-                time.sleep(0.1)
-            time.sleep(2.0)
-            n1 = self.debug_count
-            time.sleep(1.0)
-            self.check("zmq_stop_ends_control", self.debug_count == n1, g1_debug_after_stop=self.debug_count - n0)
+            self.send_stop_and_check()
         return self.finish()
 
     def finish(self):
@@ -358,14 +376,15 @@ class Driver:
         return res
 
 
-def main():
+def base_args() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--zmq-port", type=int, default=5656)
     ap.add_argument("--zmq-out-port", type=int, default=5657)
     ap.add_argument("--ctl-port", type=int, default=5712)
     ap.add_argument("--out", required=True)
     ap.add_argument("--planner-hz", type=float, default=20.0)
-    ap.add_argument("--band-lower", type=float, default=0.18, help="lower the band by this many m before release (0 = upstream drop from 1.0 m)")
+    ap.add_argument("--band-lower", type=float, default=0.20, help="lower the band by this many m BEFORE start (0 = upstream: hang at 1.0 m)")
+    ap.add_argument("--release-after", type=float, default=1.0, help="seconds between control start and band release")
     ap.add_argument("--stand-secs", type=float, default=15.0)
     ap.add_argument("--walk-speed", type=float, default=0.5)
     ap.add_argument("--walk-secs", type=float, default=6.0)
@@ -376,7 +395,11 @@ def main():
     ap.add_argument("--strafe-min-m", type=float, default=0.5)
     ap.add_argument("--long-stand-secs", type=float, default=0.0)
     ap.add_argument("--send-stop", action="store_true")
-    a = ap.parse_args()
+    return ap
+
+
+def main():
+    a = base_args().parse_args()
     r = Driver(a).run()
     raise SystemExit(0 if r["pass"] else 1)
 

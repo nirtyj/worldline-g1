@@ -72,8 +72,17 @@ def main(run: Path):
     alt = sum(1 for i in range(1, len(touch)) if touch[i][1] != touch[i - 1][1])
     alt_ratio = alt / max(1, len(touch) - 1)
 
-    # --- rates ---------------------------------------------------------------------------------------
-    after_band = np.where(band == 0)[0]
+    # --- controlled window: band release .. command{stop} (after the stop the deploy exits, lowcmd ends and
+    #     the unpowered robot collapses; that tail must not count as a fall or dilute the rates) ----------
+    t_stop = next((e["t_wall"] for e in events if e["event"] == "command_stop_sent"), None)
+    if t_stop is None:  # runs before the command_stop_sent event existed: last drive event
+        t_stop = events[-1]["t_wall"] if events else (t[-1] if len(t) else 0.0)
+    ctl = (band == 0) & (t <= t_stop)
+    after_band = np.where(ctl)[0]
+    sim_ev = jl(run / "sim_events.jsonl")
+    t_rel = next((e["t_wall"] for e in sim_ev if e.get("event") == "band" and e.get("on") is False), None)
+    falls_ctl = [e["t_wall"] for e in sim_ev if e.get("event") == "fall_reset" and t_rel is not None and t_rel <= e["t_wall"] <= t_stop]
+    falls_all = [e["t_wall"] for e in sim_ev if e.get("event") == "fall_reset"]
     if len(after_band) > 10:
         i0, i1 = after_band[0], after_band[-1]
         dt = t[i1] - t[i0]
@@ -88,16 +97,34 @@ def main(run: Path):
         "planner_timeout": r"Planner timeout", "control_transition": r"transitioning to CONTROL",
         "emergency_stop": r"EMERGENCY STOP", "lowstate_lost": r"Lost LowState", "trt_engine_build": r"[Bb]uilding.*engine|Build.*engine",
     }.items()}
+    # --- deploy control-loop latency (printed once per 50 ticks, g1_deploy_onnx_ref.cpp ~4080-4100) ------
+    lat = {}
+    for key, pat in {"obs_us": r"Obs: (\d+)us", "policy_us": r"Policy: (\d+)us", "obs2cmd_us": r"Obs 2 Motor Command: (\d+)us",
+                     "lowstate_age_ms": r"LowState age: ([\d.]+)ms", "planner_model_us": r"Model: (\d+)us"}.items():
+        vals = np.array([float(x) for x in re.findall(pat, dlog)])
+        if len(vals):
+            lat[key] = {"n": int(len(vals)), "p50": float(np.percentile(vals, 50)), "p90": float(np.percentile(vals, 90)),
+                        "max": float(vals.max())}
+    gpu = []
+    if (run / "gpu.csv").exists():
+        for line in (run / "gpu.csv").read_text().splitlines():
+            try:
+                gpu.append(float(line.split(",")[1].strip().rstrip(" %")))
+            except (IndexError, ValueError):
+                pass
     metrics = {
         "run": str(run), "pass": res.get("pass"), "tests": {r["test"]: r for r in res.get("tests", [])},
         "rtf_sim_over_wall": rtf, "sim_stats": st,
-        "lowcmd_msg_hz_after_band": lowcmd_hz, "lowcmd_leg_target_change_hz_after_band": change_hz,
+        "lowcmd_msg_hz_after_band": lowcmd_hz, "lowcmd_leg_target_change_hz_after_band": change_hz,  # wall-clock Hz in the controlled window
         "walk_windows_s": [(round(a - t0, 2), round(b - t0, 2)) for a, b in walk_windows],
         "touchdowns_while_walking": len(touch), "touchdown_alternation_ratio": round(alt_ratio, 3),
-        "falls": int(tr[-1]["falls"]) if tr else None,
+        "falls": len(falls_ctl),  # upstream fall-resets between band release and command{stop}
+        "falls_total_incl_before_release_and_after_stop": len(falls_all),
+        "controlled_window_s": (round(t[after_band[0]] - t0, 2), round(t_stop - t0, 2)) if len(after_band) else None,
         "pelvis_z_after_band": {"min": float(z[after_band].min()), "max": float(z[after_band].max())} if len(after_band) else None,
         "path_length_m": float(np.sum(np.linalg.norm(np.diff(pos[:, :2], axis=0), axis=1))) if len(pos) > 1 else 0.0,
-        "deploy_log_markers": markers, "planner_msgs_sent": res.get("planner_msgs_sent"), "g1_debug_msgs": res.get("g1_debug_msgs"),
+        "deploy_log_markers": markers, "deploy_loop_latency": lat,
+        "gpu_util_pct": {"mean": float(np.mean(gpu)), "max": float(np.max(gpu))} if gpu else None, "planner_msgs_sent": res.get("planner_msgs_sent"), "g1_debug_msgs": res.get("g1_debug_msgs"),
     }
     json.dump(metrics, open(run / "metrics.json", "w"), indent=1, default=float)
 
@@ -139,7 +166,7 @@ def main(run: Path):
         axs[1].axvline(tw - t0, c="crimson", lw=0.4)
     fig.suptitle("SONIC deploy in MuJoCo reference loop (green = planner walking command active)")
     fig.savefig(rep / "timeseries.png", dpi=110, bbox_inches="tight")
-    print(json.dumps({k: metrics[k] for k in ("pass", "rtf_sim_over_wall", "lowcmd_msg_hz_after_band",
+    print(json.dumps({k: metrics[k] for k in ("pass", "rtf_sim_over_wall", "lowcmd_msg_hz_after_band", "deploy_loop_latency",
                                              "lowcmd_leg_target_change_hz_after_band", "touchdown_alternation_ratio", "falls")}))
 
 

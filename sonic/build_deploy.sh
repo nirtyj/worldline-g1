@@ -187,6 +187,8 @@ fi
 # ---------------------------------------------------------------------------------------------------
 if want 8; then
 log "step 8: smoke test"
+# trt_hdr is set by step 4; recompute it when step 8 runs alone (STEPS="8") so `set -u` does not abort
+trt_hdr=${trt_hdr:-$(awk '/#define TRT_(MAJOR|MINOR|PATCH|BUILD)_ENTERPRISE /{printf "%s.", $3}' "$TensorRT_ROOT/include/NvInferVersion.h" 2>/dev/null)}; trt_hdr=${trt_hdr%.}
 # argc < 4 prints usage and exits before any CUDA/DDS call (g1_deploy_onnx_ref.cpp:4147-4205).
 out=$(cd "$DEPLOY_DIR" && LD_LIBRARY_PATH="$(deploy_ld_path)" "$DEPLOY_BIN" 2>&1 | head -3 || true)
 echo "$out" | grep -q "Usage:" || die "deploy binary does not start: $out"

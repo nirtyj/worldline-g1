@@ -47,5 +47,19 @@ LOG_ROOT=/work/logs/wl
 OUT_ROOT=/work/worldline-g1/outputs/m1/deploy
 mkdir -p "$LOG_ROOT" 2>/dev/null || true
 
+# PIDs of g1_deploy_onnx_ref processes that share OUR network namespace. DDS domain 0 is hard-coded in the binary
+# (g1_deploy_onnx_ref.cpp:2218), so two deploys on the same `lo` would cross-talk; a deploy inside another netns
+# (sim_isaac/tools/sonic_netns_test.sh, scripts/body_netns_e2e.sh) has its own `lo` and does not conflict.
+# Matched on the executable (/proc/PID/exe), not the command line: `pgrep -f` alone also matches any shell whose
+# command line merely mentions the binary name (e.g. an ssh one-liner that launches or greps for it).
+deploys_in_my_netns() {
+  local me p; me=$(readlink /proc/self/ns/net)
+  for p in $(pgrep -f 'g1_deploy_onnx_ref' || true); do
+    [[ "$(readlink "/proc/$p/exe" 2>/dev/null)" == */g1_deploy_onnx_ref ]] || continue
+    [[ "$(readlink "/proc/$p/ns/net" 2>/dev/null)" == "$me" ]] && echo "$p"
+  done
+  return 0
+}
+
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die()  { log "ERROR: $*"; exit 1; }

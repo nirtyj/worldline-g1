@@ -107,6 +107,14 @@ class RefSimulator(BaseSimulator):
         self.ctl.bind(f"tcp://127.0.0.1:{args.ctl_port}")
         # --- trace + video -------------------------------------------------------------------------
         self.trace_f = open(self.out / "sim_trace.jsonl", "w")
+        # trace lines are queued by the physics loop and written by a background thread, so a slow disk
+        # (network volume, dirty-page throttling) can never stall the 200 Hz loop
+        import collections
+        self.trace_q = collections.deque()
+        self.stalls: list[dict] = []
+        self._writer_run = True
+        self._writer = threading.Thread(target=self._trace_writer, daemon=True)
+        self._writer.start()
         self.events_f = open(self.out / "sim_events.jsonl", "w")
         self.falls = 0
         self.sim_time_total = 0.0     # sim seconds stepped (d.time restarts at 0 on an upstream fall reset)
@@ -128,7 +136,41 @@ class RefSimulator(BaseSimulator):
                  "-preset", "veryfast", "-pix_fmt", "yuv420p", str(self.out / "sim_tracking.mp4")],
                 stdin=subprocess.PIPE,
             )
+        # --- per-part timers inside the upstream sim_step (diagnostics only; behaviour unchanged) ---------
+        self.sub_ms: dict[str, float] = {}
+        br = env.unitree_bridge
+        for owner, name, key in ((env, "prepare_obs", "obs"), (br, "PublishLowState", "dds_pub"),
+                                 (env, "compute_body_torques", "body_pd"), (env, "compute_hand_torques", "hand_pd")):
+            setattr(owner, name, self._timed(getattr(owner, name), key))
+        _mj_step = mujoco.mj_step
+        timed_step = self._timed(_mj_step, "mj_step")
+        import types
+        import gear_sonic.utils.mujoco_sim.base_sim as _bs
+        # base_sim.sim_step calls mujoco.mj_step through its module global: give that module a namespace that is
+        # the real mujoco module except for a timed mj_step (SimpleNamespace: no method binding)
+        ns = types.SimpleNamespace(**{k: getattr(mujoco, k) for k in dir(mujoco) if not k.startswith("__")})
+        ns.mj_step = timed_step
+        _bs.mujoco = ns
         self.event("sim_ready", init_yaw_deg=args.init_yaw_deg, band=self.band_enabled())
+
+    def _timed(self, fn, key):
+        def wrapper(*a, **kw):
+            t0 = time.monotonic()
+            try:
+                return fn(*a, **kw)
+            finally:
+                self.sub_ms[key] = (time.monotonic() - t0) * 1e3
+        return wrapper
+
+    def _trace_writer(self):
+        while self._writer_run or self.trace_q:
+            n = 0
+            while self.trace_q:
+                self.trace_f.write(self.trace_q.popleft())
+                n += 1
+            if n:
+                self.trace_f.flush()
+            time.sleep(0.05)
 
     # ------------------------------------------------------------------------------------------------
     def _on_lowcmd(self, msg):
@@ -215,6 +257,9 @@ class RefSimulator(BaseSimulator):
             "step_ms_mean": float(st.mean() * 1e3), "step_ms_p99": float(np.percentile(st, 99) * 1e3),
             "falls": self.falls, "band": self.band_enabled(), "pace": self.args.pace,
             "resyncs": getattr(self, "resyncs", 0),
+            "injected_stalls": getattr(self, "injected", 0),
+            "stalls_gt15ms": len(self.stalls),
+            "stall_wake_late_gt15ms": sum(1 for x in self.stalls if x["wake_late_ms"] > 15),
         }
 
     def handle_ctl(self):
@@ -259,11 +304,24 @@ class RefSimulator(BaseSimulator):
         self.t_loop0 = time.time()
         next_t = time.monotonic()
         self.resyncs = 0
+        inj_next = self.args.inject_start_s if self.args.inject_stall_ms > 0 else float("inf")
+        self.injected = 0
         try:
+            wake_late = 0.0  # how late the previous sleep() returned vs its deadline (scheduler starvation signal)
             while self._running:
+                if self.sim_time_total >= inj_next and not self.band_enabled():
+                    # synthetic physics-loop stall (models an Isaac render hitch / a descheduled sim process):
+                    # the loop blocks, the deploy keeps running on its wall clock with stale rt/lowstate
+                    time.sleep(self.args.inject_stall_ms / 1000.0)
+                    self.injected += 1
+                    self.event("injected_stall", ms=self.args.inject_stall_ms, pace=self.args.pace, n=self.injected)
+                    inj_next = self.sim_time_total + self.args.inject_every_s
+                    if self.args.pace == "deadline" and self.args.inject_drop:
+                        next_t = time.monotonic()  # drop the lag (time slip) instead of bursting to catch up
                 step_start = time.monotonic()
                 z_before = float(self.d.qpos[2])
                 env.sim_step()  # publish state, band, PD from latest lowcmd, mj_step, check_fall/reset
+                t_phys = time.monotonic()
                 self.sim_time_total += self.sim_dt
                 self._track_targets()
                 if getattr(env, "fall", False):
@@ -288,30 +346,47 @@ class RefSimulator(BaseSimulator):
                         rec["cmd_q_legs"] = self.last_cmd_q[:12].round(5).tolist()
                         rec["cmd_kp_legs"] = self.last_cmd_kp[:12].round(2).tolist()
                     rec["qpos"] = self.d.qpos.round(5).tolist()  # full state -> offline video (render_ref.py)
-                    self.trace_f.write(json.dumps(rec) + "\n")
+                    self.trace_q.append(json.dumps(rec) + "\n")  # written by the writer thread (no file I/O in this loop)
+                t_trace = time.monotonic()
                 self.handle_ctl()
+                t_ctl = time.monotonic()
                 if self.args.duration and self.d.time >= self.args.duration:
                     self.event("duration_reached")
                     break
                 elapsed = time.monotonic() - step_start
+                if elapsed > 0.015:
+                    # stall diagnostics: which part of the step took the time
+                    self.stalls.append({"t_wall": time.time(), "t_sim_total": round(self.sim_time_total, 3), "kind": "slow_step",
+                                        "wake_late_ms": 0.0, "phys_ms": round((t_phys - step_start) * 1e3, 1),
+                                        "trace_ms": round((t_trace - t_phys) * 1e3, 1), "ctl_ms": round((t_ctl - t_trace) * 1e3, 1),
+                                        "rest_ms": round((time.monotonic() - t_ctl) * 1e3, 1),
+                                        "phys_parts_ms": {k: round(v, 1) for k, v in self.sub_ms.items()}})
                 self.step_times.append(elapsed)
                 if len(self.step_times) > 20000:
                     self.step_times = self.step_times[-10000:]
                 if self.args.pace == "upstream":
                     # base_sim.py:627-631: sleep the remainder of this step; overruns and sleep overshoot are lost
                     sleep_time = self.sim_dt - elapsed
+                    wake_late = 0.0
                     if sleep_time > 0:
+                        t_sl = time.monotonic()
                         time.sleep(sleep_time)
+                        wake_late = time.monotonic() - t_sl - sleep_time
                 else:
                     # absolute deadlines: overshoot of one sleep is recovered on the next step, so RTF stays 1.0
                     # whenever the mean step cost is below sim_dt; >100 ms behind -> resync instead of bursting
                     next_t += self.sim_dt
                     sleep_time = next_t - time.monotonic()
+                    wake_late = 0.0
                     if sleep_time > 0:
                         time.sleep(sleep_time)
+                        wake_late = time.monotonic() - next_t
                     elif sleep_time < -0.1:
                         next_t = time.monotonic()
                         self.resyncs += 1
+                if wake_late > 0.015:
+                    self.stalls.append({"t_wall": time.time(), "t_sim_total": round(self.sim_time_total, 3), "kind": "sleep_overshoot",
+                                        "wake_late_ms": round(wake_late * 1e3, 1), "phys_ms": 0.0, "trace_ms": 0.0, "ctl_ms": 0.0, "rest_ms": 0.0})
                 sim_cnt += 1
         except KeyboardInterrupt:
             print("Simulator interrupted by user.")
@@ -321,7 +396,15 @@ class RefSimulator(BaseSimulator):
     def finish(self):
         st = self.stats()
         self.event("sim_exit", **st)
+        st["stalls_gt15ms"] = len(self.stalls)
+        st["stall_wake_late_gt15ms"] = sum(1 for x in self.stalls if x["wake_late_ms"] > 15)
+        st["stall_max_ms"] = max([max(x["wake_late_ms"], x["phys_ms"] + x["trace_ms"] + x["ctl_ms"] + x["rest_ms"]) for x in self.stalls], default=0.0)
         json.dump(st, open(self.out / "sim_stats.json", "w"), indent=1)
+        with open(self.out / "sim_stalls.jsonl", "w") as f:
+            for x in self.stalls:
+                f.write(json.dumps(x) + "\n")
+        self._writer_run = False
+        self._writer.join(timeout=10)
         self.trace_f.close()
         if self.video is not None:
             self.video.stdin.close()
@@ -343,6 +426,11 @@ def main():
     ap.add_argument("--camera-port", type=int, default=0, help="also publish ego_view like upstream (0 = off)")
     ap.add_argument("--pace", choices=["deadline", "upstream"], default="deadline",
                     help="wall-clock pacing: absolute deadlines (default) or the upstream per-step sleep")
+    ap.add_argument("--inject-stall-ms", type=float, default=0.0, help="block the physics loop this long (0 = off)")
+    ap.add_argument("--inject-every-s", type=float, default=3.0, help="sim seconds between injected stalls")
+    ap.add_argument("--inject-start-s", type=float, default=0.0, help="first injection not before this sim time (band must be off)")
+    ap.add_argument("--inject-drop", action="store_true",
+                    help="deadline pacing: after an injected stall drop the lag (time slip) instead of bursting to catch up")
     args = ap.parse_args()
 
     # == run_sim_loop.py:36-55, headless
