@@ -676,6 +676,8 @@ async def g2_async(a: argparse.Namespace) -> dict:
                 exe.last_client.join(2.0)
             row = g2_session_report(kind, o, s, arm.of(sid), t_trig, receipt, traj.arrays(sid), t_start, t_done)
             row["session"] = sid
+            tr0 = traj.arrays(sid)
+            row["t_trigger_rel"] = None if t_trig is None or not tr0 else round(t_trig - float(tr0["t"][0]), 3)
             row["body_events"] = [{"state": e["state"], "ended_by": (e.get("data") or {}).get("ended_by"),
                                    "hold": (e.get("data") or {}).get("hold")}
                                   for e in events if (e.get("data") or {}).get("session_id") == sid
@@ -722,6 +724,10 @@ async def g2_async(a: argparse.Namespace) -> dict:
                 for k, v in _palms(tr["q17"]).items():
                     arrs[f"{row['session']}__{k}"] = v
         np.savez_compressed(out / "trajectories.npz", **arrs)
+        try:
+            rep["trajectories_png"] = plot_trajectories(out, sessions)
+        except Exception as e:  # noqa: BLE001 - a plot is evidence, never a verdict
+            rep["trajectories_png"] = f"failed: {e!r}"
         rep["summary"] = g2_summary(sessions)
     finally:
         if pose_task is not None:
@@ -743,6 +749,65 @@ async def g2_async(a: argparse.Namespace) -> dict:
         world.close()
     rep["t_end"] = time.time()
     return rep
+
+
+def plot_trajectories(out: Path, rows: list[dict]) -> str | None:
+    """trajectories.png (PIL only: the runtime venv has no matplotlib): one panel per session, the left palm in the
+    pelvis frame (FK of the measured arm, g1_debug) as solid x/y/z lines and the palm of the rows GR00T sent (FK of
+    each chunk's rows at their own times, t0 + k dt: SENT, not necessarily played; a halt or cancel drops them) as
+    dots; a grey line marks the cancel/halt trigger."""
+    from PIL import Image, ImageDraw
+    try:
+        tr = np.load(out / "trajectories.npz")
+        ch = np.load(out / "chunks.npz") if (out / "chunks.npz").exists() else None
+    except Exception:  # noqa: BLE001
+        return None
+    from body.g1_kin import named_from_mj17, points
+    from groot import joint_order as jo
+    W, H, M = 900, 170, 40
+    img = Image.new("RGB", (W, H * max(1, len(rows))), "white")
+    dr = ImageDraw.Draw(img)
+    cols = {0: (200, 30, 30), 1: (30, 150, 30), 2: (30, 60, 200)}
+    for i, row in enumerate(rows):
+        sid = row["session"]
+        y0 = i * H
+        dr.rectangle([M, y0 + 18, W - 10, y0 + H - 18], outline=(180, 180, 180))
+        dr.text((M, y0 + 2), f"{sid}  {row['status']}({row['reason']})  chunks {row.get('chunks_sent')}  "
+                             f"slew {row.get('slew_frac')}  left palm x/y/z (red/green/blue), pelvis frame, "
+                             f"-0.1..0.5 m", fill=(0, 0, 0))
+        key = f"{sid}__t"
+        if key not in tr.files:
+            continue
+        t, lp = tr[key], tr[f"{sid}__left_palm"]
+        ts = float(t[0])
+        span = max(float(t[-1]) - ts, 1.0)
+
+        def X(tt):
+            return M + (W - 10 - M) * (float(tt) - ts) / span
+
+        def Y(v):
+            return y0 + H - 18 - (H - 36) * (float(v) + 0.1) / 0.6
+        for d in range(3):
+            pts = [(X(tt), Y(v)) for tt, v in zip(t, lp[:, d])]
+            if len(pts) > 1:
+                dr.line(pts, fill=cols[d], width=2)
+        if ch is not None and "session" in ch.files:
+            for c in np.where(ch["session"] == sid)[0]:
+                ub = jo.wire_to_mj17(ch["upper_body_wire"][c])
+                t0 = float(ch["t0"][c])
+                for k in range(0, ub.shape[0], 4):
+                    p = points(named_from_mj17(ub[k]))["left_palm"]
+                    tt = t0 + k * 0.02
+                    if ts <= tt <= ts + span:
+                        for d in range(3):
+                            x, y = X(tt), Y(p[d])
+                            dr.ellipse([x - 1.5, y - 1.5, x + 1.5, y + 1.5], fill=cols[d])
+        if row.get("t_trigger_rel") is not None:
+            x = X(ts + row["t_trigger_rel"])
+            dr.line([(x, y0 + 18), (x, y0 + H - 18)], fill=(120, 120, 120), width=1)
+    path = out / "trajectories.png"
+    img.save(path)
+    return path.name
 
 
 def g2_summary(rows: list[dict]) -> dict:
