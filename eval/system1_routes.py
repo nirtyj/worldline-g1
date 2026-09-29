@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from brains.system1_jev import JevSystemOne
 from brains.system1 import MODEL, ROUTE_TIMEOUT_S, SystemOne
-from tests.system1_live_check import load_env
+from tests.kept.system1_live_check import load_env
 
 IDLE = {"at": "living_room_sofa_1", "holding": {}, "goal": None, "running": [], "stopped": False}
 FETCHING = {"at": None, "moving": True, "holding": {}, "goal": "bring the user the white mug",

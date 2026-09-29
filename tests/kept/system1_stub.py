@@ -1,6 +1,6 @@
 """A stand-in System 1 with fixed answers and no model, for testing the wiring.
 
-    SYSTEM1=tests.system1_stub:create .venv-thor/bin/python ui/server.py
+    .venv-rt/bin/python -m ui.server --system1 tests.kept.system1_stub:create   (or SYSTEM1=tests.kept.system1_stub:create)
 
 It labels "stop …" and "bring me the …" messages, leaves every other message to
 the planner (route returns None), and reports one fixed observation once it has

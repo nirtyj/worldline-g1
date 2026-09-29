@@ -1,0 +1,259 @@
+{
+ "ok": true,
+ "scenario": "fetch_other_room",
+ "profile": "lite",
+ "url": null,
+ "config": {
+  "scene": "procthor-train-40",
+  "agent": "agent",
+  "model": "gemini-3.8-flash",
+  "profile": "lite",
+  "stepping_stones": [
+   "kinematic_attach",
+   "kinematic_nav",
+   "lite",
+   "sonic_arm_script"
+  ],
+  "profile_fallbacks": [],
+  "fallback_labels": {
+   "kinematic_nav": "KINEMATIC (fallback)",
+   "kinematic_attach": "KINEMATIC ATTACH (fallback)",
+   "sonic_arm_script": "ARM SCRIPT + ATTACH (fallback)"
+  },
+  "truth_label": "sim ground truth: not visible to the planner"
+ },
+ "speed": 40.0,
+ "system1": "tests.kept.system1_stub:create",
+ "planner": "brains.scripted:create",
+ "user": {
+  "deliver_to_surface": "kitchen_counter_1a",
+  "keypoint": "kitchen_counter_1a"
+ },
+ "score": {
+  "name": "fetch_other_room",
+  "passed": true,
+  "seconds": 4.2,
+  "note": "alarm_clock_1 ended on kitchen_counter_1a",
+  "profile": "lite",
+  "house": "H40",
+  "scene": "procthor-train-40",
+  "binding": "as_thor",
+  "binding_status": "ok",
+  "binding_flags": [],
+  "time_limit_s": 235.4,
+  "time_limit": {
+   "thor_s": 200.0,
+   "scale": 1.0,
+   "estimate_s": 117.7
+  },
+  "executors_used": {
+   "nav": {
+    "lite": 4
+   },
+   "manip": {
+    "lite": 2
+   },
+   "skills": {
+    "lite.pick.v0": 1,
+    "lite.place.v0": 1
+   }
+  },
+  "shortcuts": [
+   "lite"
+  ],
+  "honesty": [
+   "lite body (pure Python; no physics)"
+  ],
+  "fallback_pass": true,
+  "target_pass": false,
+  "fixtures_ok": true,
+  "fixture_notes": [],
+  "decisions": 11,
+  "rejected": 0,
+  "stale": 0,
+  "late": 0,
+  "recalls": 0,
+  "tokens_in": 0,
+  "unasked": 0,
+  "questions": 0,
+  "labels": 1,
+  "s1_labels": 1
+ },
+ "steps": [
+  {
+   "step": "System 1 labelled the request",
+   "ok": true,
+   "row": 6,
+   "t": 52.079
+  },
+  {
+   "step": "navigate to a stand (executor named, labelled)",
+   "ok": true,
+   "row": 35,
+   "t": 74.302
+  },
+  {
+   "step": "arrival scan",
+   "ok": true,
+   "row": 39,
+   "t": 80.57
+  },
+  {
+   "step": "check_reachability sees the alarm clock",
+   "ok": true,
+   "row": 65,
+   "t": 101.358
+  },
+  {
+   "step": "check_reachability says reachable",
+   "ok": true,
+   "row": 76,
+   "t": 107.177
+  },
+  {
+   "step": "pick (executor and skill named, labelled)",
+   "ok": true,
+   "row": 84,
+   "t": 111.136
+  },
+  {
+   "step": "verify glance after the pick",
+   "ok": true,
+   "row": 86,
+   "t": 111.284
+  },
+  {
+   "step": "navigate to the user",
+   "ok": true,
+   "row": 114,
+   "t": 130.199
+  },
+  {
+   "step": "place on the user's surface (labelled)",
+   "ok": true,
+   "row": 129,
+   "t": 140.541
+  },
+  {
+   "step": "goal check ok",
+   "ok": true,
+   "row": 134,
+   "t": 141.19
+  },
+  {
+   "step": "delivered",
+   "ok": true,
+   "row": 128,
+   "t": 140.54
+  }
+ ],
+ "checks": [
+  {
+   "check": "every result carries an observation_id",
+   "ok": true,
+   "detail": []
+  },
+  {
+   "check": "lowercase envelope statuses",
+   "ok": true,
+   "detail": []
+  },
+  {
+   "check": "every manipulate result names its executor and skill",
+   "ok": true,
+   "detail": [
+    [
+     "man-000010",
+     "lite",
+     "lite.pick.v0"
+    ],
+    [
+     "man-000014",
+     "lite",
+     "lite.place.v0"
+    ]
+   ]
+  },
+  {
+   "check": "System 1 got gated head frames, and its observation reached the runtime",
+   "ok": true,
+   "detail": {
+    "status": "ready",
+    "frames": 3,
+    "contexts": 4,
+    "robot_lines": [
+     "On it.",
+     "Here it is."
+    ],
+    "observe_calls": 3,
+    "route_calls": 1,
+    "noticed_rows": 3
+   }
+  },
+  {
+   "check": "a target pass only if every body result came from a target executor",
+   "ok": true,
+   "detail": {
+    "executors": {
+     "nav": {
+      "lite": 4
+     },
+     "manip": {
+      "lite": 2
+     },
+     "skills": {
+      "lite.pick.v0": 1,
+      "lite.place.v0": 1
+     }
+    },
+    "shortcuts": [
+     "lite"
+    ],
+    "honesty": [
+     "lite body (pure Python; no physics)"
+    ],
+    "target_pass": false
+   }
+  }
+ ],
+ "wall_s": 4.2,
+ "timeline": [
+  "   52.1s  heard     'Bring me the alarm clock.' -> request (by system1)",
+  "   52.1s  decide    speak {\"text\": \"On it.\"}",
+  "   52.1s  decide    navigate {\"location\": \"bedroom_arm_chair_1a\"}",
+  "   52.1s  start     navigate(keypoint) nav-000002",
+  "   74.3s  result    navigate succeeded: arrived at bedroom_arm_chair_1a (8.4 m, 22 s, lite, fallback)",
+  "   80.6s  result    observe succeeded: scan at bedroom_arm_chair_1a: sees pillow_1, vase_3",
+  "   80.6s  decide    navigate {\"location\": \"bedroom_dresser_1b\"}",
+  "   80.6s  start     navigate(keypoint) nav-000004",
+  "   94.9s  result    navigate succeeded: arrived at bedroom_dresser_1b (5.1 m, 14 s, lite, fallback)",
+  "  100.9s  result    observe succeeded: scan at bedroom_dresser_1b: sees alarm_clock_1, cd_1, mug_1, remote_control_1, vase_1",
+  "  100.9s  decide    check_reachability {\"object_type\": \"alarm_clock\"}",
+  "  101.4s  result    check_reachability succeeded: alarm_clock_1 visible but not reachable from this exact pose: needs_reposition (0.7 m); navigate(location='reach_stance'), then check again",
+  "  101.4s  decide    navigate {\"location\": \"reach_stance\"}",
+  "  101.4s  start     navigate(reposition) nav-000007",
+  "  106.5s  result    navigate succeeded: repositioned 0.26 m to the reach stance (lite, fallback); check reachability again",
+  "  106.7s  result    observe succeeded: glance at bedroom_dresser_1b: sees alarm_clock_1, cd_1, mug_1, remote_control_1, vase_1",
+  "  106.8s  decide    check_reachability {\"object_type\": \"alarm_clock\"}",
+  "  107.2s  result    check_reachability succeeded: alarm_clock_1 visible, reachable with the right arm (0.5 m)",
+  "  107.2s  decide    manipulate {\"action\": \"pick\", \"object_type\": \"alarm_clock\"}",
+  "  107.2s  start     manipulate(pick) man-000010",
+  "  111.1s  result    manipulate succeeded: picked alarm_clock_1 with the right hand [lite.pick.v0, fallback], 3.8 s; verifying",
+  "  111.3s  result    observe succeeded: glance at bedroom_dresser_1b: sees cd_1, mug_1, remote_control_1, vase_1",
+  "  111.3s  decide    navigate {\"location\": \"user\"}",
+  "  111.3s  start     navigate(keypoint) nav-000012",
+  "  130.2s  result    navigate succeeded: arrived at kitchen_counter_1a (6.4 m, 19 s, lite, fallback)",
+  "  136.5s  result    observe succeeded: scan at kitchen_counter_1a: sees dish_sponge_1, lettuce_1, mug_2, paper_towel_roll_1, pepper_shaker_1, pot_1, spray_bottle_1, vase_2",
+  "  136.7s  decide    manipulate {\"action\": \"place\", \"object_type\": \"alarm_clock\", \"target\": \"user\", \"goal\": \"on kitchen_counter_1a\"}",
+  "  136.8s  start     manipulate(place) man-000014",
+  "  140.5s  delivered {\"object\": \"alarm_clock_1\", \"surface\": \"kitchen_counter_1a\", \"execution_id\": \"man-000014\"}",
+  "  140.5s  result    manipulate succeeded: placed alarm_clock_1 on kitchen_counter_1a [lite.place.v0, fallback], 3.5 s; verifying",
+  "  140.9s  result    observe succeeded: glance at kitchen_counter_1a: sees alarm_clock_1, dish_sponge_1, lettuce_1, mug_2, paper_towel_roll_1, pot_1, vase_2",
+  "  141.2s  goal_check {\"object\": \"alarm_clock_1\", \"goal\": \"on kitchen_counter_1a\", \"ok\": true, \"where\": \"kitchen_counter_1a\", \"expected\": [\"kitchen_counter_1a\"], \"why\": \"kitchen_counter_1a is on kitchen_counter_1a\"}",
+  "  141.4s  decide    speak {\"text\": \"Here it is.\"}",
+  "  141.4s  decide    wait_and_observe {\"timeout_s\": 0}",
+  "  141.4s  start     wait_and_observe wai-000017",
+  "  141.8s  result    observe succeeded: glance at kitchen_counter_1a: sees alarm_clock_1, dish_sponge_1, lettuce_1, mug_2, paper_towel_roll_1, pot_1, vase_2",
+  "  141.9s  result    wait_and_observe succeeded: looked; nothing new"
+ ]
+}

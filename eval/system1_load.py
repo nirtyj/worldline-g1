@@ -23,7 +23,7 @@ from pathlib import Path
 
 from brains.system1_jev import JevSystemOne
 from brains.system1 import MODEL, SystemOne
-from tests.system1_live_check import jpeg_from, load_env
+from tests.kept.system1_live_check import jpeg_from, load_env
 
 ROOT = Path(__file__).resolve().parents[1]
 MESSAGES = [("hold on", "stop"), ("where are you going?", "question"), ("okay go ahead", "resume"),

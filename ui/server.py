@@ -3,6 +3,8 @@
 
     .venv/bin/python -m ui.server --profile sonic --scene procthor-train-40   # then open http://localhost:8765
     .venv/bin/python -m ui.server --profile lite                              # pure Python, no simulator
+    .venv/bin/python -m ui.server --profile lite --planner brains.scripted:create \
+        --system1 tests.kept.system1_stub:create                             # offline: no keys, no LLM
 
 Keys (never read from ludo-runtime): $WORLDLINE_ENV, then <repo>/.env, then
 ~/.config/ludo-g1/secrets.env. GEMINI_API_KEY for the Gemini planner, ANTHROPIC_API_KEY
@@ -68,7 +70,9 @@ def log_dir() -> Path:
 
 
 TICK_S = 0.2
-PLANNER = "agent.model:create_brain"
+# The planner factory, "module:factory" with factory(BrainInfo) -> Brain. brains.scripted:create is the offline
+# stand-in (no model, no keys); WL_PLANNER or --planner picks it.
+PLANNER = os.environ.get("WL_PLANNER", "agent.model:create_brain")
 # System 1 plugs in here: "module:factory", where factory(on_status) returns an object with
 # `status`, and async run(), route(text), update(context), frame(jpeg, where), robot_said(text)
 # and observe() (see brains/interface.py System1). Default: Jev labels + the Gemini Live observer
@@ -703,6 +707,24 @@ class Hub:
         asyncio.create_task(self.system1.run())
         asyncio.create_task(self._system1_feed())
 
+    def _s1_vocabulary(self, s: Session) -> None:
+        """PLAN 8.5: System 1's target words include this session's object_type enum (the registry's loaded
+        types plus the fixed pickupable vocabulary), e.g. brains.system1_jev.set_vocabulary."""
+        types = list(getattr(getattr(s.runtime, "tools_ctx", None), "skill_types", None) or [])
+        if not types or self.system1 is None:
+            return
+        fn = getattr(self.system1, "set_vocabulary", None)
+        if not callable(fn) and self.system1_spec:
+            try:
+                fn = getattr(importlib.import_module(self.system1_spec.partition(":")[0]), "set_vocabulary", None)
+            except Exception:  # noqa: BLE001
+                fn = None
+        if callable(fn):
+            try:
+                fn(types)
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+
     def _on_s1_status(self, status: str, detail: str = "") -> None:
         self.s1_status, self.s1_detail = status, detail
         broadcast(self.clients, dumps({"type": "system1", "status": status, "detail": detail}))
@@ -849,6 +871,7 @@ class Hub:
             if callable(getattr(new.runtime, "set_step_mode", None)):
                 new.runtime.set_step_mode(self.step_mode)
             self.feed = CameraFeed(self._cameras_for(new))
+            self._s1_vocabulary(new)
             broadcast(self.clients, dumps({**new.init_message(), "meta": self.meta()}))
             broadcast(self.clients, dumps(new.memory_message()))
 
@@ -1020,9 +1043,19 @@ async def main() -> None:
     ap.add_argument("--cameras", default="auto", choices=["auto", "tap", "world", "frames", "none"],
                     help="auto: the factory's frame source, world frames on lite, else viz FrameTap (5565/5602)")
     ap.add_argument("--port-offset", type=int, default=None, help="shift the FrameTap ports (WL_PORT_OFFSET)")
+    ap.add_argument("--planner", default=PLANNER,
+                    help="planner factory module:attr (brains.scripted:create runs offline without keys)")
+    ap.add_argument("--system1", default=SYSTEM1,
+                    help="System 1 factory module:attr, or off (tests.kept.system1_stub:create is the offline stub)")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="sim clock speed; >1 only with a scripted planner (models answer in wall time)")
     args = ap.parse_args()
     load_env_files()
-    hub = Hub(args.scene, args.profile, cameras=args.cameras, port_offset=args.port_offset)
+    hub = Hub(args.scene, args.profile, cameras=args.cameras, port_offset=args.port_offset, system1=args.system1)
+    if args.planner != "agent.model:create_brain":
+        hub.deps.create_planner = lambda info, spec=args.planner: _import(spec)(info)
+    if args.speed != 1.0:
+        hub.deps.clock = lambda _speed, k=args.speed: _import("sim.clock:SimClock")(k)
     hub.deps.resolve()
     try:
         try:
