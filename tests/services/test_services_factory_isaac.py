@@ -13,16 +13,16 @@ pytest.importorskip("zmq")
 from api.execution import ExecutionManager, Rejected
 from api.results import validate_envelope
 from tests.fakes.fake_body_server import FakeBodyServer
-from tests.fakes.fake_p1_world import FakeP1World
+from tests.fakes.fake_p1_world import FakeP1World, free_port_offset
 
-OFF = 460
 
 
 @pytest.fixture
 def fake_stack(monkeypatch):
-    monkeypatch.setenv("WL_PORT_OFFSET", str(OFF))
-    p1 = FakeP1World("procthor-train-38", port_offset=OFF).start()
-    body = FakeBodyServer(port_offset=OFF, motion_s=0.5).start()
+    off = free_port_offset()
+    monkeypatch.setenv("WL_PORT_OFFSET", str(off))
+    p1 = FakeP1World("procthor-train-38", port_offset=off).start()
+    body = FakeBodyServer(port_offset=off, motion_s=0.5).start()
     yield p1, body
     body.stop()
     p1.stop()
@@ -80,7 +80,7 @@ def test_bringup_pick_through_p1_attach_ops_m2b(monkeypatch):
     attaches through P1 (STEPPING STONE, labelled)."""
     from robot.factory import build
     from sim.clock import SimClock
-    off = OFF + 5
+    off = free_port_offset()
     monkeypatch.setenv("WL_PORT_OFFSET", str(off))
     p1 = FakeP1World("procthor-train-38", port_offset=off, m2b=True).start()
     fbody = FakeBodyServer(port_offset=off, motion_s=0.2).start()

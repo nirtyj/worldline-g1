@@ -21,13 +21,18 @@ Backend = Literal["groot", "sonic_arm_script", "kinematic_attach", "lite"]
 SkillLabel = Literal["target", "experimental", "stepping_stone"]
 VOCAB_PICKUPABLE = "@vocab:pickupable"
 
-# backend -> the executor name results carry
-EXECUTOR_OF_BACKEND: dict[str, str] = {"groot": "groot_sonic", "sonic_arm_script": "sonic_arm_script",
+# backend -> the executor name results carry. `groot` is groot_arms (owner decision (b), PLAN §0.7): GR00T N1.7 arm and
+# Dex3 joint chunks through the body `arm` op; it replaced the SONIC-token route groot_sonic (services/executors/).
+EXECUTOR_OF_BACKEND: dict[str, str] = {"groot": "groot_arms", "sonic_arm_script": "sonic_arm_script",
                                        "kinematic_attach": "kinematic_attach", "lite": "lite"}
 
-# Selection order by profile (PLAN 6.4)
+# Retired executor names -> what replaced them. A profile that still lists one gets a stub that is always down.
+DEPRECATED_EXECUTORS: dict[str, str] = {"groot_sonic": "groot_arms"}
+
+# Selection order by profile (PLAN 6.4). `full` runs groot_then_script: GR00T first, then the scripted arm; until the
+# body's arm script exists (B.7) the kinematic attach is the labelled STEPPING STONE behind it.
 BACKEND_ORDER: dict[str, tuple[str, ...]] = {
-    "full": ("groot", "sonic_arm_script"),
+    "full": ("groot", "sonic_arm_script", "kinematic_attach"),
     "sonic": ("sonic_arm_script",),
     "bringup": ("kinematic_attach",),
     "lite": ("lite",),
@@ -44,10 +49,12 @@ class SkillSpec:
     backend: Backend = "lite"
     label: SkillLabel = "target"
     status: Literal["available", "unofficial", "planned"] = "available"
-    embodiment_tag: str | None = None              # "UNITREE_G1_SONIC"
-    checkpoint: str | None = None
+    embodiment_tag: str | None = None              # "new_embodiment" (groot_arms) | "UNITREE_G1_SONIC" (retired)
+    checkpoint: str | None = None                  # "nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace@7f78beb"
     policy_port: int | None = None
-    prompt_template: str = ""                      # "grab the bottle" | "pick up the {label} with the {arm} hand"
+    policy_endpoint: str | None = None             # the PolicyServer that serves `checkpoint` ("tcp://127.0.0.1:5550");
+                                                   # the executor's WL_GROOT_ENDPOINT / profile setting wins (tunnels)
+    prompt_template: str = ""                      # a trained annotation, or "move the {label} to the plate"
     hand_type: Literal["dex3", "inspire", "umi"] = "dex3"   # != dex3 -> UI flag "hand_mismatch"
     initial_token: str | None = None
     initial_blend_s: float = 1.0
@@ -158,5 +165,5 @@ class StaticSkillRegistry:
         return None, why
 
 
-__all__ = ["Backend", "SkillLabel", "VOCAB_PICKUPABLE", "EXECUTOR_OF_BACKEND", "BACKEND_ORDER", "SkillSpec",
-           "SkillRegistry", "expand_types", "StaticSkillRegistry"]
+__all__ = ["Backend", "SkillLabel", "VOCAB_PICKUPABLE", "EXECUTOR_OF_BACKEND", "DEPRECATED_EXECUTORS", "BACKEND_ORDER",
+           "SkillSpec", "SkillRegistry", "expand_types", "StaticSkillRegistry"]

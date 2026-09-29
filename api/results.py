@@ -39,6 +39,15 @@ MANIP_EXECUTORS: tuple[str, ...] = ("groot_arms", "groot_sonic", "sonic_arm_scri
 TARGET_EXECUTORS: tuple[str, ...] = ("sonic_walk", "groot_arms", "groot_sonic")
 
 
+# The trace's `result` row (agent/harness.py Runtime._log_result; docs/api.md §3). Every row carries these fields,
+# whatever produced it: a tool that ran (kind "tool"), a line of speech ("speech"), recall ("recall") or a rejection
+# ("rejection", status "rejected"; execution_id is None only for a SCHEMA rejection). `skill` is kept as the old name
+# of `tool`; rows also carry action, source, executor, summary and data.
+RESULT_ROW_KINDS: tuple[str, ...] = ("tool", "speech", "recall", "rejection")
+RESULT_ROW_FIELDS: tuple[str, ...] = ("kind", "execution_id", "tool", "status", "observation_id", "generation",
+                                      "control_epoch", "t_start", "t_end", "late")
+
+
 def is_fallback(executor: str | None) -> bool:
     return executor in STEPPING_STONE_EXECUTORS
 
@@ -324,6 +333,7 @@ def validate_envelope(d: Any) -> list[str]:
 
 
 __all__ = ["EnvelopeStatus", "ENVELOPE_STATUSES", "ResultSource", "STEPPING_STONE_EXECUTORS",
+           "RESULT_ROW_KINDS", "RESULT_ROW_FIELDS",
            "NAV_EXECUTORS", "MANIP_EXECUTORS", "TARGET_EXECUTORS", "is_fallback", "is_target", "ToolResult", "SpeakResult", "NamedLocation",
            "ListLocationsResult", "NavigateResult", "ReachabilityResult", "ManipulationResult", "WaitResult",
            "RecallResult", "WAIT_TO_ENVELOPE", "LEGACY_STATUS", "envelope_status", "typed_data", "finish",

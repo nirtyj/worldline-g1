@@ -192,7 +192,8 @@ def test_other_side_resolves_from_the_live_map_and_checks_the_golden_line():
     res, _ = asyncio.run(_play(page, suite.other_side, "sonic"))
     assert res["passed"], res
     assert "LAYOUT had 'stove_1 (stove) is between counter_2b and counter_2a': True" in res["note"]
-    assert res["fallback_pass"] and res["house"] == "K10" and res["binding_status"] == "flagged"
+    assert res["fallback_pass"] and res["house"] == "K10"
+    assert res["binding_status"] == suite.BIND.scenario("other_side").get("status", "ok")      # flagged until R.5
 
 
 def test_summary_counts_target_and_fallback_passes_per_executor():

@@ -6,12 +6,18 @@ arm_script, waist scan, vla_start/stop, the halt lane on PUSH 5612 with a `body.
 is M2b/M3 work on the body side; until then:
 
     halt()     = a `stop` request (planner IDLE, never command{stop}) with a 30 ms reply budget. `stopped` is True
-                 only when the body acknowledged within the budget (PLAN §5.6: "stopped" means latched).
+                 only when the body acknowledged within the budget (PLAN §5.6: "stopped" means latched); an
+                 unacknowledged halt is re-sent every 100 ms by robot/health.py until the body acks it.
     leases     = none: one motion at a time is the body's own rule (a new motion pre-empts the active one); the
                  runtime's validator (C7) keeps one `body` execution at a time.
     reposition = go_to with a tighter final tolerance (labelled interim in results).
 
 Every BodyOp resolves to {"state": "succeeded"|"failed"|"canceled", "data": {...}} (the body's terminal event).
+
+GT confinement (PLAN §6.2): wl-body's `body.state` carries its own copy of P1's pose stream. SonicBody passes on only
+the body's control fields (BODY_STATE_KEYS) and never judges health or rest from simulator truth: the real-time
+factor is world/'s (WorldModel.sim_health, applied by robot/health.py), and a halt receipt's `at_rest` comes from
+`speed_fn` (the factory passes WorldModel.planar_speed).
 """
 
 from __future__ import annotations
@@ -25,6 +31,11 @@ from typing import Any
 from api.types import ServiceHealth
 
 TERMINAL = ("succeeded", "failed", "canceled")
+HALT_MARGIN_S = 0.003          # of the 30 ms halt budget, kept for the bridge around SonicBody.halt
+# The body.state fields the runtime may use (docs/contracts/m1.md §3.4): control, faults, the active op, the deploy
+# and mux links. Pose and timing copies of P1's stream are not passed on (world/ owns them).
+BODY_STATE_KEYS = ("in_control", "control_started", "fault", "active", "deploy", "mux", "nav", "tick", "mode",
+                   "lease", "halt_epoch", "latched", "arm", "carry")
 
 
 class BodyOp:
@@ -85,13 +96,16 @@ class SonicBody:
     name = "sonic_walk"
 
     def __init__(self, client: Any = None, *, port_offset: int | None = None, host: str = "127.0.0.1",
-                 halt_budget_ms: float = 30.0, sim_control: Any = None, connect_wait_s: float = 10.0):
+                 halt_budget_ms: float = 30.0, sim_control: Any = None, connect_wait_s: float = 10.0,
+                 speed_fn: Any = None):
         if client is None:
             from body.client import BodyClient
             client = BodyClient(port_offset=port_offset, host=host).connect(wait_s=connect_wait_s)
         self.client = client
         self.halt_budget_s = halt_budget_ms / 1000.0
         self.sim_control = sim_control                  # estop engages the band first (sim)
+        self.speed_fn = speed_fn                        # () -> planar m/s | None (WorldModel.planar_speed)
+        self._halt_box: dict[int, dict] = {}            # epoch -> the stop reply (for re-sends and late acks)
         self.halt_epoch = 0
         self.latched = False
         self.estopped = False
@@ -216,22 +230,42 @@ class SonicBody:
     # ------------------------------------------------------------------ halt / resume / estop
     def halt(self, epoch: int | None = None) -> dict:
         """Latch HOLD: a body `stop` (planner IDLE) within a 30 ms reply budget. Never command{stop}."""
+        t0 = time.monotonic()
         self.halt_epoch = int(epoch) if epoch is not None else self.halt_epoch + 1
         self.latched = True
+        # the whole call, the bridge's bookkeeping included, stays inside the 30 ms budget (PLAN §5.6)
+        acked = self.send_halt(self.halt_epoch, self.halt_budget_s - (time.monotonic() - t0) - HALT_MARGIN_S)
+        return {"accepted": True, "stopped": bool(acked), "at_rest": self._at_rest(), "mode": "HOLD",
+                "body_epoch": self.halt_epoch, "source": "sonic-mux",
+                "via": "body stop op (M1 body has no halt lane)"}
+
+    def send_halt(self, epoch: int, wait_s: float) -> bool:
+        """One halt attempt for `epoch` (a body `stop`); True once the body has acked this epoch's halt, including
+        a late reply to an earlier attempt. robot/health.py HaltResender calls this every 100 ms until True."""
+        box = self._halt_box.setdefault(int(epoch), {})
+        if box.get("acked"):
+            return True
         done = threading.Event()
-        box: dict[str, Any] = {}
 
         def run():
-            box["rep"] = self._oneshot("stop", {}, 2.0)
+            rep = self._oneshot("stop", {}, 2.0)
+            if (rep or {}).get("ok"):
+                box["acked"] = True
             done.set()
 
         self._spawn(run)
-        acked = done.wait(self.halt_budget_s) and bool((box.get("rep") or {}).get("ok"))
-        st = self.state()
-        speed = _speed(st)
-        return {"accepted": True, "stopped": bool(acked), "at_rest": speed is not None and speed < 0.05,
-                "mode": "HOLD", "body_epoch": self.halt_epoch, "source": "sonic-mux",
-                "via": "body stop op (M1 body has no halt lane)"}
+        done.wait(max(0.0, wait_s))
+        return bool(box.get("acked"))
+
+    def halt_acked(self, epoch: int) -> bool:
+        return bool(self._halt_box.get(int(epoch), {}).get("acked"))
+
+    def _at_rest(self) -> bool | None:
+        try:
+            v = self.speed_fn() if callable(self.speed_fn) else None
+        except Exception:  # noqa: BLE001
+            v = None
+        return None if v is None else bool(v < 0.05)
 
     def resume(self, epoch: int | None = None) -> None:
         self.latched = False
@@ -255,14 +289,18 @@ class SonicBody:
 
     # ------------------------------------------------------------------ state
     def state(self) -> dict:
-        st = dict(self.client.last_state or {})
+        raw = dict(self.client.last_state or {})
+        st = {k: raw[k] for k in BODY_STATE_KEYS if k in raw}
         age = time.monotonic() - float(getattr(self.client, "last_state_mono", 0.0) or 0.0)
         st["age_s"] = round(age, 3)
         st["mode"] = _mode(st, self.latched, self.estopped)
         st["halt_epoch"] = self.halt_epoch
+        st["latched"] = self.latched
         return st
 
     def health(self) -> ServiceHealth:
+        """The body's own health (link, fault, deploy, control). The simulator's RTF is not the body's: world/
+        judges it (WorldModel.sim_health) and robot/health.py applies it to the capabilities."""
         st = self.state()
         if self.estopped:
             return ServiceHealth(False, "estop", "operator kill button; P2 restart required")
@@ -275,11 +313,6 @@ class SonicBody:
             return ServiceHealth(False, "down", "deploy not alive")
         if not st.get("in_control", True):
             return ServiceHealth(False, "down", "SONIC not in control")
-        rtf = (st.get("gt_pose") or {}).get("rtf")
-        if isinstance(rtf, (int, float)) and rtf < 0.85:
-            return ServiceHealth(False, "unsafe", f"rtf {rtf:.2f}")
-        if isinstance(rtf, (int, float)) and rtf < 0.95:
-            return ServiceHealth(True, "degraded", f"rtf {rtf:.2f}")
         return ServiceHealth(True, "ok")
 
     def close(self) -> None:
@@ -294,17 +327,6 @@ def _quiet(fn, *a, **kw):
         return fn(*a, **kw)
     except Exception:  # noqa: BLE001
         return None
-
-
-def _speed(st: dict) -> float | None:
-    gp = st.get("gt_pose") or {}
-    for k in ("speed", "v"):
-        if isinstance(gp.get(k), (int, float)):
-            return float(gp[k])
-    pose = st.get("pose") or {}
-    if isinstance(pose.get("speed"), (int, float)):
-        return float(pose["speed"])
-    return None
 
 
 def _mode(st: dict, latched: bool, estopped: bool) -> str:

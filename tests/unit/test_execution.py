@@ -194,6 +194,7 @@ def test_run_execution_escalates_cancel_then_halt_and_always_resolves():
     res, halts = asyncio.run(main())
     assert res.status == "timed_out" and res.data["reason"] == "timeout"
     assert "ignored cancel; halted" in res.data["detail"] and halts
+    assert res.data["halted_by_runtime"] is True             # the harness releases its own halt (_finish)
 
 
 def test_run_execution_turns_a_capability_rejection_into_a_result():

@@ -8,7 +8,8 @@
 # /work/worldline-g1/assets/houses/<id>/house_info.json + occupancy.npz, built through world/ exactly as the
 # runtime builds them: world.lite_world.LiteWorld -> static map, truth; tests/eval/test_scenes.py re-checks it):
 #   surface names   world/mapgen.py on the G1 nav grid (THOR's naming rule, ported)
-#   user_surface    world/mapgen.py's rule (the surface whose stand is nearest the start)
+#   user_surface    world/mapgen.py's rule as the G1 profiles run it (config/g1.yaml mapgen: `placeable`, the surface
+#                   whose stand is nearest the start among those a G1 can place on from the stand)
 #   object surface  world/where.py at scene load (the initial pose; reset_scene restores it)
 #   heights         object AABB bottom/top above the floor (m); the G1 reach band is api.types.RobotProfile
 #                   reach_h_min_m .. reach_h_max_m (0.55 .. 1.20 m today)
@@ -56,45 +57,48 @@ houses:
       mug_2:         {type: mug, surface: kitchen_counter_1b, room: kitchen, height_m: [0.94, 1.02], dynamic: true}
     absent_types: [banana]
     walk_m:                                            # world/mapgen edge lengths on the G1 nav grid
-      start>bedroom_dresser_1b: 4.82
-      bedroom_dresser_1b>kitchen_counter_1a: 6.08
-      start>bedroom_bed_1a: 5.95
-      bedroom_bed_1a>bedroom_dresser_1b: 2.93
-      start>kitchen_counter_1a: 1.73
-      bedroom_dresser_1a>kitchen_counter_1a: 6.89
+      start>bedroom_dresser_1b: 4.90
+      bedroom_dresser_1b>kitchen_counter_1a: 7.27     # R.5: the stand faces the counter's real top run
+      start>bedroom_bed_1a: 5.94
+      bedroom_bed_1a>bedroom_dresser_1b: 3.09
+      start>kitchen_counter_1a: 2.52
+      bedroom_dresser_1a>kitchen_counter_1a: 8.00
+      start>kitchen_dining_table_1b: 1.98
   H15:
     scene: procthor-train-15
     thor_scene: procthor-train-15
     rooms: [bathroom, bedroom, kitchen, living_room]
     start: {x: 9.25, y: 2.75, room: living_room}
-    user_surface: living_room_arm_chair_1a             # same name as THOR's living_room_arm_chair_1 stretch a
+    user_surface: living_room_dining_table_1a          # config/stack.yaml override (M2 gap 2): a 0.86 m flat top in the same
+                                                       # room; THOR's rule gives the armchair, whose AABB top is its backrest
     user_surface_thor: living_room_arm_chair_1
-    user_surface_flags: [chair_top_is_backrest]
-    user_surface_proposed: living_room_dining_table_1a # 0.86 m flat top in the same room; needs mapgen's user_surface override
     objects:
       apple_1:     {type: apple, surface: kitchen_counter_1b, room: kitchen, height_m: [0.94, 1.05], dynamic: true}
     landmarks:
       microwave_1: {type: microwave, surface: kitchen_dining_table_1a, room: kitchen}
     absent_types: []
     walk_m:
-      start>kitchen_counter_1b: 6.16
-      kitchen_counter_1b>living_room_arm_chair_1a: 7.30
-      start>living_room_arm_chair_1a: 1.52
+      start>kitchen_counter_1b: 7.22                   # R.5: the stand is inside the U-shaped counter, at its back run
+      kitchen_counter_1b>living_room_arm_chair_1a: 8.42
+      start>living_room_arm_chair_1a: 1.62
+      kitchen_counter_1b>living_room_dining_table_1a: 10.32
+      start>living_room_dining_table_1a: 3.24
   K10:
     scene: ithor-FloorPlan10
     thor_scene: FloorPlan10
     rooms: [kitchen]
     start: {x: -3.125, y: -1.575, room: kitchen}
-    user_surface: sink_basin_1                         # same as THOR
+    user_surface: counter_1a                           # G1 map (`placeable` rule, as the runtime serves it); THOR:
+                                                       # sink_basin_1
     user_surface_thor: sink_basin_1
     objects:
       spatula_1:   {type: spatula, surface: counter_2b, room: kitchen, height_m: [0.90, 0.92], dynamic: true}
     landmarks:
-      stove_1:     {type: stove, near: counter_2b, room: kitchen}
+      stove_1:     {type: stove, near: counter_2a, room: kitchen}   # the nearest stand facing it (R.5)
     absent_types: []
     walk_m:
-      start>counter_2b: 4.27
-      counter_2b>counter_2a: 1.06
+      start>counter_2b: 4.69                           # R.5: counter_2 is cut at the stove; 2b starts past it
+      counter_2b>counter_2a: 1.58
 
 # The scenarios. `thor_limit_s` is the THOR suite's wall-clock limit; the G1 limit is derived as above.
 # `status`: ok | flagged (runs as written, but part of it cannot be exercised on the G1 today; see `flags`) |
@@ -165,26 +169,29 @@ scenarios:
     say: "Bring me the apple."
     target: apple_1
     thor_limit_s: 200
-    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_arm_chair_1a]
+    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_dining_table_1a]
     work: {scans: 3, picks: 1, places: 1}
     grasp: true
     status: flagged
-    flags: [user_surface_is_armchair]
+    flags: [apple_beyond_reach]
     note: >-
-      The apple is on kitchen_counter_1b (0.94 m, dynamic) with the start in the living room, as on THOR. The user
-      surface is an armchair whose AABB top (0.91 m) is the backrest, not the seat, so a place there is placed by the
-      attach shortcut at the wrong height. Proposal: user_surface living_room_dining_table_1a (0.86 m flat top).
+      The apple is on kitchen_counter_1b (0.94 m, dynamic) with the start in the living room, as on THOR. Since R.5 the
+      stand is inside the U-shaped counter at its back run, but the apple sits 0.44 m deep on the 0.59 m-deep top,
+      15 cm from the wall: the nearest spot the robot can stand (its 0.25 m body radius clear of the counter) is
+      about 0.7 m from it, and the G1 reaches 0.55 m (config/g1.yaml reach_fwd_m; a 20 deg waist lean puts the palm
+      at about 0.50 m in the arm kinematics). check_reachability answers `beyond_reach`, so on the G1 this scenario
+      ends with an honest "I can't reach it", not a delivery. The user surface is the dining table (M2 gap 2).
   question_midtask:
     house: H15
     say: "Bring me the apple."
     then: "What are you holding right now?"
     target: apple_1
     thor_limit_s: 200
-    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_arm_chair_1a]
+    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_dining_table_1a]
     work: {scans: 2, picks: 1, places: 1}
     grasp: true
     status: flagged
-    flags: [user_surface_is_armchair]
+    flags: [apple_beyond_reach]
   note_only:
     house: H15
     say: "By the way, my keys are usually on the kitchen counter."
@@ -277,12 +284,11 @@ scenarios:
     legs: [start>counter_2b, counter_2b>counter_2a]
     work: {scans: 2, picks: 1, places: 1}
     grasp: true
-    status: flagged
-    flags: [stretch_overlaps_stove]
+    status: ok
     note: >-
       MolmoSpaces FloorPlan10 has one wall counter prim (counter_top_2, y -2.40..0.50) with the stove built into it
-      (y -1.70..-0.90), where THOR had counter_1 and counter_2 either side of the stove. Mapgen splits it into
-      counter_2a (coffee-machine side), counter_2b (over the stove and the spatula) and counter_2c (toaster side),
-      so the spatula starts on counter_2b and the other side of the stove is counter_2a; the golden line changes
-      accordingly (either order is accepted). The suite also resolves both surfaces from the live map and truth at
-      run time. Proposal for world/: cut stretches at embedded appliances so no stretch covers the stove top.
+      (y -1.70..-0.90), where THOR had counter_1 and counter_2 either side of the stove. Since R.5 (world/mapgen.py
+      cuts stretches to the occupancy footprint minus built-in appliances) no stretch covers the stove top: counter_2a
+      is the coffee-machine side, counter_2b runs from the stove to the middle (with the spatula), counter_2c is the
+      toaster side. The golden line, regenerated from agent/layout.py on that map, is unchanged (either order is
+      accepted). The suite also resolves both surfaces from the live map and truth at run time.

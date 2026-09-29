@@ -51,7 +51,7 @@ if TYPE_CHECKING:                                     # pragma: no cover
 # or an (x, y, yaw) tuple. Implementations normalise it with world.model.xyyaw.
 PoseLike = Any
 
-CAPABILITIES = ("navigation", "manipulation", "observation", "speech", "body")
+CAPABILITIES = ("navigation", "manipulation", "observation", "speech", "body", "sim")
 
 
 # ----------------------------------------------------------------------
@@ -186,9 +186,12 @@ class BodyPort(Protocol):
     async def turn_to(self, yaw: float, *, tol_deg: float | None = None) -> BodyOpHandle: ...
     async def stop(self) -> BodyOpHandle: ...
     def halt(self, epoch: int | None = None) -> dict[str, Any]: ...
+    # optional: send_halt(epoch, wait_s) -> bool (acked). robot/health.py re-sends an unacked halt with it every
+    # 100 ms (PLAN 5.6); a body without it acks synchronously (lite).
     def resume(self, epoch: int | None = None) -> None: ...
     def estop(self, reason: str) -> dict[str, Any]: ...
-    def state(self) -> dict[str, Any]: ...        # {mode, active, pose, halt_epoch, latched, gt_pose{rtf}, ...}
+    def state(self) -> dict[str, Any]: ...        # {mode, active, halt_epoch, latched, in_control, fault, deploy}
+    # (no simulator truth: RTF is WorldModel.sim_health, speed is WorldModel.planar_speed; GT confinement)
     def health(self) -> ServiceHealth: ...
 
 
@@ -241,6 +244,8 @@ class WorldModel(Protocol):
 
     # the robot and its head camera
     def robot_pose(self) -> RobotPoseLike: ...
+    def planar_speed(self) -> float | None: ...                 # m/s from the GT pose (a halt receipt's at_rest)
+    def sim_health(self) -> Any: ...                            # world.sim_health.SimHealth: ok|degraded|unsafe, rtf
     def camera_pose(self, **view: Any) -> Any: ...               # world.perception.CameraPose
     def view_spec(self, cam_pose: Any) -> dict[str, Any]: ...    # an api.observation.ViewSpec as a dict
 

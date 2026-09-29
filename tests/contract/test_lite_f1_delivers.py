@@ -4,7 +4,6 @@ valid envelope with an observation id, and a stop mid-walk halts first and ackno
 
 from __future__ import annotations
 
-import asyncio
 
 import pytest
 
@@ -59,27 +58,17 @@ async def _one_fetch(backend: str):
 
 @pytest.mark.parametrize("backend", ["fake", "lite"])
 async def test_f1_delivers(backend):
-    # The lite body integrates poses over wall-scheduled ticks, so a stand can end a few cm off and a
-    # pick or place may honestly fail (out_of_workspace, no_room_in_reach). Up to three fresh runs.
-    import agent.memory
-    runs = []
-    base = agent.memory.ROOT
-    for i in range(3):
-        agent.memory.ROOT = base.parent / f"memory-{i}"          # each attempt starts without memory
-        rt, brain = await _one_fetch(backend)
-        runs.append(rt)
-        # every run, delivered or not, keeps the contract
-        for e in rt.history:
-            if e.result is None:
-                continue
-            assert validate_envelope(e.result) == [], (e.execution_id, validate_envelope(e.result))
-            assert e.result.observation_id, e.execution_id
-        if any(r["type"] == "delivered" for r in rt.tracer.rows):
-            break
-    rt = runs[-1]
+    # One run, no retries: the lite body integrates over sim time (M2a), so a fetch either delivers or the
+    # contract is broken.
+    rt, brain = await _one_fetch(backend)
+    for e in rt.history:
+        if e.result is None:
+            continue
+        assert validate_envelope(e.result) == [], (e.execution_id, validate_envelope(e.result))
+        assert e.result.observation_id, e.execution_id
     types = [r["type"] for r in rt.tracer.rows]
     assert "delivered" in types and "place_learned" in types, [
-        (e.execution_id, e.status, e.result.summary if e.result else None) for r in runs for e in r.history
+        (e.execution_id, e.status, e.result.summary if e.result else None) for e in rt.history
         if e.tool_name in ("manipulate", "check_reachability")]
     picks = [e for e in rt.history if e.tool_name == "manipulate" and e.action == "pick" and e.status == "succeeded"]
     places = [e for e in rt.history if e.tool_name == "manipulate" and e.action == "place" and e.status == "succeeded"]

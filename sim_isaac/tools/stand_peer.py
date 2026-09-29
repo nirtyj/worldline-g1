@@ -214,14 +214,15 @@ def check_camera(port: int, out_png: str | None, timeout_s: float = 10.0) -> dic
     if msg is None:
         return {"ok": False, "error": "no camera message"}
     keys = sorted(msg.keys())
-    b64 = msg["images"]["ego_view"]
+    key = msg.get("camera") or next(iter(msg["images"]))     # M2b: "head" (docs/contracts/p1_m2b.md §5.2)
+    b64 = msg["images"][key]
     img = cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_COLOR)  # sensor_server decode
     if out_png:
         Path(out_png).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(out_png, img[..., ::-1])  # decoded array is RGB (MuJoCo convention); imwrite wants BGR
     hz = (len(times) - 1) / (times[-1] - times[0]) if len(times) > 1 else None
     return {"ok": isinstance(b64, str) and img is not None and img.shape == (480, 640, 3)
-            and "timestamps" in msg and msg.get("ego_view") == b64,
+            and "timestamps" in msg and msg.get(key) == b64,
             "keys": keys, "shape": list(img.shape), "rx_hz": hz, "mean_rgb": img.reshape(-1, 3).mean(0).tolist(),
             "png": out_png}
 
@@ -243,6 +244,9 @@ def main():
     ap.add_argument("--reset", action="store_true", help="reset_robot to the spawn pose (band on) first")
     ap.add_argument("--load-only", type=float, default=0.0,
                     help="only generate deploy-like DDS traffic (lowcmd 500 Hz + Dex3 cmds) for N seconds")
+    ap.add_argument("--load-gains", choices=["train", "stiff"], default="train",
+                    help="--load-only gains: stiff holds legs and waist upright (the head camera then sits where "
+                         "world's upright-torso model puts it; sim_isaac/tools/detections_check.py)")
     ap.add_argument("--ops", action="store_true", help="exercise the REP ops (occupancy, topdown, record)")
     ap.add_argument("--out", default="/work/worldline-g1/outputs/m1/isaac/stand_test.json")
     a = ap.parse_args()
@@ -250,6 +254,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     if a.load_only > 0:
         peer = Peer(a.domain, a.iface)
+        if a.load_gains == "stiff":
+            peer.kp[:12], peer.kd[:12] = 350.0, 10.0
+            peer.kp[12:15], peer.kd[12:15] = 400.0, 10.0
         peer.start()
         time.sleep(a.load_only)
         print(f"LOAD_DONE sent={peer.sent} lowstate_rx={len(peer.ls_times)}", flush=True)

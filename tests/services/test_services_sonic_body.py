@@ -14,7 +14,8 @@ from tests.fakes.fixtures import fresh_lite
 
 @pytest.fixture
 def fake_body():
-    srv = FakeBodyServer(port_offset=451, motion_s=0.6).start()
+    from tests.fakes.fake_p1_world import free_port_offset
+    srv = FakeBodyServer(port_offset=free_port_offset(), motion_s=0.6).start()
     yield srv
     srv.stop()
 

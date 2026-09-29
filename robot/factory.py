@@ -5,9 +5,9 @@
             per-scene overrides such as `user_surface`.
 
     lite      LiteWorld(recorded house) + LiteBody (kinematic)            frames: LiteFrames (schematic; `frames: none` off)
-    bringup   IsaacGTWorldModel(P1 5600/5601) + SonicBody(wl-body 5610)   frames: viz FrameTap
+    bringup   IsaacGTWorldModel(P1 5600/5601) + SonicBody(wl-body 5610)   frames: IsaacFrames (head 5565 + render pose)
     sonic     same                                                        (+ scan/manip executors per profile)
-    full      same (+ groot_sonic stub)
+    full      same (+ groot_arms, experimental; services/executors/registry.py)
 """
 
 from __future__ import annotations
@@ -60,9 +60,12 @@ def build(profile: str | StackProfile, scene: str | None = None, clock: Any = No
         from world.isaac_client import IsaacGTWorldModel
 
         from .body_client import SonicBody
+        from world.sim_health import SimHealthConfig
         world = IsaacGTWorldModel(port_offset=prof.port_offset, scene_key=scene, map_params=mp, camera=cam,
-                                  user_surface=user_surface)
-        body = kw.get("body") or SonicBody(port_offset=prof.port_offset, sim_control=world)
+                                  user_surface=user_surface,
+                                  sim_health_cfg=SimHealthConfig.from_dict(prof.g1.get("sim_health")))
+        body = kw.get("body") or SonicBody(port_offset=prof.port_offset, sim_control=world,
+                                           speed_fn=world.planar_speed)
         frames = kw.get("frames") or (IsaacFrames(world, port_offset=prof.port_offset) if prof.frames == "isaac"
                                       else None)
     else:

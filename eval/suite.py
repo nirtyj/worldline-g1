@@ -161,7 +161,35 @@ class Run:
             "questions": sum(1 for _, text in self.said if text.rstrip().endswith("?")),
             "labels": len(self.rows("classified")),
             "s1_labels": sum(1 for r in self.rows("classified") if (r.get("directive") or {}).get("source") == "system1"),
+            **self.costs(),
         }
+
+    def costs(self) -> dict[str, int]:
+        """What this scenario cost in model calls (the page's call list: the planner's calls through
+        llmkit, rule-decided classifications, and System 1's label and observe calls)."""
+        calls = list(self.calls.values())
+        model = [c for c in calls if c.get("via") == "model"]
+        return {"model_calls": len(model),
+                "model_errors": sum(1 for c in model if c.get("status") == "error"),
+                "classify_calls": sum(1 for c in model if c.get("purpose") == "classify"),
+                "next_action_calls": sum(1 for c in model if c.get("purpose") == "next_action"),
+                "rule_classifies": sum(1 for c in calls if c.get("via") == "rule"),
+                "tokens_out": sum(int(c.get("tokens_out") or 0) for c in model),
+                "s1_route_calls": len(self.s1_calls("route")), "s1_observe_calls": len(self.s1_calls("observe"))}
+
+    def dump(self, path: Path) -> Path:
+        """This scenario's trace rows and model calls (no system prompts or schemas) as JSON lines."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        keep = ("n", "via", "purpose", "status", "t_start", "t_end", "latency_s", "tokens_in", "tokens_out",
+                "version_start", "version_end", "input", "response", "error")
+        with path.open("w") as f:
+            for r in self.trace:
+                f.write(json.dumps({"src": "trace", **r}, default=str) + "\n")
+            for _, c in sorted(self.calls.items()):
+                f.write(json.dumps({"src": "call", **{k: c.get(k) for k in keep}}, default=str) + "\n")
+            for t, text in self.said:
+                f.write(json.dumps({"src": "said", "t": t, "text": text}) + "\n")
+        return path
 
     def executors(self) -> dict[str, dict[str, int]]:
         return sc.executors_used(self.trace, self.frames_seen)
@@ -486,13 +514,16 @@ def summarize(results: list[dict[str, Any]], profile: str, tag: str) -> dict[str
                 d = by_exec.setdefault(ex, {"scenarios": 0, "passed": 0})
                 d["scenarios"] += 1
                 d["passed"] += int(r["passed"])
+    cost_keys = ("model_calls", "model_errors", "classify_calls", "next_action_calls", "rule_classifies",
+                 "tokens_out", "s1_route_calls", "s1_observe_calls")
     return {"tag": tag, "profile": profile, "wall": round(time.time()),
             "passed": sum(r["passed"] for r in results), "total": len(results),
             "target_passes": sum(r["target_pass"] for r in results),
             "fallback_passes": sum(r["fallback_pass"] for r in results),
             "by_executor": by_exec,
             "decisions": sum(r["decisions"] for r in results),
-            "tokens_in": sum(r["tokens_in"] for r in results), "results": results}
+            "tokens_in": sum(r["tokens_in"] for r in results),
+            "costs": {k: sum(int(r.get(k) or 0) for r in results) for k in cost_keys}, "results": results}
 
 
 def line(res: dict[str, Any]) -> str:
@@ -502,6 +533,7 @@ def line(res: dict[str, Any]) -> str:
     lab = f"  [{'; '.join(res['honesty'])}]" if res["honesty"] else ""
     return (f"{verdict:<5} {res['name']:<18} {res['seconds']:>6.1f}s/{res['time_limit_s']:<6.0f} decisions "
             f"{res['decisions']:>3}  rejected {res['rejected']}  recalls {res['recalls']}  tokens {res['tokens_in']:>6}  "
+            f"calls {res.get('model_calls', 0)}+{res.get('s1_route_calls', 0)}+{res.get('s1_observe_calls', 0)}  "
             f"labels {res['s1_labels']}/{res['labels']} by System 1  {res['note']}{lab}")
 
 
@@ -513,6 +545,8 @@ async def main() -> int:
     ap.add_argument("--profile", default="lite", choices=sorted(BIND.data["profiles"]))
     ap.add_argument("--time-scale", type=float, default=None, help="override the profile's time scale")
     ap.add_argument("--original", action="store_true", help="run THOR's text where scenes.yaml substituted one")
+    ap.add_argument("--out", default=None, help="summary JSON path (default: runs/eval/<stamp>_<profile>_<tag>.json)")
+    ap.add_argument("--trace-dir", default=None, help="write each scenario's trace rows, model calls and speech here")
     args = ap.parse_args()
     only = {s for s in args.only.split(",") if s}
     from websockets.asyncio.client import connect
@@ -532,16 +566,22 @@ async def main() -> int:
             except Exception as e:  # noqa: BLE001  (a broken scenario fails, the suite goes on)
                 passed, note = False, f"error: {e!r}"
             res = score(name, passed, note, time.monotonic() - t0, run)
+            if args.trace_dir:
+                res["trace_path"] = str(run.dump(Path(args.trace_dir) / f"{args.tag}_{name}.jsonl"))
             results.append(res)
             print(line(res), flush=True)
         reader.cancel()
     summary = summarize(results, args.profile, args.tag)
-    OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.profile}_{args.tag}.json"
+    path = Path(args.out) if args.out else OUT / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.profile}_{args.tag}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, indent=1))
+    c = summary["costs"]
     print(f"\n{summary['passed']}/{summary['total']} passed on {args.profile} "
           f"({summary['target_passes']} target, {summary['fallback_passes']} fallback: PASS* rests on a sim shortcut) · "
-          f"{summary['decisions']} decisions · {summary['tokens_in']} tokens in · {path.relative_to(ROOT)}")
+          f"{summary['decisions']} decisions · {summary['tokens_in']} tokens in · {path}")
+    print(f"  model calls: planner {c['model_calls']} ({c['classify_calls']} classify, {c['next_action_calls']} next "
+          f"action, {c['model_errors']} errors; {c['tokens_out']} tokens out), {c['rule_classifies']} classified by "
+          f"rule; System 1: {c['s1_route_calls']} label calls, {c['s1_observe_calls']} observe calls")
     for ex, d in sorted(summary["by_executor"].items()):
         tag = " (STEPPING STONE)" if ex in sc.stepping_stones() else ""
         print(f"  {ex}{tag}: {d['passed']}/{d['scenarios']} scenarios passed")

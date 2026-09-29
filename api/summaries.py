@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .reasons import hint
+from .reasons import AREA_OF_TOOL, hint
 
 FALLBACK_TAG = "fallback"
 
@@ -51,7 +51,7 @@ def summarize(tool: str, status: str, data: dict[str, Any], *, action: str | Non
         return rejection_summary(str(d.get("stage", "state")), str(reason or "rejected"))
     tail = ""
     if reason and status != "succeeded":
-        h = hint(str(reason))
+        h = hint(str(reason), AREA_OF_TOOL.get(tool))
         tail = f": {reason}" + (f" ({h})" if h else "")
 
     if tool == "speak":
@@ -110,7 +110,10 @@ def summarize(tool: str, status: str, data: dict[str, Any], *, action: str | Non
         o = _obj(d) if (d.get("object_id") or d.get("object_type")) else _obj(a)
         skill = d.get("skill")
         ex = d.get("executor")
-        label = ", ".join(x for x in (skill, FALLBACK_TAG if _fallback(ex) else None) if x)
+        exp = "experimental" if d.get("skill_label") == "experimental" and "experimental" not in str(skill) else None
+        fb = d.get("fallback_from") if isinstance(d.get("fallback_from"), dict) else {}
+        after = f"after {fb.get('executor')} {fb.get('reason')}" if fb else None     # groot_then_script
+        label = ", ".join(x for x in (skill, exp, FALLBACK_TAG if _fallback(ex) else None, after) if x)
         tag = f" [{label}]" if label else ""
         dur = f", {float(d['duration_s']):.1f} s" if d.get("duration_s") else ""
         if status == "succeeded":

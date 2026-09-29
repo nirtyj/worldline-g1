@@ -3,7 +3,7 @@
 profile: bringup
 world: isaac
 body: sonic                       # M2.2: BodyServer --backend kinematic (then executor kinematic_nav)
-perception_camera: ego_d435       # what P1 renders today (contract m1.md §1.4); head_sim once P1 adds it (M2b)
+perception_camera: head_sim       # P1.4 head camera (p1_m2b.md §5.1); an M1 P1 falls back to its d435 model
 scan_executor: turn_in_place
 manipulation:
   executors: [kinematic_attach]   # needs P1 attach/detach (M2b); NotSupported -> controller_unavailable

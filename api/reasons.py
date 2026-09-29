@@ -49,6 +49,7 @@ REACHABILITY = _r("reachability", {
     "needs_reposition": "navigate(location='reach_stance'), then check again",
     "too_far": "navigate to the suggested location, then check again",
     "out_of_workspace": "the arm can't reach it from this pose; try another stand",
+    "beyond_reach": "it sits deeper than the arm reaches from anywhere the robot can stand; tell the user",
     "hand_full": "put down what the robot holds first",
     "no_skill": "no skill can handle that object",
     "policy_unavailable": "the manipulation policy is down; tell the user",
@@ -72,6 +73,12 @@ MANIPULATION = _r("manipulation", {
     "timeout": "the skill took too long",
     "base_moving": "the robot moved since the reachability check; check again",
     "nothing_in_hand": "the robot holds nothing to place",
+})
+
+OBSERVATION = _r("observation", {
+    "timeout": "the look took too long; move on, or look again later",
+    "halted": "the robot was stopped",
+    "cancelled": "the look was cancelled",
 })
 
 GENERAL = _r("general", {
@@ -140,7 +147,7 @@ def lookup(code: str | None, area: Area | None = None) -> Reason | None:
                                             f"it can't be picked from there")
     if area is not None:
         table = {"navigation": NAVIGATION, "reachability": REACHABILITY, "manipulation": MANIPULATION,
-                 "validation": VALIDATION, "general": GENERAL}.get(area, {})
+                 "observation": OBSERVATION, "validation": VALIDATION, "general": GENERAL}.get(area, {})
         if code in table:
             return table[code]
     return ALL.get(code)
@@ -155,5 +162,11 @@ def is_known(code: str | None) -> bool:
     return lookup(code) is not None
 
 
-__all__ = ["Reason", "NAVIGATION", "REACHABILITY", "MANIPULATION", "GENERAL", "VALIDATION", "ALL",
+# the area whose hint a tool's result gets (a shared code such as `timeout` reads differently per tool)
+AREA_OF_TOOL: dict[str, Area] = {"navigate": "navigation", "check_reachability": "reachability",
+                                 "manipulate": "manipulation", "observe": "observation", "look": "observation",
+                                 "wait_and_observe": "observation"}
+
+__all__ = ["Reason", "NAVIGATION", "REACHABILITY", "MANIPULATION", "OBSERVATION", "GENERAL", "VALIDATION", "ALL",
+           "AREA_OF_TOOL",
            "INSIDE_OR_ON", "lookup", "hint", "is_known"]

@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from sim_isaac.wire import OpError
+
 
 def _plain(o: Any):
     """Make numpy scalars/arrays JSON/msgpack friendly."""
@@ -65,13 +67,18 @@ class GtServer:
                     raise ValueError("request must be a map with 'op'")
                 fn = self.handlers.get(req["op"])
                 if fn is None:
-                    rep = {"ok": False, "error": f"unknown op {req['op']!r}", "ops": sorted(self.handlers)}
+                    rep = {"ok": False, "error": f"unknown op {req['op']!r}", "code": "unknown_op",
+                           "ops": sorted(self.handlers)}
                 else:
+                    if isinstance(req.get("args"), dict):   # arguments at the top level or under "args"
+                        req = {**req["args"], **{k: v for k, v in req.items() if k != "args"}}
                     rep = fn(req) or {}
                     rep.setdefault("ok", True)
+            except OpError as e:                            # a contract error (docs/contracts/p1_m2b.md §11)
+                rep = e.reply()
             except Exception as e:  # noqa: BLE001
                 self.log(f"[gt_server] error: {e}\n{traceback.format_exc()}")
-                rep = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                rep = {"ok": False, "error": f"internal: {type(e).__name__}: {e}", "code": "internal"}
             rep = _plain(rep)
             self.rep.send(json.dumps(rep).encode() if is_json else msgpack.packb(rep, use_bin_type=True))
             self.requests += 1

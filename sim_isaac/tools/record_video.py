@@ -3,7 +3,10 @@
     /work/envs/isaaclab/bin/python -m sim_isaac.tools.record_video --port-offset 0 --seconds 60 \
         --out-dir /work/worldline-g1/outputs/m1/run-<ts> [--ego] [--tp]
 
---ego  SUB tcp://127.0.0.1:5565 (gear_sonic ego_view format; the base64 JPEG decodes to RGB, docs/contracts/m1.md 1.4)
+--ego  SUB tcp://127.0.0.1:5565 (gear_sonic format; M2b: the head camera, key "head"; the base64 JPEG decodes to RGB,
+       docs/contracts/m1.md 1.4, p1_m2b.md §5.2)
+--ego-view  SUB tcp://127.0.0.1:5566, the GR00T ego_view camera (only while enabled; --enable-ego enables it with a
+       ttl consumer "record_video" and keeps it alive)
 --tp   SUB tcp://127.0.0.1:5602 topic frame.tp (needs the app's --tp-camera; raw JPEG bytes; like the ego stream
        the JPEG was encoded from the RGB array, so cv2.imdecode returns RGB)
 Frames are written at the nominal rate (--fps); the frame's sim time is burned into the corner.
@@ -28,6 +31,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=60.0)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--ego", action="store_true")
+    ap.add_argument("--ego-view", action="store_true")
+    ap.add_argument("--enable-ego", action="store_true")
     ap.add_argument("--tp", action="store_true")
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--tp-fps", type=float, default=10.0)
@@ -44,6 +49,23 @@ def main():
         s.setsockopt(zmq.RCVHWM, 10)
         s.connect(f"tcp://127.0.0.1:{5565 + a.port_offset}")
         socks["ego"] = s
+    if a.ego_view:
+        s = ctx.socket(zmq.SUB)
+        s.setsockopt(zmq.SUBSCRIBE, b"")
+        s.setsockopt(zmq.RCVHWM, 10)
+        s.connect(f"tcp://127.0.0.1:{5566 + a.port_offset}")
+        socks["ego_view"] = s
+    ctl = None
+    if a.enable_ego:
+        ctl = ctx.socket(zmq.REQ)
+        ctl.setsockopt(zmq.RCVTIMEO, 5000)
+        ctl.connect(f"tcp://127.0.0.1:{5600 + a.port_offset}")
+
+        def _keep_ego():
+            ctl.send(msgpack.packb({"op": "camera", "name": "ego_view", "on": True, "consumer": "record_video",
+                                    "ttl_s": 5.0}))
+            return msgpack.unpackb(ctl.recv(), raw=False)
+        print("ego_view:", _keep_ego(), flush=True)
     if a.tp:
         s = ctx.socket(zmq.SUB)
         s.setsockopt(zmq.SUBSCRIBE, b"frame.tp")
@@ -68,17 +90,21 @@ def main():
         s.connect(f"tcp://127.0.0.1:{5601 + a.port_offset}")
         socks["topdown"] = s
     if not socks:
-        ap.error("pass --ego, --tp and/or --topdown")
+        ap.error("pass --ego, --ego-view, --tp and/or --topdown")
     poller = zmq.Poller()
     for s in socks.values():
         poller.register(s, zmq.POLLIN)
     writers, counts = {}, {k: 0 for k in socks}
     t0 = time.time()
+    next_keep = t0 + 2.0
     import signal
     stop = {"now": False}
     signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
     signal.signal(signal.SIGTERM, lambda *_: stop.update(now=True))
     while time.time() - t0 < a.seconds and not stop["now"]:
+        if ctl is not None and time.time() >= next_keep:
+            next_keep = time.time() + 2.0
+            _keep_ego()
         for s, _ in poller.poll(200):
             name = next(k for k, v in socks.items() if v is s)
             if name == "topdown":
@@ -100,10 +126,10 @@ def main():
                 cv2.putText(bgr, f"t {m['t_sim']:6.1f}s z {m['pelvis_z']:.2f} {'BAND' if m['band'] else ''}",
                             (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
                 t_sim, fps = None, a.tp_fps
-            elif name == "ego":
+            elif name in ("ego", "ego_view"):
                 m = msgpack.unpackb(s.recv(), raw=False)
-                rgb = cv2.imdecode(np.frombuffer(base64.b64decode(m["images"]["ego_view"]), np.uint8),
-                                   cv2.IMREAD_COLOR)
+                key = m.get("camera") or next(iter(m["images"]))
+                rgb = cv2.imdecode(np.frombuffer(base64.b64decode(m["images"][key]), np.uint8), cv2.IMREAD_COLOR)
                 bgr = rgb[..., ::-1].copy()  # decoded array is RGB (MuJoCo convention); VideoWriter wants BGR
                 t_sim = m.get("t_sim")
                 fps = a.fps
@@ -123,6 +149,9 @@ def main():
             counts[name] += 1
     for w in writers.values():
         w.release()
+    if ctl is not None:
+        ctl.send(msgpack.packb({"op": "camera", "name": "ego_view", "on": False, "consumer": "record_video"}))
+        ctl.recv()
     print("RECORDED", {k: {"frames": v, "path": str(out / f"{k}.mp4")} for k, v in counts.items()}, flush=True)
 
 

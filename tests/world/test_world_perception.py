@@ -104,16 +104,19 @@ def test_held_objects_are_reported_in_hand():
     assert p["objects"]["mug_1"]["where"] == "hand:left"
 
 
-def test_scan_views_and_frustum_consistency():
-    """A scan's LookData: views in Worldline's frame; what a view saw lies inside api.observation.in_frustum."""
+@pytest.mark.parametrize("kp", ["kitchen_counter_1a", "kitchen_counter_1c"])
+def test_scan_views_and_frustum_consistency(kp):
+    """A scan's LookData: views in Worldline's frame; what a view saw lies inside api.observation.in_frustum.
+    (At a stand close in to a crowded counter corner, e.g. house 38's L-shaped kitchen_counter_1b since R.5, more
+    items are only partly in view: their centre point is outside the approximate frustum while GT sees a corner.)"""
     from api.observation import LookData
     w = fresh_lite("procthor-train-38")
-    k = w.map.keypoints["kitchen_counter_1b"]
+    k = w.map.keypoints[kp]
     w.set_robot_pose(k.x, k.y, k.yaw)
     views = [w.view_spec(w.camera_pose(yaw_offset=math.radians(d))) for d in (-35, 0, 35)]
-    look = w.scan(views, at="kitchen_counter_1b")
+    look = w.scan(views, at=kp)
     assert isinstance(look, LookData) and len(look.views) == 3
-    assert look.at == "kitchen_counter_1b"
+    assert look.at == kp
     items = [it for lst in look.surfaces.values() for it in lst]
     assert items
     inside = 0

@@ -21,6 +21,14 @@ Naming (so the planner prompt and eval keep their words):
   landmarks  non-pickupable LANDMARK_TYPES: fridge_1, stove_1 (all burners one), tv_1; `near` = the nearest
              keypoint IN THE SAME ROOM (THOR drift fixed, PLAN §4.4).
 
+Stretches from footprints (M2 gap 1, R.5): a stretch starts as a segment of the furniture's AABB, then is cut to
+the furniture's real footprint in it: the occupancy grid's obstacle cells inside the segment, minus built-in appliances
+that break through the top (an item mostly inside the footprint, rising from below the top to at least the top: the
+stove in a counter). A cut moves an edge only when it moves by more than `footprint_min_cut_m`, so plain rectangular
+furniture keeps its AABB stretches exactly. So an L- or U-shaped counter's stands face the counter part that is
+really there (H15: the back run inside the U, not the open side of a 1.84 m-deep box), and a stretch never covers a
+stove top (K10 counter_2b). A segment with (almost) nothing left is skipped (`skipped`, "built-in appliance").
+
 Stand points (G1): 0.35-0.50 m from the stretch's front edge, facing the edge normal (so layout's 4-axis facing
 holds), free with >= 0.30 m clearance, in the furniture's room, reachable from the spawn, >= 0.5 m from other
 stands. (PLAN §7.1 said 0.45-0.60; with the G1 workspace's reach_fwd_m <= 0.55 from the pelvis that leaves only
@@ -38,6 +46,8 @@ import collections
 import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable
+
+import numpy as np
 
 from . import coords, vocab
 from .nav_grid import WorldGrid
@@ -73,6 +83,9 @@ class MapParams:
                                             # "placeable": the same among surfaces a G1 can place on from the stand
     user_max_stand_off_m: float = 0.45      # "placeable": regular stand-off at most this
     room_keypoints: bool = True
+    footprints: bool = True                 # cut stretches to the occupancy footprint (R.5); False: THOR's AABBs
+    footprint_min_cut_m: float = 0.10       # an edge moves only when the footprint moves it more than this
+    footprint_min_fill: float = 0.10        # a segment with less of its area left than this is skipped
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "MapParams":
@@ -308,6 +321,166 @@ def build_static_map(scene: SceneData, grid: WorldGrid, params: MapParams | None
                      skipped=skipped, topdown=topdown or _topdown(scene), source=source)
 
 
+STRUCTURE_TYPES = {"Wall", "Floor", "Ceiling", "Painting", "Window", "Doorway", "Doorframe", "Door"}
+
+
+def embedded_items(scene: SceneData, furniture: SceneItem) -> list[SceneItem]:
+    """Built-in appliances that break through this furniture's top: not pickupable, not structure, not a surface,
+    at least half of their floor area inside its AABB, rising from below the top (>5 cm) to at least the top (-3 cm)
+    (K10: the stove in counter_2; a cabinet under a counter stays below the top and is not one)."""
+    (x0, y0, _), (x1, y1, z1) = furniture.aabb
+    out = []
+    for it in scene.items:
+        t = it.thor_type
+        if it is furniture or vocab.is_pickupable(t) or vocab.is_surface(t) or t in STRUCTURE_TYPES \
+                or t in vocab.NON_SOLID_TYPES:
+            continue
+        (a0, b0, c0), (a1, b1, c1) = it.aabb
+        ov = max(0.0, min(x1, a1) - max(x0, a0)) * max(0.0, min(y1, b1) - max(y0, b0))
+        area = max(1e-6, (a1 - a0) * (b1 - b0))
+        if ov / area >= 0.5 and c0 < z1 - 0.05 and c1 >= z1 - 0.03:
+            out.append(it)
+    return out
+
+
+LINE_FILL = 0.2                 # a grid row/column of a stretch counts as furniture if this share of it is
+
+
+class Footprint:
+    """The furniture's real floor footprint on the occupancy grid (obstacle cells in its AABB), minus embedded
+    appliances. An edge is only ever cut over free floor: the strip it gives up must be mostly free floor inside the
+    house (the inside of an L or U), never a wall, the outside, or another obstacle, so furniture against walls keeps
+    its AABB stretches."""
+
+    def __init__(self, grid: WorldGrid, furniture: SceneItem, carve: list[SceneItem]):
+        d = grid.data
+        self.res = d.res
+        self.origin = d.origin
+        (x0, y0, _), (x1, y1, _) = furniture.aabb
+        h, w = d.occ.shape
+        self.i0 = max(0, int(math.floor((x0 - d.origin[0]) / d.res)))
+        self.i1 = min(w, int(math.ceil((x1 - d.origin[0]) / d.res)))
+        self.j0 = max(0, int(math.floor((y0 - d.origin[1]) / d.res)))
+        self.j1 = min(h, int(math.ceil((y1 - d.origin[1]) / d.res)))
+        win = (slice(self.j0, self.j1), slice(self.i0, self.i1))
+        if d.raw_codes is not None:
+            m = d.raw_codes[win] == 1
+            self.outside = d.raw_codes[win] == 2
+        else:
+            m = d.occ[win].copy()
+            self.outside = np.zeros_like(m)
+        self.floor = ~m & ~self.outside                  # free floor inside the house (before carving)
+        self.carved = bool(carve)
+        for it in carve:
+            (a0, b0, _), (a1, b1, _) = it.aabb
+            ci0 = max(0, int(math.floor((a0 - d.origin[0]) / d.res)) - self.i0)
+            ci1 = min(m.shape[1], int(math.ceil((a1 - d.origin[0]) / d.res)) - self.i0)
+            cj0 = max(0, int(math.floor((b0 - d.origin[1]) / d.res)) - self.j0)
+            cj1 = min(m.shape[0], int(math.ceil((b1 - d.origin[1]) / d.res)) - self.j0)
+            if ci1 > ci0 and cj1 > cj0:
+                m[cj0:cj1, ci0:ci1] = False
+        self.mask = m
+
+    def runs(self, along_x: bool, *, bridge_m: float, min_len_m: float) -> list[tuple[float, float]]:
+        """Intervals of the long axis (world coordinates) where the footprint has cells."""
+        prof = self.mask.any(axis=0 if along_x else 1)
+        base = (self.origin[0] + self.i0 * self.res) if along_x else (self.origin[1] + self.j0 * self.res)
+        idx = prof.nonzero()[0]
+        if not len(idx):
+            return []
+        runs: list[list[int]] = [[int(idx[0]), int(idx[0])]]
+        gap = int(round(bridge_m / self.res))
+        for k in idx[1:]:
+            if k - runs[-1][1] - 1 <= gap:
+                runs[-1][1] = int(k)
+            else:
+                runs.append([int(k), int(k)])
+        out = [(base + a * self.res, base + (b + 1) * self.res) for a, b in runs]
+        return [r for r in out if r[1] - r[0] >= min_len_m]
+
+    def _window(self, center: tuple[float, float], half: tuple[float, float]):
+        """Index ranges (in the mask) of the cells whose centre lies in the box, or None."""
+        ox, oy, r = self.origin[0], self.origin[1], self.res
+        ci0 = max(0, int(math.ceil((center[0] - half[0] - ox) / r - 0.5)) - self.i0)
+        ci1 = min(self.mask.shape[1], int(math.floor((center[0] + half[0] - ox) / r - 0.5)) + 1 - self.i0)
+        cj0 = max(0, int(math.ceil((center[1] - half[1] - oy) / r - 0.5)) - self.j0)
+        cj1 = min(self.mask.shape[0], int(math.floor((center[1] + half[1] - oy) / r - 0.5)) + 1 - self.j0)
+        if ci1 <= ci0 or cj1 <= cj0:
+            return None
+        return ci0, ci1, cj0, cj1
+
+    def fill(self, center: tuple[float, float], half: tuple[float, float]) -> float:
+        """Footprint share of the box's cells inside the house."""
+        w = self._window(center, half)
+        if w is None:
+            return 1.0
+        ci0, ci1, cj0, cj1 = w
+        inside = ~self.outside[cj0:cj1, ci0:ci1]
+        n = int(inside.sum())
+        return float((self.mask[cj0:cj1, ci0:ci1] & inside).sum()) / n if n else 1.0
+
+    def cut(self, center: tuple[float, float], half: tuple[float, float], min_cut: float
+            ) -> tuple[tuple[float, float], tuple[float, float], float] | None:
+        """The segment box cut to the footprint cells inside it: (center, half, fill), or None if nothing is left.
+        An edge moves only if it moves by more than `min_cut` over floor inside the house."""
+        w = self._window(center, half)
+        if w is None:
+            return center, half, 1.0
+        ci0, ci1, cj0, cj1 = w
+        sub = self.mask[cj0:cj1, ci0:ci1]
+        flo = self.floor[cj0:cj1, ci0:ci1]
+        fill = self.fill(center, half)
+        if not sub.any():
+            return None
+        # rows / columns that are really furniture: at least LINE_FILL of them (a wall line along the box's edge,
+        # one or two cells thick, is not)
+        rows = (sub.mean(axis=1) >= LINE_FILL).nonzero()[0]
+        cols = (sub.mean(axis=0) >= LINE_FILL).nonzero()[0]
+        if not len(rows) or not len(cols):
+            return center, half, fill
+        ox, oy, r = self.origin[0], self.origin[1], self.res
+        bx0, bx1 = center[0] - half[0], center[0] + half[0]
+        by0, by1 = center[1] - half[1], center[1] + half[1]
+
+        def trim(old: float, new: float, strip) -> float:
+            if abs(new - old) <= min_cut or strip.size == 0 or float(strip.mean()) < 0.5:
+                return old                               # a small move, or not over free floor
+            return new
+        nx0 = trim(bx0, ox + (self.i0 + ci0 + cols[0]) * r, flo[:, :cols[0]])
+        nx1 = trim(bx1, ox + (self.i0 + ci0 + cols[-1] + 1) * r, flo[:, cols[-1] + 1:])
+        ny0 = trim(by0, oy + (self.j0 + cj0 + rows[0]) * r, flo[:rows[0], :])
+        ny1 = trim(by1, oy + (self.j0 + cj0 + rows[-1] + 1) * r, flo[rows[-1] + 1:, :])
+        return ((nx0 + nx1) / 2, (ny0 + ny1) / 2), ((nx1 - nx0) / 2, (ny1 - ny0) / 2), fill
+
+
+def _segments(o: SceneItem, fp: Footprint | None, p: MapParams, along_x: bool
+              ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """The furniture's stretches along its long axis, as (centre, half) boxes before the footprint cut.
+
+    THOR's rule: n = ceil(length / segment_m) equal parts of the AABB. When a built-in appliance cuts the footprint,
+    the long axis is first split into runs where the furniture really is (the stove leaves a gap; gaps up to 0.10 m
+    are bridged, runs shorter than 0.25 m dropped) and each run is split by the same rule; one run covering the AABB
+    gives exactly THOR's parts."""
+    (x0, y0, _), (x1, y1, _) = o.aabb
+    lo, hi = (x0, x1) if along_x else (y0, y1)
+    runs = [(lo, hi)]
+    if fp is not None and fp.carved:
+        got = fp.runs(along_x, bridge_m=0.10, min_len_m=0.25)
+        if got and not (len(got) == 1 and got[0][0] - lo <= p.footprint_min_cut_m
+                        and hi - got[0][1] <= p.footprint_min_cut_m):
+            runs = got
+    out = []
+    for r0, r1 in runs:
+        n = max(1, math.ceil((r1 - r0) / p.segment_m - 1e-9))
+        for i in range(n):
+            a, b = r0 + (r1 - r0) * i / n, r0 + (r1 - r0) * (i + 1) / n
+            if along_x:
+                out.append((((a + b) / 2, (y0 + y1) / 2), ((b - a) / 2, (y1 - y0) / 2)))
+            else:
+                out.append((((x0 + x1) / 2, (a + b) / 2), ((x1 - x0) / 2, (b - a) / 2)))
+    return out
+
+
 def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int | None):
     counts: dict[tuple[str | None, str], int] = collections.Counter()
     used: list[tuple[float, float, float]] = []
@@ -329,8 +502,10 @@ def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int 
         (x0, y0, z0), (x1, y1, z1) = o.aabb
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         ex, ey = x1 - x0, y1 - y0
-        n = max(1, math.ceil(max(ex, ey) / p.segment_m - 1e-9))
         along_x = ex >= ey
+        fp = Footprint(grid, o, embedded_items(scene, o)) if p.footprints else None
+        segs = _segments(o, fp, p, along_x)
+        n = len(segs)
         room = scene.room_at(cx, cy) if scene.rooms else None
         counts[(room, kind)] += 1
         num = counts[(room, kind)]
@@ -339,10 +514,14 @@ def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int 
         if room and prefix:
             base = f"{room}_{base}"
         sibling_side = None
-        for i in range(n):
-            f = (i + 0.5) / n - 0.5
-            seg = (cx + f * ex, cy) if along_x else (cx, cy + f * ey)
-            half = (ex / n / 2, ey / 2) if along_x else (ex / 2, ey / n / 2)
+        for i, (seg, half) in enumerate(segs):
+            if fp is not None:
+                got = fp.cut(seg, half, p.footprint_min_cut_m)
+                if got is None or got[2] < p.footprint_min_fill:
+                    skipped.append((o.scene_id + (f"#{LETTERS[i]}" if n > 1 else ""),
+                                    "no footprint left in this stretch (built-in appliance)"))
+                    continue
+                seg, half, _ = got
             st = _find_stand(scene, grid, p, seg, half, along_x, i, n, room, used, comp, sibling_side)
             if st is None:
                 skipped.append((o.scene_id + (f"#{LETTERS[i]}" if n > 1 else ""), "no free stand in the room"))
@@ -482,7 +661,11 @@ def _name_landmarks(scene: SceneData, keypoints: dict[str, Keypoint]) -> dict[st
             room = scene.room_at(cx, cy)
             same = [k for k in keypoints.values() if k.room == room and k.kind in ("surface", "start")] \
                 or [k for k in keypoints.values() if k.room == room] or list(keypoints.values())
-            near = min(same, key=lambda k: math.hypot(k.x - cx, k.y - cy)).name if same else None
+            # the nearest stand that faces it (within 90 deg), else the nearest: a stand across a galley that faces
+            # the other counter is no place to look at a stove from
+            near = min(same, key=lambda k: (abs(coords.ang_diff(math.atan2(cy - k.y, cx - k.x), k.yaw)) > math.pi / 2
+                                            and k.kind == "surface", math.hypot(k.x - cx, k.y - cy))).name \
+                if same else None
             name = f"{vocab.landmark_base(t)}_{i}"
             out[name] = Landmark(name=name, type=vocab.landmark_base(t), label=vocab.LANDMARK_TYPES[t], thor_type=t,
                                  scene_ids=tuple(o.scene_id for o in group), center=(cx, cy, cz),

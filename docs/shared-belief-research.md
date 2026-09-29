@@ -1,5 +1,7 @@
 # Shared Belief for Embodied Agents
 
+> **Historical (THOR era).** A research design from Worldline on AI2-THOR (ludo-runtime@cb4ce53), before the G1 port. Kept as background; where it disagrees with PLAN.md or docs/M2.md, those win.
+
 *Research design, 2026-09-27. Status: proposal, nothing implemented yet.*
 
 **Thesis.** When robots and people share what they know about a house, they have to share **when** and

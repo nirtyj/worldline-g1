@@ -1,10 +1,10 @@
 """RobotBridge contract (PLAN 10, "test_robot_contract", parametrized over backends): the map and
-read shapes the runtime consumes, every tool's envelope, halt within 50 ms with stopped, cancel
-then result, observation ids, frozen enums. Rewrites ludo-runtime's tests/test_robot_presence.py."""
+read shapes the runtime consumes, every tool's envelope, halt within 30 ms with stopped (PLAN §5.6, F4), cancel
+then result, observation ids, frozen enums. Rewrites ludo-runtime's tests/test_robot_presence.py.
+The `sonic` backend is the live stack (`-m box`, WL_BOX=1; tests/contract/conftest.py)."""
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import pytest
@@ -12,10 +12,9 @@ import pytest
 from api.execution import ExecutionManager, Rejected
 from api.results import ToolResult, validate_envelope
 from api.services import RobotBridge
-from sim.clock import SimClock
-from tests.contract.conftest import BACKENDS, make_backend
+from tests.contract.conftest import BACKENDS, clock_for, make_backend
 
-SPEED = 40.0
+HALT_BUDGET_S = 0.030          # PLAN §5.6 and F4: halt() returns within 30 ms, stopped = acked in that time
 
 
 @pytest.fixture(params=BACKENDS)
@@ -24,7 +23,7 @@ def backend(request):
 
 
 def new(backend_name):
-    clock = SimClock(SPEED)
+    clock = clock_for(backend_name)
     return clock, make_backend(backend_name, clock)
 
 
@@ -139,7 +138,9 @@ async def test_halt_is_fast_and_stops_a_walk(backend):
     t0 = time.perf_counter()
     receipt = robot.halt()
     dt = time.perf_counter() - t0
-    assert dt < 0.05 and receipt["accepted"] is True and receipt["stopped"] is True
+    assert dt <= HALT_BUDGET_S, f"halt took {dt * 1000:.1f} ms"
+    assert receipt["accepted"] is True and receipt["stopped"] is True, receipt
+    assert receipt["mode"] == "HOLD" and "body_epoch" in receipt and "at_rest" in receipt
     res = await clock.wait_for(h.result(), 10.0)
     _check(res)
     assert res.status in ("failed", "cancelled") and res.data.get("reason") == "halted"

@@ -4,6 +4,8 @@ For the Worldline ui/server.py (websockets-based) or any other consumer:
 
     from viz.tap import FrameTap
     tap = FrameTap(port_offset=0)          # SUB head 5565, frames 5602, gt.pose 5601
+    tap = FrameTap(gt_pose=False)          # frames only: no SUB on 5601 (the runtime side, where only world/
+                                           # may read ground truth: ui/cameras.py uses this)
     ...
     jpeg = tap.jpeg("head")                # standard-colour JPEG bytes (R/B fixed) or None
     jpeg = tap.jpeg("chase")               # VizCams chase / top / overview (P1 frame.tp -> "chase", R/B fixed)
@@ -28,9 +30,11 @@ from viz.common import decode_head, ep, frame_from_msg, ports, split_msg, swap_r
 
 
 class FrameTap:
-    def __init__(self, port_offset: int | None = None, head_swap_rb: bool = True, **port_overrides: int):
+    def __init__(self, port_offset: int | None = None, head_swap_rb: bool = True, gt_pose: bool = True,
+                 **port_overrides: int):
         self.p = ports(port_offset, **port_overrides)
         self.head_swap_rb = head_swap_rb
+        self.gt_pose = gt_pose                                           # False: never subscribe to gt.pose
         self._lock = threading.Lock()
         self._frames: dict[str, tuple[bytes, dict, int, float]] = {}   # name -> (jpeg, meta, rev, t_rx)
         self._swap: dict[str, bool] = {"head": head_swap_rb}             # name -> JPEG is cv2-encoded RGB
@@ -87,9 +91,10 @@ class FrameTap:
     def _run(self) -> None:
         ctx = zmq.Context.instance()
         socks = {}
-        for name, port, topics, conflate in (("head", self.p["head"], [b""], True),
-                                             ("frames", self.p["frames"], [b"frame."], False),
-                                             ("gt", self.p["gt_pub"], [b"gt.pose"], False)):
+        subs = [("head", self.p["head"], [b""], True), ("frames", self.p["frames"], [b"frame."], False)]
+        if self.gt_pose:
+            subs.append(("gt", self.p["gt_pub"], [b"gt.pose"], False))
+        for name, port, topics, conflate in subs:
             s = ctx.socket(zmq.SUB)
             s.setsockopt(zmq.LINGER, 0)
             s.setsockopt(zmq.RCVHWM, 20)

@@ -324,7 +324,7 @@ class LiteBody:
         return {"mode": mode, "in_control": not self.estopped, "fault": self.fault, "active": active,
                 "pose": {"x": p.x, "y": p.y, "yaw": p.yaw, "speed": p.speed}, "halt_epoch": self.halt_epoch,
                 "latched": self.latched, "deploy": {"alive": not self.faults.deploy_down},
-                "gt_pose": {"rtf": 1.0, "age_s": 0.0}, "age_s": 0.0, "source": "lite"}
+                "age_s": 0.0, "source": "lite"}
 
     def health(self) -> ServiceHealth:
         if self.estopped:

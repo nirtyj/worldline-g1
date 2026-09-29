@@ -29,7 +29,8 @@ def test_bridge_is_a_robot_bridge_and_thor_shaped():
     p = r.perception()
     assert set(p) >= {"objects", "landmarks", "people", "source"}
     caps = r.capabilities()
-    assert set(caps) == {"navigation", "manipulation", "observation", "speech", "body"}
+    from api.services import CAPABILITIES
+    assert set(caps) == set(CAPABILITIES) and caps["sim"].ok        # lite: no real-time constraint
     assert all(h.ok for h in caps.values())
     assert r.observation_id().startswith("obs-g")
     assert "lite" in r.profile.stepping_stones

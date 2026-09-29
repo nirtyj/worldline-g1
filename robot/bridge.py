@@ -30,7 +30,7 @@ from api.types import ServiceHealth
 from world import coords
 
 from services.common import EventSink, HaltGate, start_execution
-from services.executors import GrootSonicExecutor, KinematicAttachExecutor, SonicArmScriptExecutor
+from services.executors import ExecutorContext, build_executor
 from services.locations import LocationsService
 from services.manipulation import ManipConfig, ManipulationService
 from services.navigation import NavConfig, NavigationService
@@ -39,6 +39,7 @@ from services.reachability import G1Workspace, ReachabilityModel
 from services.skills import build_registry
 from services.speech import SpeechService
 
+from .health import CapabilityPolicy, HaltResender, HealthMonitor
 from .profile import StackProfile
 
 ARMS = ("left", "right")
@@ -66,33 +67,37 @@ class G1Robot:
         scan["executor"] = profile.scan_executor
         self.obs = ObservationService(world, body, clock, ScanConfig.from_dict(scan), nav=self.nav, frames=frames,
                                       events=self.sink, gate=self.gate)
-        self.skill_registry = registry or build_registry(profile.manip_executors, world)
         manip_cfg = dict(g1.get("manipulation") or {})
         self.executors = self._executors(manip_cfg)
+        # a skill's health is its executor's health (the registry never changes the enum; PLAN §5.2)
+        self.skill_registry = registry or build_registry(
+            profile.manip_executors, world, health={b: ex.health for b, ex in self.executors.items()})
         self.reach = ReachabilityModel(world, G1Workspace.from_dict(ws), registry=self.skill_registry,
                                        observation=self.obs, nav=self.nav, body=body)
         self.manip = ManipulationService(world, self.skill_registry, self.reach, self.executors, clock,
                                          ManipConfig.from_dict(manip_cfg), nav=self.nav, observation=self.obs,
-                                         gate=self.gate, events=self.sink)
+                                         gate=self.gate, events=self.sink, policy=profile.manip_policy)
         self.speech = SpeechService(clock, self.sink, observation_id=self.observation_id)
+        self.policy = CapabilityPolicy(world, nav=self.nav, manip=self.manip, body=body,
+                                       observation_detail=lambda: f"{self.world.source} "
+                                                                  f"{getattr(self.world.cam, 'name', '')}")
+        self.monitor = HealthMonitor(self.capabilities, self.skill_registry, self.sink.emit,
+                                     sim_events=getattr(world, "drain_events", None))
+        self.halt_resender = HaltResender(body, self.sink.emit)
         self._active: dict[str, Execution] = {}
         self._handles: dict[str, Any] = {}
         self._map: dict | None = None
 
     def _executors(self, manip_cfg: dict) -> dict[str, Any]:
-        pick = manip_cfg.get("pick_phases_s")
-        place = manip_cfg.get("place_phases_s")
+        """Profile executor names -> executors by registry backend (services/executors/registry.py). The first
+        executor a profile lists for a backend wins."""
         out: dict[str, Any] = {}
         for name in self.stack_profile.manip_executors:
-            if name in ("lite", "kinematic_attach"):
-                ex = KinematicAttachExecutor(self.world, self.clock, pick_phases=pick, place_phases=place,
-                                             gate=self.gate, name=name,
-                                             attach_mode="kinematic" if name == "lite" else "follow")
-                out[ex.backend] = ex
-            elif name == "sonic_arm_script":
-                out["sonic_arm_script"] = SonicArmScriptExecutor()
-            elif name == "groot_sonic":
-                out["groot"] = GrootSonicExecutor()
+            ctx = ExecutorContext(name=name, world=self.world, body=self.body, clock=self.clock, gate=self.gate,
+                                  events=self.sink, profile=self.stack_profile, manip_cfg=manip_cfg,
+                                  port_offset=self.stack_profile.port_offset)
+            ex = build_executor(ctx)
+            out.setdefault(ex.backend, ex)
         return out
 
     # ================================================================== THOR-compatible read surface
@@ -104,8 +109,11 @@ class G1Robot:
             m["max_reach_height_m"] = self.profile.reach_h_max_m
             m["min_reach_height_m"] = self.profile.reach_h_min_m
             m["executors"] = self.executor_names()
-            m["camera"] = {"name": getattr(self.world.cam, "name", "head"),
-                           "sim_added": bool(getattr(self.world.cam, "sim_added", False))}
+            sim_added = bool(getattr(self.world.cam, "sim_added", False))
+            # PLAN §12.2: the sim-added head camera is labelled wherever it shows ("camera: head (sim-added)")
+            m["camera"] = {"name": getattr(self.world.cam, "name", "head"), "sim_added": sim_added,
+                           "caption": "camera: head (sim-added)" if sim_added else
+                           f"camera: {getattr(self.world.cam, 'name', 'head')}"}
             self._map = m
         return self._map
 
@@ -145,9 +153,8 @@ class G1Robot:
         cp = self.world.camera_pose(pose=p)
         st = self.body.state() if hasattr(self.body, "state") else {}
         hands = self.world.hands()
-        rtf = (st.get("gt_pose") or {}).get("rtf")
-        if rtf is None and hasattr(self.world, "rtf"):
-            rtf = self.world.rtf()
+        sim = self.world.sim_health() if hasattr(self.world, "sim_health") else None
+        rtf = sim.rtf if sim is not None else None
         active = [{"id": e.execution_id, "skill": e.tool_name, "status": e.status}
                   for e in sorted(self._active.values(), key=lambda e: e.execution_id)]
         bh = self.body.health()
@@ -164,7 +171,8 @@ class G1Robot:
             "body": {"mode": st.get("mode", "HOLD"), "lease": None, "upright": not p.fallen,
                      "rtf": rtf, "carry": any(hands.values()), "halt_epoch": self.gate.epoch,
                      "latched": self.gate.latched, "executor": self.nav.executor,
-                     "pelvis_z": round(p.pelvis_z, 3)},
+                     "pelvis_z": round(p.pelvis_z, 3), "sim": sim.to_dict() if sim is not None else None,
+                     "halt_resend": self.halt_resender.active},
         }
 
     def perception(self) -> dict:
@@ -174,6 +182,9 @@ class G1Robot:
     def start(self, execution: Execution):
         tool = execution.tool_name
         a = execution.args
+        g = self.policy.gate(tool, a)                      # R.6: sim DEGRADED / UNSAFE (world's RTF verdict)
+        if g is not None:
+            raise Rejected("capability", g.code, g.message)
         if tool == "speak":
             h = self.speech.start(str(a.get("text", "")), execution)
         elif tool == "list_locations":
@@ -224,16 +235,22 @@ class G1Robot:
         return start_execution(execution, work, clock=self.clock, observation_id=self.observation_id)
 
     def halt(self) -> dict:
-        """Latch HOLD within 30 ms (PLAN §5.6). Running body executions end failed(halted)."""
+        """Latch HOLD within 30 ms (PLAN §5.6). Running body executions end failed(halted). If the body did not ack
+        within the budget, robot/health.py re-sends the halt every 100 ms until it does."""
         t0 = time.perf_counter()
         epoch = self.gate.halt()
         receipt = dict(self.body.halt(epoch))
         receipt.setdefault("accepted", True)
+        if receipt.get("at_rest") is None:
+            v = self.world.planar_speed() if hasattr(self.world, "planar_speed") else None
+            receipt["at_rest"] = None if v is None else bool(v < 0.05)
         receipt["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        receipt["resend"] = bool(not receipt.get("stopped") and self.halt_resender.start(epoch))
         self.sink.emit("halted", epoch=epoch, stopped=receipt.get("stopped"))
         return receipt
 
     def resume(self, control_epoch: int | None = None) -> None:
+        self.halt_resender.cancel()
         self.gate.resume(control_epoch)
         self.body.resume(self.gate.epoch)
 
@@ -249,6 +266,8 @@ class G1Robot:
         return list(self._active.values())
 
     async def shutdown(self) -> None:
+        self.monitor.stop()
+        self.halt_resender.cancel()
         for h in list(self._handles.values()):
             h.cancel("shutdown")
         for h in list(self._handles.values()):
@@ -256,15 +275,23 @@ class G1Robot:
                 await asyncio.wait_for(h.result(), 3.0)
             except Exception:  # noqa: BLE001
                 pass
+        for ex in self.executors.values():
+            close = getattr(ex, "close", None)
+            if callable(close):
+                try:
+                    res = close()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:  # noqa: BLE001
+                    pass
         close = getattr(self.body, "close", None)
         if callable(close):
             close()
 
     # ================================================================== validation and prompt helpers
     def capabilities(self) -> dict[str, ServiceHealth]:
-        return {"navigation": self.nav.health(), "manipulation": self.manip.health(),
-                "observation": ServiceHealth(True, "ok", f"{self.world.source} {getattr(self.world.cam, 'name', '')}"),
-                "speech": ServiceHealth(True, "ok"), "body": self.body.health()}
+        """Service health with the sim's real-time verdict applied (robot/health.py CapabilityPolicy)."""
+        return self.policy.capabilities()
 
     def registry(self):
         return self.skill_registry
@@ -278,9 +305,13 @@ class G1Robot:
                 t = min(t, float(args["timeout_s"]))
             return t
         if tool == "manipulate":
-            s = self.skill_registry.select(str(args.get("action") or "pick"), str(args.get("object_type")),
-                                           args.get("arm") if args.get("arm") in ARMS else None)
-            return s.timeout_s() if s else 20.0
+            action, otype = str(args.get("action") or "pick"), str(args.get("object_type"))
+            arm = args.get("arm") if args.get("arm") in ARMS else None
+            s = self.skill_registry.select(action, otype, arm)
+            if s is None:
+                return 20.0
+            fb = self.manip.fallback_for(s, action, otype, arm)       # groot_then_script: room for the fallback
+            return s.timeout_s() + (fb.max_duration_s + self.manip.cfg.verify_hold_s if fb is not None else 0.0)
         if tool == "check_reachability":
             return 12.0
         if tool in ("observe", "look"):
@@ -295,4 +326,12 @@ class G1Robot:
         return self.obs.glance_record()
 
     def events(self) -> asyncio.Queue:
-        return self.sink.subscribe()
+        """A new subscriber queue of robot events. Subscribing (inside the runtime's loop) also starts the
+        capability monitor, the capability_changed producer (robot/health.py)."""
+        q = self.sink.subscribe()
+        try:
+            asyncio.get_running_loop()
+            self.monitor.start()
+        except RuntimeError:
+            pass
+        return q

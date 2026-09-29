@@ -6,13 +6,19 @@
     execute(pick)    select a healthy skill (profile backend order) -> stance check (moved > 5 cm / 5 deg since
                      the reachability -> failed(base_moving), body untouched) -> executor phases -> verify the hand
                      holds it (GT hands; the only hand verifier) -> ManipulationResult.
+                     policy `groot_then_script` (profile `full`, PLAN §6.4): when the GR00T attempt fails for any
+                     reason but halted / fell / cancelled and nothing is in the hand, the next healthy non-GR00T
+                     candidate runs at once (sonic_arm_script, else kinematic_attach) and the result is that
+                     attempt's, so it carries the fallback's executor and label; data.attempts lists both.
     execute(place)   target served from where the robot stands (else failed(target_not_here)) -> a free spot on
                      it within reach from here (else no_room_in_reach / no_room_on_surface) -> executor -> verify
                      where == target.
 Never walks (PLAN §1.3 #26): the base is where check_reachability judged it. `base_shift_m` reports any drift.
 
-Executors (services/executors/): lite / kinematic_attach (STEPPING STONE, labelled everywhere), sonic_arm_script and
-groot_sonic (stubs until M3/M4, unhealthy -> CAPABILITY rejections via `capability()`).
+Executors (services/executors/, built by name through services/executors/registry.py): lite / kinematic_attach
+(STEPPING STONE, labelled everywhere), sonic_arm_script (stub until the body's arm script), groot_arms (owner groot_rt,
+experimental) and groot_sonic (the retired token route, a stub). An unhealthy executor makes its skills unhealthy ->
+CAPABILITY rejections via `capability()`. Every result names the executor that actually ran (`executor.name`).
 """
 
 from __future__ import annotations
@@ -33,6 +39,12 @@ from .executors.kinematic_attach import ManipJob
 from .reachability import ReachabilityModel
 
 STEPPING = ("kinematic_attach", "lite", "sonic_arm_script")
+POLICIES = ("first_healthy", "groot_then_script")
+NO_FALLBACK = ("halted", "fell", "cancelled")       # the user or safety ended it: never retry with another executor
+# an executor outcome's `data` (GrootArmOutcome) -> ManipulationResult's typed fields; the service owns these keys
+TYPED_FROM_EXECUTOR = ("inferences", "chunks_dropped", "attempts")
+SERVICE_OWNED = ("executor", "skill", "skill_label", "stepping_stone", "base_shift_m", "generation", "control_epoch",
+                 "status", "reason", "holding", "phase", "duration_s", "source")
 
 
 @dataclass(frozen=True)
@@ -52,8 +64,11 @@ class ManipConfig:
 class ManipulationService:
     def __init__(self, world: Any, registry: Any, reach: ReachabilityModel, executors: dict[str, Any], clock: Any,
                  cfg: ManipConfig | None = None, *, nav: Any = None, observation: Any = None,
-                 gate: HaltGate | None = None, events: EventSink | None = None):
+                 gate: HaltGate | None = None, events: EventSink | None = None, policy: str = "first_healthy"):
+        if policy not in POLICIES:
+            raise ValueError(f"manipulation policy {policy!r}: one of {POLICIES}")
         self.world = world
+        self.policy = policy
         self.registry = registry
         self.reach = reach
         self.executors = executors                    # backend -> executor
@@ -85,6 +100,22 @@ class ManipulationService:
         if skill is not None and self.executor_for(skill) is None:
             return None, f"{skill.skill_id}: no executor for backend {skill.backend}"
         return skill, why
+
+    def fallback_for(self, skill: SkillSpec | None, action: str, object_type: str, arm: str | None = None
+                     ) -> SkillSpec | None:
+        """groot_then_script: the skill that runs after a failed GR00T attempt (the first healthy candidate of
+        another backend, in the profile's order), else None. Also sizes the tool timeout (G1Robot.timeout_s)."""
+        if self.policy != "groot_then_script" or skill is None or skill.backend != "groot":
+            return None
+        cands = getattr(self.registry, "candidates", None)
+        if not callable(cands):
+            return None
+        for s in cands(action, object_type, arm if arm in ("left", "right") else None):
+            if s.backend == "groot" or self.executor_for(s) is None:
+                continue
+            if self.registry.healthy(s.skill_id).ok:
+                return s
+        return None
 
     def health(self, skill_id: str | None = None) -> ServiceHealth:
         if skill_id is not None:
@@ -136,8 +167,10 @@ class ManipulationService:
         action = str(a.get("action") or execution.action or "pick")
         skill, _ = self.capability(action, str(a.get("object_type")), a.get("arm"))
         work = self._pick if action == "pick" else self._place
+        exe = self.executor_for(skill) if skill is not None else None
+        name = getattr(exe, "name", None) or (skill.executor if skill else None)
         h = start_execution(execution, lambda handle: work(execution, handle, skill), clock=self.clock,
-                            observation_id=self._obs, executor=skill.executor if skill else None)
+                            observation_id=self._obs, executor=name)
         self._handles[execution.execution_id] = h
         return h
 
@@ -152,15 +185,17 @@ class ManipulationService:
     def _result(self, ex: Execution, status: str, skill: SkillSpec | None, *, action: str, object_type: str,
                 reason: str | None = None, arm: str | None = None, object_id: str | None = None,
                 target: str | None = None, holding: bool | None = None, phase: str | None = None, t0: float = 0.0,
-                pose0=None, surface: str | None = None, extra: dict | None = None):
+                pose0=None, surface: str | None = None, extra: dict | None = None, typed: dict | None = None):
         now = self.clock.now()
         p = self.world.robot_pose()
         shift = math.hypot(p.x - pose0[0], p.y - pose0[1]) if pose0 else 0.0
-        executor = skill.executor if skill else "lite"
+        exe = self.executor_for(skill) if skill is not None else None
+        executor = getattr(exe, "name", None) or (skill.executor if skill else "lite")
         r = ManipulationResult(execution_id=ex.execution_id, status=status, skill=skill.skill_id if skill else "",   # type: ignore[arg-type]
                                object_type=object_type, reason=reason, action=action, arm=arm, object_id=object_id,   # type: ignore[arg-type]
                                target=target, holding=holding, executor=executor, phase=phase,   # type: ignore[arg-type]
-                               duration_s=round(now - t0, 2), base_shift_m=round(shift, 3), surface=surface)
+                               duration_s=round(now - t0, 2), base_shift_m=round(shift, 3), surface=surface,
+                               **{k: v for k, v in (typed or {}).items() if k in TYPED_FROM_EXECUTOR})
         self._results[ex.execution_id] = r
         data = dict(r.__dict__)
         if skill is not None:
@@ -212,22 +247,66 @@ class ManipulationService:
         if hands.get(arm):
             return self._result(ex, "failed", skill, reason="hand_full", phase="select_skill", holding=False, **kw)
         exe = self.executor_for(skill)
-        job = ManipJob("pick", oid, arm, skill.skill_id, epoch=self.gate.epoch)
+        job = ManipJob("pick", oid, arm, skill.skill_id, epoch=self.gate.epoch, **self._fence(ex, skill, otype))
+        t_att = self.clock.now()
         out = await self._run_executor(exe, job, h, skill)
         holding = self.world.hands().get(arm) == oid
-        extra = {"phases": out.phases, **({"detail": out.detail} if out.detail else {})}
+        typed, merged = self._executor_data(out)
+        attempts = list(typed.get("attempts") or [self._attempt(skill, exe, out, t_att)])
+        phases = list(out.phases)
+        fb = None
+        if out.status != "succeeded" and not holding and not h.cancel_requested and \
+                out.reason not in NO_FALLBACK and not self.gate.halted_since(job.epoch):
+            fb = self.fallback_for(skill, "pick", otype, arm)
+        if fb is not None:
+            # groot_then_script: the labelled fallback runs from the same stance; the result is its attempt's
+            first = f"{attempts[0].get('executor')} {out.status}({out.reason})"
+            fexe = self.executor_for(fb)
+            self.events.emit("manip.fallback", execution_id=ex.execution_id, from_skill=skill.skill_id,
+                             from_executor=getattr(exe, "name", skill.executor), reason=out.reason,
+                             to_skill=fb.skill_id, to_executor=getattr(fexe, "name", fb.executor))
+            fjob = ManipJob("pick", oid, arm, fb.skill_id, epoch=self.gate.epoch, **self._fence(ex, fb, otype))
+            t_att = self.clock.now()
+            out = await self._run_executor(fexe, fjob, h, fb)
+            holding = self.world.hands().get(arm) == oid
+            attempts.append(self._attempt(fb, fexe, out, t_att))
+            phases += [dict(p, attempt=2) for p in out.phases]
+            # the GR00T attempt's own numbers (latency, clamped_frac, gt, notes ...) move under data.groot, so the
+            # flat keys describe the attempt that produced the result
+            merged = {"groot": merged,
+                      "fallback_from": {"skill": skill.skill_id, "executor": attempts[0].get("executor"),
+                                        "status": attempts[0].get("status"), "reason": attempts[0].get("reason")}}
+            out.detail = f"after {first}: {out.detail}" if out.detail else f"after {first}"
+            skill = fb
+        typed["attempts"] = attempts
+        extra = {**merged, "phases": phases, **({"detail": out.detail} if out.detail else {})}
         if out.status == "succeeded":
             await self.clock.sleep(self.cfg.verify_hold_s)
             holding = self.world.hands().get(arm) == oid
             if not holding:
                 return self._result(ex, "failed", skill, reason="grasp_failed", phase="verify", holding=False,
-                                    extra=extra, **kw)
-            return self._result(ex, "succeeded", skill, holding=True, phase="verify", extra=extra, **kw)
+                                    extra=extra, typed=typed, **kw)
+            return self._result(ex, "succeeded", skill, holding=True, phase="verify", extra=extra, typed=typed, **kw)
         if out.status == "cancelled":
             return self._result(ex, "cancelled", skill, reason=out.reason, phase=out.phase, holding=holding,
-                                extra=extra, **kw)
+                                extra=extra, typed=typed, **kw)
         return self._result(ex, "timed_out" if out.reason == "timeout" else "failed", skill, reason=out.reason,
-                            phase=out.phase, holding=holding, extra=extra, **kw)
+                            phase=out.phase, holding=holding, extra=extra, typed=typed, **kw)
+
+    @staticmethod
+    def _executor_data(out: Any) -> tuple[dict, dict]:
+        """An outcome's `data` (GrootArmOutcome) split into ManipulationResult's typed fields and the rest for
+        result.data; the keys the service computes itself (executor, skill, labels, base_shift_m ...) stay its own."""
+        d = dict(getattr(out, "data", None) or {})
+        typed = {k: d.pop(k) for k in TYPED_FROM_EXECUTOR if k in d}
+        for k in SERVICE_OWNED:
+            d.pop(k, None)
+        return typed, d
+
+    def _attempt(self, skill: SkillSpec, exe: Any, out: Any, t0: float) -> dict:
+        return {"executor": getattr(exe, "name", None) or skill.executor, "skill": skill.skill_id,
+                "label": skill.label, "status": out.status, "reason": out.reason,
+                "duration_s": round(self.clock.now() - t0, 2)}
 
     def _within_reach(self, x: float, y: float, z: float) -> bool:
         fwd, lat = self.reach.in_body_frame(x, y)
@@ -280,24 +359,34 @@ class ManipulationService:
             reason = "no_room_in_reach" if self.world.free_spot(target, oid) is not None else "no_room_on_surface"
             return self._result(ex, "failed", skill, reason=reason, phase="free_spot", holding=True, **kw)
         exe = self.executor_for(skill)
-        job = ManipJob("place", oid, arm, skill.skill_id, spot=spot, target=target, epoch=self.gate.epoch)
+        job = ManipJob("place", oid, arm, skill.skill_id, spot=spot, target=target, epoch=self.gate.epoch,
+                       **self._fence(ex, skill, otype))
+        t_att = self.clock.now()
         out = await self._run_executor(exe, job, h, skill)
         holding = self.world.hands().get(arm) == oid
-        extra = {"phases": out.phases, "spot": [round(spot.x, 3), round(spot.y, 3), round(spot.z, 3)],
+        typed, merged = self._executor_data(out)
+        typed["attempts"] = list(typed.get("attempts") or [self._attempt(skill, exe, out, t_att)])
+        extra = {**merged, "phases": out.phases, "spot": [round(spot.x, 3), round(spot.y, 3), round(spot.z, 3)],
                  **({"detail": out.detail} if out.detail else {})}
         if out.status == "succeeded":
             await self.clock.sleep(self.cfg.verify_hold_s)
             o = self.world.object(oid)
             if o is None or o.where != target:
                 return self._result(ex, "failed", skill, reason="object_dropped", phase="verify",
-                                    holding=holding, surface=o.where if o else None, extra=extra, **kw)
+                                    holding=holding, surface=o.where if o else None, extra=extra, typed=typed, **kw)
             return self._result(ex, "succeeded", skill, holding=False, phase="verify", surface=target, extra=extra,
-                                **kw)
+                                typed=typed, **kw)
         if out.status == "cancelled":
             return self._result(ex, "cancelled", skill, reason=out.reason, phase=out.phase, holding=holding,
-                                extra=extra, **kw)
+                                extra=extra, typed=typed, **kw)
         return self._result(ex, "failed", skill, reason=out.reason, phase=out.phase, holding=holding, extra=extra,
-                            **kw)
+                            typed=typed, **kw)
+
+    @staticmethod
+    def _fence(ex: Execution, skill: SkillSpec, object_type: str) -> dict:
+        """What an executor that leases the body needs to fence its commands (PLAN §6.6)."""
+        return {"execution_id": ex.execution_id, "generation": ex.generation, "control_epoch": ex.control_epoch,
+                "object_type": object_type, "skill": skill}
 
     async def _run_executor(self, exe: Any, job: ManipJob, h: ResultHandle, skill: SkillSpec):
         from .executors.kinematic_attach import ManipOutcome

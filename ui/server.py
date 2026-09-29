@@ -33,6 +33,7 @@ import http
 import importlib
 import inspect
 import json
+import math
 import os
 import re
 import signal
@@ -50,7 +51,9 @@ if str(ROOT) not in sys.path:
 from websockets.asyncio.server import broadcast, serve  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402
 
-from ui.cameras import CameraFeed, CameraSource, NoCameras, TapCameras, WorldCameras  # noqa: E402
+from ui.cameras import (EGO_PORT, CameraFeed, CameraSource, NoCameras, ScanThumbs, SubCamera,  # noqa: E402
+                        TapCameras, WithPanes, WorldCameras, head_caption)
+from ui.groot_strip import GrootStrip  # noqa: E402
 from ui.interactive_user import InteractiveUser  # noqa: E402
 from ui.recorder import CallRecorder  # noqa: E402
 from ui.robot_map import RobotMap  # noqa: E402
@@ -215,16 +218,15 @@ class Deps:
 
 
 def _default_frame_gate() -> Any:
+    """The G1 head preset (PLAN 8.3). By keyword: FrameGate's first positional parameter is scene_cells, and a
+    preset passed there made every later decide() raise (seen in the first E-1 run)."""
     fg = _import("brains.frame_gate")
     cfg = getattr(fg, "G1_HEAD", None)
     if cfg is not None:
         try:
-            return fg.FrameGate(cfg)
+            return fg.FrameGate(config=cfg)
         except TypeError:
-            try:
-                return fg.FrameGate(config=cfg)
-            except TypeError:
-                pass
+            pass
     return fg.FrameGate()
 
 
@@ -334,6 +336,11 @@ class Session:
         self._tr_i = 0
         self._call_rev = 0
         self._bg: list[asyncio.Task] = []
+        self.groot = GrootStrip()
+        self._locs: dict[str, Any] = {"items": [], "source": None, "t": None, "planner": None}
+        self._locs_key: Any = None
+        self._locs_wall = -1e9
+        self._locs_pose: tuple[float, float] | None = None
 
     async def start(self) -> None:
         d = self.deps
@@ -453,7 +460,8 @@ class Session:
                 "calls": self.recorder.calls if self.recorder else [],
                 "calls_log": (str(self.calls_log.relative_to(ROOT)) if self.calls_log.is_relative_to(ROOT)
                               else str(self.calls_log)) if self.calls_log else None,
-                "error": self.error, **self.state(), "robot_map": self.robot_map.full()}
+                "error": self.error, **self.state(), "robot_map": self.robot_map.full(),
+                "locations": self.locations_panel(force=True)}
 
     def memory_message(self) -> dict[str, Any]:
         """What the robot has stored, for the page's Memory tab: spatial memory,
@@ -502,8 +510,54 @@ class Session:
             self._call_rev = self.recorder.rev
         st = self.state()
         self._track(trace, st)
-        return {"type": "frame", "events": events, "trace": trace, "calls": calls, **st,
-                "robot_map": self.robot_map.take_new()}
+        self.groot.trace(trace)
+        self.groot.events(events)
+        st["groot"] = self.groot.snapshot(st["t"], (st.get("stack") or {}).get("services"))
+        out = {"type": "frame", "events": events, "trace": trace, "calls": calls, **st,
+               "robot_map": self.robot_map.take_new()}
+        locs = self.locations_panel(trace=trace)
+        if locs is not None:
+            out["locations"] = locs
+        return out
+
+    # ------------------------------------------------------------------ list_locations panel (PLAN 9.4)
+    LOCS_EVERY_S = 2.0            # the live list is recomputed at most this often (wall), and only after a move
+
+    def _live_locations(self) -> list[dict[str, Any]] | None:
+        """The same list the planner's list_locations gets (services/locations.py through the robot facade:
+        walking distance from the current pose, nearest first), or None when the robot has no locations service."""
+        svc = getattr(self.robot, "locations", None)
+        fn = getattr(svc, "list", None)
+        if not callable(fn):
+            return None
+        try:
+            return [to_plain(x) for x in fn(None, None)]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def locations_panel(self, trace: list[dict[str, Any]] | None = None, force: bool = False) -> dict[str, Any] | None:
+        """{items (nearest first), source live|planner, t, planner: the last list_locations call} when it changed."""
+        for r in trace or []:
+            if r.get("type") == "result" and r.get("tool") == "list_locations":
+                d = r.get("data") or {}
+                self._locs["planner"] = {"t": r.get("t"), "execution_id": r.get("execution_id"),
+                                         "query": (r.get("args") or {}).get("query") or d.get("query"),
+                                         "names": [x.get("name") for x in d.get("locations") or []]}
+                if self._locs["source"] != "live":
+                    self._locs.update(items=list(d.get("locations") or []), source="planner", t=r.get("t"))
+        x, z, _, _ = self._robot_pose()
+        moved = self._locs_pose is None or math.hypot(x - self._locs_pose[0], z - self._locs_pose[1]) > 0.2
+        if force or (moved and time.monotonic() - self._locs_wall >= self.LOCS_EVERY_S):
+            live = self._live_locations()
+            self._locs_wall = time.monotonic()
+            if live is not None:
+                self._locs_pose = (x, z)
+                self._locs.update(items=live, source="live", t=round(self.clock.now(), 2))
+        key = (json.dumps(self._locs["items"], sort_keys=True, default=str), json.dumps(self._locs["planner"], default=str))
+        if not force and key == self._locs_key:
+            return None
+        self._locs_key = key
+        return dict(self._locs)
 
     def _robot_pose(self, st: dict[str, Any] | None = None) -> tuple[float, float, float, float]:
         """The robot's own pose estimate (its localizer; GT-backed in sim), else the truth pose."""
@@ -657,6 +711,7 @@ class Hub:
         self._camera_mode = cameras if isinstance(cameras, str) else "given"
         self._fixed_cameras: CameraSource | None = None if isinstance(cameras, str) else cameras
         self._tap: CameraSource | None = None
+        self._ego: Any = None                         # SubCamera on P1's ego_view (Isaac profiles), False if unavailable
         self._port_offset = port_offset
         self.feed = CameraFeed(NoCameras())
         self.persona_level = "off"                   # own goals only when you turn them on
@@ -667,6 +722,8 @@ class Hub:
         self.s1_status, self.s1_detail = ("off", "no System 1 configured (SYSTEM1=off)")
         self._s1_event = False                       # an arrival, a look or a scene change: observe now
         self.s1_gate: Any = None                     # which head-camera frames System 1 gets
+        self.thumbs = ScanThumbs()                   # head-camera thumbnails of each scan
+        self._thumb_i = 0                            # the trace rows the thumbnails have seen
 
     # ------------------------------------------------------------------ cameras
     def _cameras_for(self, s: Session) -> CameraSource:
@@ -680,7 +737,7 @@ class Hub:
             return f
         tap = getattr(f, "tap", None)                 # world.frames.IsaacFrames wraps a FrameTap: share it
         if mode in ("auto", "frames", "tap") and tap is not None and callable(getattr(tap, "streams", None)):
-            return TapCameras(tap)
+            return self._with_ego(TapCameras(tap))
         if mode == "none":
             return NoCameras()
         if mode == "world" or (mode == "auto" and s.profile == "lite"):
@@ -691,7 +748,17 @@ class Hub:
             except Exception as e:  # noqa: BLE001
                 self._notice(f"No camera feed: viz FrameTap could not start ({e}).")
                 return WorldCameras(s.world)
-        return self._tap
+        return self._with_ego(self._tap)
+
+    def _with_ego(self, base: CameraSource) -> CameraSource:
+        """The Isaac panes plus `ego` (P1's ego_view, 5566): shown while GR00T has the camera on; never enabled here."""
+        if self._ego is None:
+            try:
+                off = self._port_offset if self._port_offset is not None else int(os.environ.get("WL_PORT_OFFSET", "0") or 0)
+                self._ego = SubCamera(EGO_PORT + off, "ego_view")
+            except Exception:  # noqa: BLE001  (no zmq/msgpack: the other panes still work)
+                self._ego = False
+        return WithPanes(base, {"ego": self._ego}) if self._ego else base
 
     # ------------------------------------------------------------------ System 1
     def start_system1(self) -> None:
@@ -870,7 +937,9 @@ class Hub:
                 new.runtime.set_persona(self.persona_level)
             if callable(getattr(new.runtime, "set_step_mode", None)):
                 new.runtime.set_step_mode(self.step_mode)
-            self.feed = CameraFeed(self._cameras_for(new))
+            self.feed = CameraFeed(self._cameras_for(new), camera=new.map.get("camera"), profile=new.profile)
+            self.thumbs.reset()
+            self._thumb_i = 0
             self._s1_vocabulary(new)
             broadcast(self.clients, dumps({**new.init_message(), "meta": self.meta()}))
             broadcast(self.clients, dumps(new.memory_message()))
@@ -884,7 +953,10 @@ class Hub:
 
     async def tick(self) -> None:
         s = self.session
-        if s is None or not self.clients:
+        if s is None:
+            return
+        if not self.clients:
+            self._thumbs_idle(s)                      # scans still get their thumbnails with no page open
             return
         frame = s.frame()
         frame["system1"] = {"status": self.s1_status, "detail": self.s1_detail}
@@ -896,12 +968,30 @@ class Hub:
             if any(r.get("type") == "result" and (r.get("tool") or r.get("skill")) in OBSERVE_TOOLS
                    and str(r.get("status", "")).lower() == "succeeded" for r in frame["trace"]):
                 self._s1_event = True
+        caption = head_caption({}, s.map.get("camera"), s.profile)
+        for m in self.thumbs.update(frame, self.feed.source, caption):
+            broadcast(self.clients, dumps(m))
+        self._thumb_i = len(s._trace_rows())
         if any(r.get("type") in MEMORY_ROWS for r in frame["trace"]):
             self._memory_due = True
         if self._memory_due and time.monotonic() - self._memory_sent > 1.0:
             self._memory_due, self._memory_sent = False, time.monotonic()
             broadcast(self.clients, dumps(s.memory_message()))
         self._send_cameras()
+
+    def _thumbs_idle(self, s: Session) -> None:
+        """No page is connected: follow scans from the runtime's own history and new trace rows (its own cursor;
+        the page's frame cursor is left alone), so a page that connects later gets complete thumbnails."""
+        rt = s.runtime
+        if rt is None:
+            return
+        rows = s._trace_rows()
+        new = [_row(r, i) for i, r in enumerate(rows[self._thumb_i:], self._thumb_i)]
+        self._thumb_i = len(rows)
+        active = [{"tool": _tool_of(e), "action": getattr(e, "action", None), "args": dict(getattr(e, "args", None) or {})}
+                  for e in list(getattr(rt, "history", []) or []) if not _finished(e)]
+        caption = head_caption({}, s.map.get("camera"), s.profile)
+        self.thumbs.update({"t": s.clock.now(), "runtime": {"active": active}, "trace": new}, self.feed.source, caption)
 
     async def ticker(self) -> None:
         while True:
@@ -926,6 +1016,8 @@ class Hub:
             if self.session is not None:
                 await ws.send(dumps({**self.session.init_message(), "meta": self.meta()}))
                 await ws.send(dumps(self.session.memory_message()))
+                for m in self.thumbs.recent:
+                    await ws.send(dumps(m))
                 self._send_cameras(force=True, ws=ws)
             else:
                 await ws.send(dumps({"type": "loading", "scene": self.default, "profile": self.profile,
@@ -1002,7 +1094,7 @@ class Hub:
             await ws.send(dumps({"type": "notice", "text": str(e)}))
 
     def close(self) -> None:
-        for src in (self._tap, self._fixed_cameras):
+        for src in (self._tap, self._fixed_cameras, self._ego or None):
             if src is not None:
                 try:
                     src.close()

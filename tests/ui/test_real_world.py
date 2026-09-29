@@ -21,10 +21,13 @@ def world():
     if not (HOUSE / "occupancy.npz").exists():
         pytest.skip("no recorded house")
     try:
+        from robot.profile import load_profile
         from world.lite_world import LiteWorld
+        from world.mapgen import MapParams
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"world/ not importable: {e}")
-    return LiteWorld(HOUSE)
+    # the map as the G1 runtime builds it (config/g1.yaml mapgen: the `placeable` user-surface rule)
+    return LiteWorld(HOUSE, map_params=MapParams.from_dict(load_profile("lite").g1.get("mapgen")))
 
 
 class WorldRobot:
@@ -68,7 +71,8 @@ def test_session_on_the_real_world_model(world):
     init, frame = asyncio.run(go())
     json.dumps(init)
     lay = init["layout"]
-    assert lay["user_surface"] == "kitchen_counter_1a"
+    from eval.scenes import load
+    assert lay["user_surface"] == load().house("H40")["user_surface"]         # world's mapgen rule, as bound for eval
     assert set(lay["rooms"]) == {"bedroom", "kitchen", "living_room"}
     assert len(lay["rooms"]["bedroom"]["polygon"]) >= 4
     assert lay["occupancy"]["extent"] == [-0.3, -0.3, 9.0, 9.0] and lay["occupancy"]["resolution"] == 0.05

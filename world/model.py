@@ -128,6 +128,7 @@ class GraspState:
     lifted_m: float = 0.0             # height above its support at grasp time
     attach_mode: str | None = None    # "follow" | "fixed_joint" | "kinematic" | None
     source: str = "gt"
+    palm_dist_m: float | None = None  # object centre to the palm (P1.5 link poses; None without them)
 
 
 @dataclass

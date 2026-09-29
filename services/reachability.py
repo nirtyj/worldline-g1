@@ -18,6 +18,9 @@ Checks, in THOR's order (thor/robot.py:434-459) so prompts and eval semantics ca
          furniture from which it is in reach, else its surface)
        - yes but farther than arm_reach_m from the nearer shoulder (the IK stand-in) -> needs_reposition when a
          nearby stance reaches it, else out_of_workspace
+       - neither, and no free spot the robot can stand on (its body radius from every obstacle) lies within the reach
+         window's far edge of the object -> beyond_reach (+ detail): no stand, stance or reposition can help (H15's
+         apple, 0.44 m deep on a 0.59 m counter, is >= 0.69 m from any free spot vs reach_fwd_m 0.55)
   8. hand_full            max_held (1) objects already held
   9. no_skill             no loaded skill handles pick of this type (with the preferred arm)
 
@@ -180,6 +183,23 @@ class ReachabilityModel:
                                        "forward": round(bf, 3), "left": round(bl, 3), "distance_m": round(d, 3)})
         return best[1] if best else None
 
+    def nearest_stand_m(self, obj_xy: tuple[float, float], r_max: float = 1.2, step: float = 0.05) -> float | None:
+        """Distance from the object to the nearest spot the robot centre may stand on (free with the body radius,
+        reachable from where it is now), to `step` m; None if none within r_max."""
+        grid = self.world.static_map().grid
+        p = self.world.robot_pose()
+        comp = grid.component(p.x, p.y)
+        r = step
+        while r <= r_max + 1e-9:
+            n = max(12, int(2 * math.pi * r / 0.05))
+            for k in range(n):
+                a = 2 * math.pi * k / n
+                sx, sy = obj_xy[0] + r * math.cos(a), obj_xy[1] + r * math.sin(a)
+                if grid.is_free(sx, sy) and (comp is None or grid.component(sx, sy) == comp):
+                    return round(r, 3)
+            r += step
+        return None
+
     def _keypoint_yaw(self) -> float | None:
         at = self.nav.at()[0] if self.nav is not None else None
         k = self.world.static_map().keypoints.get(at) if at else None
@@ -269,6 +289,11 @@ class ReachabilityModel:
             if stance is not None:
                 return res(reason="needs_reposition", visible=is_vis, oid=oid, suggest_location="reach_stance",
                            stance=stance, skill_id=getattr(skill, "skill_id", None), **common)
+            gap = self.nearest_stand_m((x, y))
+            if gap is not None and gap > self.ws.reach_fwd_m[1] + 0.02:
+                return res(reason="beyond_reach", visible=is_vis, oid=oid, detail=(
+                    f"{oid} is {gap:.2f} m from the nearest spot the robot can stand; the arm reaches "
+                    f"{self.ws.reach_fwd_m[1]:.2f} m"), **common)
             sug = self.suggest_keypoint((x, y), z, o.where)
             return res(reason="too_far", visible=is_vis, oid=oid, suggest_location=sug if sug != at else None,
                        **common)
