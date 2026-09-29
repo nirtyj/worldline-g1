@@ -9,7 +9,6 @@
             fake wl-body that answers late).
 """
 
-import asyncio
 import threading
 import time
 

@@ -60,7 +60,13 @@ def lite_available() -> str | None:
 
 
 def box_available() -> str | None:
-    """None when the live stack may be used (WL_BOX=1 and P1 answers ping), else why not."""
+    """None when the live stack may be used (WL_BOX=1 and P1 answers ping), else why not. Asked once per session."""
+    if "why" not in _P1:
+        _P1["why"] = _box_available()
+    return _P1["why"]
+
+
+def _box_available() -> str | None:
     if os.environ.get("WL_BOX") != "1":
         return "live stack only with WL_BOX=1 (and WL_PORT_OFFSET) on the box"
     why = lite_available()

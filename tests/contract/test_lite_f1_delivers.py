@@ -4,7 +4,6 @@ valid envelope with an observation id, and a stop mid-walk halts first and ackno
 
 from __future__ import annotations
 
-import asyncio
 
 import pytest
 

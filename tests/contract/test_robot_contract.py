@@ -5,7 +5,6 @@ The `sonic` backend is the live stack (`-m box`, WL_BOX=1; tests/contract/confte
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import pytest
