@@ -191,7 +191,7 @@ def test_success_from_ground_truth_hands_over_to_the_carry_hold():
         assert d["executor"] == "groot_arms" and d["label"] == d["skill_label"] == "experimental"
         assert d["inferences"] >= 3 and d["chunks_sent"] >= 2 and d["session_id"] == "man-1"
         assert 0 < d["latency_ms"]["p50"] <= d["latency_ms"]["p95"] and d["latency_ms"]["n"] == d["inferences"]
-        assert d["hold_on_end"] == "target" and d["carry"] == CARRY_LABEL and "INTERIM" in d["carry"]
+        assert d["hold_on_end"] == "target" and d["carry"] == CARRY_LABEL and "CarryLock" in d["carry"]
         assert d["attempts"] == [dict(d["attempts"][0], executor="groot_arms", skill=APPLE, status="succeeded")]
         assert d["gt"]["lift_max_m"] >= 0.05 and "INTERIM" in d["gt"]["palm"]
         assert d["base_shift_m"] == 0.0 and d["clamped_frac_source"] == "body"

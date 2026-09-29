@@ -21,7 +21,7 @@ control semantics: lease and session fence, cancel, halt, stale chunks, the poli
                              reference
                execute       GrootArmClient thread: latest ego frame + g1_debug -> observation -> PolicyServer (REQ,
                              1.5 s) -> chunk -> `arm`; the ground-truth outcome at 10 Hz through the WorldModel
-               end           `arm` end with hold_on_end = target (success: the carry hold, INTERIM until CarryLock
+               end           `arm` end with hold_on_end = target (success: the carry hold = the body's CarryLock
                              B.7), stand (cancel with nothing in hand), measured (every failure, halt, policy down)
 
     outcome                       when
@@ -90,7 +90,7 @@ LABEL = "experimental"
 CHECKPOINT = "nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace"
 DEFAULT_ENDPOINT = "tcp://127.0.0.1:5550"
 ENDPOINT_ENV = "WL_GROOT_ENDPOINT"
-CARRY_LABEL = "arm_op_hold (INTERIM; CarryLock is body B.7)"
+CARRY_LABEL = "CarryLock (body B.7: the arm op's target hold with the hand closed, m1.md §3.9)"
 N_UPPER, N_HAND = 17, 7
 
 # Arena's closed Dex3 pose in Dex3 order (thumb_0, thumb_1, thumb_2, middle_0, middle_1, index_0, index_1): the
