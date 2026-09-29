@@ -205,6 +205,10 @@ Verdict: segmentation stays the source of truth (PLAN §0.10 a). One consequence
 
 ## 7. Prompt numbers (`api.types.PROFILES`, owner robot) and within-10 % check
 
+Applied (eval-live, M2b wave 2): `walk_speed_mps`, `t_pick_s` and `t_place_s` below are in `api.types.PROFILES` and the
+regenerated `api/schemas/`. The prompt reads "about 3.4 s per metre", "walks about 0.3 m/s", a pick of 17 s (`sonic`)
+or 30 s (`full`, the estimate) and a place of 10 s. `approach_max_m` and the height slots were not changed.
+
 | Slot | Proposed | Measured | Match |
 |---|---|---|---|
 | sonic, full, bringup `walk_speed_mps` (`{v}`, `{s_per_m}`) | 0.29 (3.4 s/m) | 0.291 m/s, 3.44 s/m | 0.3 % |

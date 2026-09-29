@@ -90,7 +90,7 @@ def test_descriptions_differ_only_in_numeric_slots_across_profiles():
     assert all(v == first for v in texts.values())
     lite, sonic = (by_name(json_schemas(ctx(p)))["navigate"]["description"] for p in ("lite", "sonic"))
     assert lite != sonic                                             # the numbers really differ
-    assert "2.5 s per metre" in sonic and "0.40 m" in sonic
+    assert "3.4 s per metre" in sonic and "0.40 m" in sonic          # R.7: 0.29 m/s measured on SONIC (3.44 s/m)
 
 
 def test_description_templates_render_missing_slots_as_question_marks():

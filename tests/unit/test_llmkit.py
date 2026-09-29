@@ -91,7 +91,7 @@ def test_reference_brain_system_uses_profile_slots():
     lite = b.system_for(SimpleNamespace(profile=PROFILES["lite"].slots()))
     sonic = b.system_for(SimpleNamespace(profile=PROFILES["sonic"].slots()))
     assert "walks about 0.5 m/s" in lite or "walks about 0.4 m/s" in lite
-    assert "walks about 0.4 m/s" in sonic and "a pick takes about 12 s" in sonic
+    assert "walks about 0.3 m/s" in sonic and "a pick takes about 17 s" in sonic     # R.7 (docs/calibration.md §7)
     assert b.system_for(SimpleNamespace(profile={})) == b.system
 
 

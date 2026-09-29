@@ -30,7 +30,7 @@
   },
   {
     "name": "navigate",
-    "description": "Walk to a named location (about 2.5 s per metre). Whatever the hands hold stays held. The robot looks around when it arrives. location='reach_stance' takes the short step that the last check_reachability asked for (up to 0.40 m); it does not look around.",
+    "description": "Walk to a named location (about 3.4 s per metre). Whatever the hands hold stays held. The robot looks around when it arrives. location='reach_stance' takes the short step that the last check_reachability asked for (up to 0.40 m); it does not look around.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -80,7 +80,7 @@
   },
   {
     "name": "manipulate",
-    "description": "Run a trained manipulation skill from where the robot stands; it never walks (a pick takes about 12 s, a place about 10 s). pick needs a successful check_reachability for the same object right before it. place puts the held object on target, which must be a surface served from where the robot stands (default: the surface here). When the request says where it should end up, pass goal: the runtime checks it after the place.",
+    "description": "Run a trained manipulation skill from where the robot stands; it never walks (a pick takes about 17 s, a place about 10 s). pick needs a successful check_reachability for the same object right before it. place puts the held object on target, which must be a surface served from where the robot stands (default: the surface here). When the request says where it should end up, pass goal: the runtime checks it after the place.",
     "parameters": {
       "type": "object",
       "properties": {
