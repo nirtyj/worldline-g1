@@ -114,7 +114,21 @@ class Motion:
         self.ctx.mux.set(PlannerCmd(LocomotionMode.SLOW_WALK, (float(move_w[0]), float(move_w[1])), float(facing_w),
                                     float(speed), -1.0, self.id))
 
+    # Facing changes are stepped like the upstream keyboard Q/E handler: <= 30 deg per step from the last COMMANDED
+    # facing (keyboard_handler.hpp:557-566), advancing only once the body has caught up. A single large IDLE facing
+    # step is planned once and never corrected (static modes replan only on change, g1_deploy_onnx_ref.cpp:3727-3731);
+    # in the reference runs 90 deg steps under-rotated by ~12 deg and fell under timing jitter (docs/walk_diagnosis.md).
+    TURN_STEP = math.radians(30.0)
+    TURN_CATCHUP = math.radians(15.0)
+
     def turn_cmd(self, facing_w: float, yaw_now: float) -> None:
+        prev = self.ctx.mux.last_facing_w
+        if prev is None:
+            prev = yaw_now
+        d = wrap(facing_w - prev)
+        if abs(d) > self.TURN_STEP:
+            caught_up = abs(wrap(prev - yaw_now)) < self.TURN_CATCHUP
+            facing_w = wrap(prev + math.copysign(self.TURN_STEP, d)) if caught_up else prev
         if self.cfg.turn_style == "slowwalk":
             self.walk_cmd((math.cos(facing_w), math.sin(facing_w)), facing_w, self.cfg.v_min)
         else:

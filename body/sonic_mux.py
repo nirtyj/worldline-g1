@@ -183,6 +183,11 @@ class SonicMux:
 
     def _build(self, cmd: PlannerCmd) -> tuple[bytes, dict]:
         mode = int(cmd.mode)
+        if mode not in LocomotionMode.STATIC and not cmd.moving():
+            # Upstream clients never send a non-static mode with zero movement; the keyboard switches to IDLE
+            # (keyboard_handler.hpp:681-686). SLOW_WALK + speed -1 replans every second (g1_deploy_onnx_ref.cpp:3729)
+            # and fell / overshot in the reference runs (docs/walk_diagnosis.md).
+            mode = LocomotionMode.IDLE
         if not self.frame.known and (cmd.moving() or cmd.facing_w is not None):
             # Cannot express a world direction yet; before start the planner frame is "current heading".
             if cmd.moving():
