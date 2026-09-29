@@ -2,7 +2,7 @@
 
 Owner: deploy component (`worldline-g1/sonic/`). Status: **v2 (2026-09-29)**. Everything is read from code
 (file:line given); items tagged **[MEASURED]** were confirmed on the box with the MuJoCo reference loop
-(`sonic/mujoco_ref/`, run dirs in §8).
+(`sonic/mujoco_ref/`) and against wl-isaac (P1, `sonic/isaac_char/`); run dirs in §8.
 
 ## 0. What P1 (wl-isaac) and P3 (wl-body) must know: summary
 
@@ -12,12 +12,13 @@ Owner: deploy component (`worldline-g1/sonic/`). Status: **v2 (2026-09-29)**. Ev
 2. `rt/lowcmd` arrives at ~500 Hz; the leg `q` targets inside change at 50 Hz **[MEASURED: 498-500 msg/s, 49.8-50.0
    target changes/s]**. Apply `tau + kp(q*-q) + kd(dq*-dq)` from the latest message every physics step (§2).
 3. Hand-over **[MEASURED]**: never start the policy (`command start`) with the robot hanging high in the band.
-   It flails (hip-yaw targets up to 10 rad) and then falls. Hold the pelvis at standing height with the feet
+   It flails (hip-yaw targets up to 10 rad), and the later drop survives on a quiet box but fell on a busy one.
+   Hold the pelvis at standing height with the feet
    touching the floor (band anchor ~0.80 m), send `command start`, stream IDLE, then release the band about 1 s
    later. Measured: pelvis z 0.787 m, 0 falls, drift < 0.09 m in 15 s (§3).
 4. Walking **[MEASURED]**: SLOW_WALK reaches 85-95 % of the commanded speed at 0.5-0.7 m/s (about 0.25 m/s for a
-   0.3 m/s command). Switching to IDLE stops the robot in 0.4-0.95 s. Walking drifts sideways about 2-5 cm per metre,
-   so close the position loop on ground truth (§6).
+   0.3 m/s command). Switching to IDLE stops the robot in 0.4-1.1 s. Walking drifts to the right by about 2-8 cm per
+   metre (Isaac: 0.12-0.18 m over 1.8-2.5 m at 0.5-0.7 m/s), so close the position loop on ground truth (§6, §7).
 5. Turning in place **[MEASURED]**: IDLE + a new `facing` turns only about 80 % of the command (45° gives 35-37°,
    90° gives 73-77°, 135° gives 115-120°), in MuJoCo and in Isaac alike. The planner's own target
    (`g1_debug.base_quat_target`) already stops short; the deploy has no facing deadband (exact compare,
@@ -239,7 +240,9 @@ Required: `mode: i32`, `movement: f32[3]`, `facing: f32[3]`. Optional: `speed: f
    first send, measured). The deploy prints `[ZMQManager] Planner enabled`, `transitioning to CONTROL`,
    `Planner initialized successfully!`, `motion name is planner_motion`. A repeated `start` is a no-op.
 6. Release the band about 1 s after control starts. Measured over 15 s: pelvis z 0.787 m (min = max), 0 falls,
-   XY drift 0.085-0.087 m (`quiet-a`, `char-*`).
+   XY drift 0.085-0.087 m (`quiet-a`, `char-*`). On P1: the same sequence with `band {on:false, ramp_s:1.0}` (P1's band starts
+   at floor + 0.80 m, so step 4 is already satisfied) held pelvis z ≥ 0.786 m with no hand-over fall in 3 runs
+   (`p1char-*`); the Isaac agent's smoke test and `m1_up.sh` / `body stand` use the same order.
 7. Walk: `mode=1, movement=dir, facing=heading, speed=0.3..0.7`. Keep resending at ≥ 10 Hz (our driver: 20 Hz).
 
 ## 4. ZMQ output: `g1_debug`
@@ -432,6 +435,7 @@ must end the motion as `failed`.
 
 | Run | What it shows |
 |---|---|
+| `final-20260929-015747/` | **MuJoCo reference with the final harness and the rebuilt binary (build_deploy.sh after the ROS2 fix): 13/13 checks, timing gate VALID** (irregular 0.107, RTF 1.000; one other Isaac job on the box, `--allow-busy`): stand 15 s (drift 0.03 m); walk 2.68 m at 0.5 m/s; turn +76.7°; strafe 0.86 m; stop mid-walk in 0.47 s; planner timeout → IDLE; **60 s long stand z 0.785-0.786**; 0 falls; lowcmd 497 msg/s, leg targets 49.8/s; 31 touchdowns while walking (alternation 0.83). `video_third_person.mp4`, `video_head_camera.mp4`, `report/`, `metrics.json`, `sim_stalls.jsonl`. Repeats of the default scenario after the fixes (`repeat-20260929-0201*`..`-0204*`, no render): every run with a **VALID** timing gate passed (3/3: `final`, `repeat-020243`, `quiet-a`). Runs with an **INVALID** gate passed 1/2: `repeat-020424` fell in the strafe with irregular 0.27 and 72 sim stalls > 15 ms, and the fall gate stopped scoring there. |
 | `quiet-a-20260929-003755/` | **MuJoCo reference pass, 12/12 checks, timing gate VALID** (irregular 0.019, RTF 1.000): control start 0.2 s after `command start`; g1_debug 50.2 Hz; lowcmd 498 msg/s with leg targets changing 49.8/s; stand 15 s at z 0.787 m; walk 2.70 m at 0.5 m/s (displacement within 2.2° of the commanded heading); turn +76.3°; strafe 1.12 m; stop mid-walk in 0.78 s; planner-silence timeout → IDLE with no fall; `command stop` ends the process. `video_third_person.mp4`, `video_head_camera.mp4` (offline replay of the 50 Hz ground-truth qpos trace), `report/trajectory.png`, `report/timeseries.png` (pelvis z, yaw, speed, foot contacts, lowcmd leg targets), `metrics.json` (30 touchdowns while walking, left/right alternation 0.86). |
 | `p1char-20260929-013818/`, `p1char-aggr-20260929-014450/` | **The same driver against wl-isaac (P1) + the unmodified deploy**: 0 falls; turn, speed, stop, drift and curve numbers (§7); `trace.npz` (P1 50 Hz record: motor q, q_target, kp, foot contacts), `p1_stats_end.json`, `deploy.log`, `drive_trace.jsonl`, `char.json`. |
 | `p1char-bodyturn-*` | wl-body `TurnToMotion` emulation on P1 (§6, P3 turn guidance). |
