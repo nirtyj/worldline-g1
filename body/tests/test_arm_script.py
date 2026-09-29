@@ -247,7 +247,27 @@ def test_scan_leaves_free_arms_to_sonic_and_holds_a_held_pose():
     obj_w = pelvis_to_world([0.30, -0.20, 0.10], rig.pose).tolist()
     ch.handle_arm_script("g", {"phase": "grasp", "arm": "right", "target_w": obj_w}, OK)
     _run_op(rig, "g")
-    rep = ch.handle_scan("s2", {"arm_ff": "g0"}, OK)
+    rep = ch.handle_scan("s2", {"arm_ff": {"right_shoulder_yaw_joint": -0.7}}, OK)
     assert rep["data"]["arms"] == "hold" and rep["data"]["arm_ff"]["right_shoulder_yaw_joint"] == -0.7
     with pytest.raises(ArmError):
         ch.handle_scan("s3", {"preempt": True, "arm_ff": {"left_knee_joint": 1.0}}, OK)
+
+
+def test_grasp_tracks_the_world_goal_when_the_pelvis_steps_back():
+    """Live (outputs/body_wave/20260929-082958-pick): SONIC's pelvis moved back 2.4-4.9 cm while the arm reached,
+    so a goal solved once in the pelvis frame missed the object by 4.5-8.7 cm. The settle re-solves it."""
+    out = {}
+    for track in (False, True):
+        rig = Rig(pose=_pose())
+        ch = rig.ch
+        p0 = rig.pose
+        obj_w = pelvis_to_world([0.30, -0.20, 0.12], p0).tolist()
+        ch.handle_arm_script("g", {"phase": "grasp", "arm": "right", "target_w": obj_w, "track_world": track}, OK)
+        rig.run(0.6)
+        c, s_ = math.cos(p0.yaw), math.sin(p0.yaw)
+        rig.pose = _pose(x=p0.x - 0.04 * c, y=p0.y - 0.04 * s_, yaw=p0.yaw + math.radians(2.0))
+        ev = _run_op(rig, "g")
+        out[track] = ev["data"]["palm_err_w_m"]["p90"]
+        if track:
+            assert ev["data"]["track_updates"] >= 1 and ev["data"]["pelvis_shift_m"] == pytest.approx(0.04, abs=1e-3)
+    assert out[False] > 0.03 and out[True] < 0.01, out

@@ -104,7 +104,7 @@ class ArmScriptPlan:
     def __init__(self, phase: str, arm: str, q0: list[float], q1: list[float], hands0: dict, hand_keys: list,
                  move_s: float, settle_s: float, measure_s: float, hold_on_end: str, goal_b: np.ndarray | None,
                  goal_w: np.ndarray | None, target_w: np.ndarray | None, ik_err: float | None, pose0,
-                 via: list | None = None):
+                 via: list | None = None, track_world: bool = False, seed_waist: list | None = None):
         self.phase, self.arm = phase, arm
         self.q0, self.q1 = list(q0), list(q1)
         # joint-space min-jerk segments [(t_start, t_end, q_from, q_to)]: through the Cartesian via points (IK) first
@@ -126,13 +126,21 @@ class ArmScriptPlan:
         self.hold_on_end = hold_on_end
         self.goal_b, self.goal_w, self.target_w, self.ik_err = goal_b, goal_w, target_w, ik_err
         self.pose0 = pose0
+        # world tracking (the goal is fixed in the world; SONIC shifts the pelvis 2-5 cm when the arm reaches)
+        self.track = bool(track_world and goal_w is not None)
+        self.q1_goal, self.q1_cur = list(q1), list(q1)
+        self.goal_b_cur = None if goal_b is None else np.array(goal_b, float)
+        self.t_track = -1.0
+        self.track_updates = 0
+        self.seed_waist = list(seed_waist) if seed_waist is not None else list(q1[0:3])
+        self.pelvis_shift_m: float | None = None
         self.err_b: list[float] = []
         self.err_w: list[float] = []
         self.palm_w_last: np.ndarray | None = None
         self.palm_b_last: np.ndarray | None = None
 
     def sample(self, t: float, ref: list[float]) -> tuple[list[float], dict]:
-        q = list(self.q1)
+        q = list(self.q1_cur)
         for t0, t1, u, v in self.segs:
             if t < t1:
                 a = 1.0 if t1 <= t0 else _minjerk((t - t0) / (t1 - t0))
@@ -147,6 +155,8 @@ class ArmScriptPlan:
         return q, hands
 
     def on_tick(self, t: float, now: float, ch) -> list:
+        if self.track and t >= self.move_s:
+            self._track(t, ch)
         if self.goal_b is None or t < self.duration_s - self.measure_s:
             return []
         qm = ch.measured_mj17()
@@ -154,13 +164,40 @@ class ArmScriptPlan:
             return []
         palm_b = K.points(K.named_from_mj17(qm))[f"{self.arm}_palm"]
         self.palm_b_last = palm_b
-        self.err_b.append(float(np.linalg.norm(palm_b - self.goal_b)))
+        self.err_b.append(float(np.linalg.norm(palm_b - self.goal_b_cur)))
         pose = ch.gt_pose()
         if pose is not None and self.goal_w is not None:
             pw = pelvis_to_world(palm_b, pose)
             self.palm_w_last = pw
             self.err_w.append(float(np.linalg.norm(pw - self.goal_w)))
         return []
+
+    def _track(self, t: float, ch) -> None:
+        """Settle phase: re-solve the world goal in the current pelvis frame at 10 Hz, and move the joint target
+        there at <= 0.5 rad/s (the IK seed is the last solution, so a re-solve takes a few iterations)."""
+        if t - self.t_track >= 0.1:
+            self.t_track = t
+            pose = ch.gt_pose()
+            if pose is not None:
+                if self.pose0 is not None:
+                    self.pelvis_shift_m = round(float(np.hypot(pose.x - self.pose0.x, pose.y - self.pose0.y)), 4)
+                gb = world_to_pelvis(self.goal_w, pose)
+                if float(np.linalg.norm(gb - self.goal_b_cur)) > 0.003:
+                    seed17 = list(self.q1_goal)
+                    qm = ch.measured_mj17()
+                    seed17[0:3] = qm[0:3] if qm is not None else self.seed_waist
+                    seed = K.named_from_mj17(seed17)
+                    lock = tuple(f"{self.arm}_{j}_joint" for j in LOCK)
+                    qn, err = K.ik_palm(self.arm, gb, seed, q_rest=seed, lock=lock, iters=40)
+                    if err < 0.02:
+                        q = list(self.q1_goal)
+                        for n_ in K.ARM_CHAIN[self.arm]:
+                            q[jm.UPPER_BODY_MUJOCO_JOINTS.index(n_)] = float(qn[n_])
+                        self.q1_goal = jm.clamp_mj17(q, margin=0.02)[0]
+                        self.goal_b_cur = gb
+                        self.track_updates += 1
+        step = 0.5 * 0.02
+        self.q1_cur = [c + min(max(g - c, -step), step) for c, g in zip(self.q1_cur, self.q1_goal)]
 
     def progress(self, t: float) -> dict:
         stage = "move" if t < self.move_s else ("hand" if t < self.t_settle else "settle")
@@ -179,7 +216,9 @@ class ArmScriptPlan:
         r = lambda v: None if v is None else [round(float(x), 4) for x in v]   # noqa: E731
         h_end = self.sample(self.duration_s, self.q1)[1].get(self.arm)
         closure = None if h_end is None else round(jm.hand_closure_of(self.arm, h_end), 3)
-        return {**self.brief(), "palm_err_b_m": _stats(self.err_b), "palm_err_w_m": _stats(self.err_w),
+        return {**self.brief(), "track_world": self.track, "track_updates": self.track_updates,
+                "pelvis_shift_m": self.pelvis_shift_m, "palm_err_b_m": _stats(self.err_b),
+                "palm_err_w_m": _stats(self.err_w),
                 "palm_final_w": r(self.palm_w_last), "palm_final_b": r(self.palm_b_last),
                 "hand_closure_cmd": closure,
                 "carry": self.hold_on_end == "target" and closure is not None and closure >= 0.3}
@@ -288,7 +327,7 @@ def build(ch, args: dict, now: float) -> ArmScriptPlan:
         dq_all = sum(max(abs(b - a) for a, b in zip(u[3:], v[3:]))
                      for u, v in zip([q0] + [q for q, _ in via], [q for q, _ in via] + [q1]))
         move_s = min(max(dq_all / v_joint, 0.8), 5.0)
-    settle_s = _num(args, "settle_s", 0.0, 10.0, 2.0 if phase in ("pregrasp", "grasp", "lower") else 1.0)
+    settle_s = _num(args, "settle_s", 0.0, 10.0, 2.5 if phase in ("pregrasp", "grasp", "lower") else 1.0)
     measure_s = min(1.0, max(0.0, settle_s - 0.3))
     # hands
     h_open = {"left": list(jm.DEX3_OPEN), "right": list(jm.DEX3_OPEN)}
@@ -306,5 +345,6 @@ def build(ch, args: dict, now: float) -> ArmScriptPlan:
     elif phase == "release":
         open_s = _num(args, "open_s", 0.1, 5.0, 0.6)
         keys.append((0.0, open_s, arm, h_cur, h_open[arm]))
+    track = bool(args.get("track_world", phase in ("pregrasp", "grasp", "lower")))
     return ArmScriptPlan(phase, arm, q0, q1, hands0, keys, move_s, settle_s, measure_s, hold, goal_b, goal_w,
-                         target_w, ik_err, pose, via=via)
+                         target_w, ik_err, pose, via=via, track_world=track, seed_waist=seed17[0:3])

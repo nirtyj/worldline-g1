@@ -722,9 +722,13 @@ def pick_test(R: Runner) -> dict:
     S["ik_err_m"] = [((tr["grasp"].get("plan") or {}).get("ik_err_m")) for tr in trials]
     # carry: lift, tuck, CarryLock, turn, 2 m walk
     lift = script(R, {"phase": "lift", "arm": a.arm, "lift_m": 0.06})
-    # the carry pose stays behind the support's front edge (reach - edge distance ahead of the pelvis): back, then down
-    cb = [min(0.16, a.reach - d_edge - 0.06), -0.22 if a.arm == "right" else 0.22, 0.02]
-    carry = script(R, {"phase": "carry", "arm": a.arm, "carry_b": cb})
+    # step back from the support with the lifted arm held (CarryLock), then tuck: lowering the hand next to the
+    # support's front edge hits it (live 20260929-080443 / -082958: the fist stopped on the dresser edge)
+    g = R.mon.last_gt()
+    bx, by = g[1] - a.back * math.cos(g[4]), g[2] - a.back * math.sin(g[4])
+    hb = R.bc.approach(float(bx), float(by), yaw=g[4], tol=(0.05, 5.0), timeout=45)
+    S["step_back"] = {"state": hb.state, "reason": hb.reason, **{k: (hb.result or {}).get(k) for k in ("pos_err",)}}
+    carry = script(R, {"phase": "carry", "arm": a.arm})
     st = R.bc.status()
     S["carry_lock"] = (st.get("arm") or {}).get("carry")
     hold_pose = ((st.get("arm") or {}).get("hold") or {}).get("pose_mj17")
@@ -789,13 +793,12 @@ def scan_test(R: Runner) -> dict:
     a = R.a
     S = {"standing": scan_once(R, "standing")}
     if a.scan_hold_variants:
-        # arms held by the servo (as under CarryLock), without and with the feed-forward fitted on the first live scans
+        # arms held by the servo at SONIC's reference pose (as under CarryLock)
         rep_ = R.arm({"stream": "barm-scan-hold", "upper_body": R.ref_mj17(), "control_epoch": R.epoch})
         R.arm({"stream": "barm-scan-hold", "end": True, "hold_on_end": "target", "control_epoch": R.epoch})
         time.sleep(1.5)
         S["standing_hold"] = scan_once(R, "standing, arms held", {"arms": "hold"})
-        S["standing_hold_ff"] = scan_once(R, "standing, arms held + ff", {"arms": "hold", "arm_ff": "g0"})
-        R.arm({"stream": "barm-scan-hold", "release": True, "control_epoch": R.epoch})
+        R.bc.stop(arms=True)                                   # release whatever holds the arms now
         S["hold_start_reply"] = rep_.get("state") or rep_.get("error")
         time.sleep(2.0)
     if a.at_counter:
@@ -832,6 +835,7 @@ def main(argv=None) -> int:
     ap.add_argument("--arm", default="right", choices=["left", "right"])
     ap.add_argument("--gap", type=float, default=0.26, help="go_to stance: distance to the support edge (A*-safe)")
     ap.add_argument("--reach", type=float, default=0.34, help="final stance: the grasp point this far ahead (approach)")
+    ap.add_argument("--back", type=float, default=0.25, help="step back from the support before the carry tuck")
     ap.add_argument("--lateral", type=float, default=0.20)
     ap.add_argument("--grasp-above", type=float, default=0.03)
     ap.add_argument("--trials", type=int, default=3)

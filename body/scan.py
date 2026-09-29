@@ -28,11 +28,6 @@ import numpy as np
 from . import joint_map as jm
 from .arm import ARM_IDX, YAW_IDX, ArmError, _minjerk, _num
 
-# SONIC moves these arm joints with waist yaw (rad per rad of commanded waist yaw; fitted on the live scans
-# outputs/body_wave/20260929-080648-scan, arms held by the servo, r >= 0.8). `arm_ff: "g0"` subtracts them.
-ARM_FF_LIVE = {"left_shoulder_yaw_joint": -0.80, "right_shoulder_yaw_joint": -0.70, "left_wrist_roll_joint": -0.53,
-               "right_wrist_roll_joint": -0.40, "left_shoulder_pitch_joint": -0.23, "right_shoulder_pitch_joint": 0.23}
-
 
 class ScanPlan:
     op = "scan"
@@ -156,10 +151,8 @@ def build(ch, args: dict, now: float) -> ScanPlan:
     if arms not in ("hold", "ref"):
         raise ArmError("bad_args", {"arg": "arms", "error": "hold | ref"})
     ff = args.get("arm_ff")
-    if ff == "g0":
-        ff = ARM_FF_LIVE
     if ff is not None and (not isinstance(ff, dict) or any(n not in jm.UPPER_BODY_MUJOCO_JOINTS[3:] for n in ff)):
-        raise ArmError("bad_args", {"arg": "arm_ff", "error": "{arm joint: rad per rad of waist yaw} or \"g0\""})
+        raise ArmError("bad_args", {"arg": "arm_ff", "error": "{arm joint: rad per rad of waist yaw}"})
     hold = args.get("hold_on_end") or ("target" if took_hold else "stand")
     if hold not in ("target", "measured", "stand"):
         raise ArmError("bad_args", {"arg": "hold_on_end", "error": "target | measured | stand"})
