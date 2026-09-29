@@ -20,7 +20,7 @@ for c in "${CONFIGS[@]}"; do
     *) die "unknown config $c";;
   esac
   log "=== $c: sim args '$SIM'"
-  bash "$HERE/run_ref_loop.sh" --driver char_ref.py --tag "stall-$c" --no-render --sim-args "$SIM" -- --sections cycles,curves \
+  bash "$HERE/run_ref_loop.sh" --driver char_ref.py --tag "stall-$c" --no-render ${ALLOW_BUSY:+--allow-busy} --sim-args "$SIM" -- --sections cycles,curves \
     > "$LOG_ROOT/deploy-stall-$c.log" 2>&1
   RUN=$(readlink -f "$OUT_ROOT/stall-$c-latest")
   "$VENV_SIM/bin/python" - "$RUN" "$c" <<'EOF' | tee -a "$SUM"

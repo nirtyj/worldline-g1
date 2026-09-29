@@ -33,7 +33,7 @@ class Char(Driver):
     def __init__(self, a):
         super().__init__(a)
         self.char: dict = {"turn_open_loop": [], "turn_closed_loop": [], "turn_slowwalk": [], "walk_cycles": [], "curve": [],
-                           "gentle": {"turns": [], "cycles": [], "curves": [], "stand": None}}
+                           "gentle": {"turns": [], "cycles": [], "curves": [], "stand": None}, "body_turn": []}
 
     # ------------------------------------------------------------------ helpers
     def planner_target_yaw(self):
@@ -165,6 +165,60 @@ class Char(Driver):
         self.log("ramp_turn_result", **rec)
         return rec
 
+    # ------------------------------------------------------------------ H: wl-body TurnToMotion emulation
+    def turn_body_style(self, delta_deg: float, tol_deg: float = 6.0, timeout: float = 20.0, push: float = 0.0):
+        """Emulates body/motions.py TurnToMotion + Motion.turn_cmd (commit 9185dd7): the facing command advances in
+        <= 30 deg steps from the last COMMANDED facing, only once the robot is within 15 deg of it; the final command is
+        the target; success needs |err| < tol_deg (cfg.yaw_tol_deg = 6). push > 0 adds the residual correction
+        measured in section B/G (once settled, move the command past the target by push * residual)."""
+        STEP, CATCH = math.radians(30.0), math.radians(15.0)
+        p0 = self.pose()
+        tgt = wrap(p0["yaw"] + math.radians(delta_deg))
+        prev = p0["yaw"]
+        t0 = time.time()
+        t_in_tol = None
+        offset = 0.0
+        t_settle_ok = None
+        zmin = 9.0
+        errs = []
+        while time.time() - t0 < timeout:
+            p = self.pose()
+            zmin = min(zmin, p["pelvis_z"])
+            yaw = p["yaw"]
+            err = wrap(tgt - yaw)
+            errs.append((round(time.time() - t0, 2), round(math.degrees(err), 2)))
+            if abs(err) < math.radians(tol_deg):
+                t_in_tol = t_in_tol or time.time() - t0
+                break
+            want = wrap(tgt + offset)
+            d = wrap(want - prev)
+            cmd = want
+            if abs(d) > STEP:
+                cmd = wrap(prev + math.copysign(STEP, d)) if abs(wrap(prev - yaw)) < CATCH else prev
+            prev = cmd
+            self.set_cmd_quiet(mode=IDLE, movement=[0.0, 0.0, 0.0], facing=self.facing_cmd(cmd), speed=-1.0)
+            # residual push: once the final command is the target and the robot has settled short of it
+            if push > 0 and abs(wrap(cmd - want)) < 1e-6:
+                wz = abs(p["base_ang_vel_b"][2])
+                if wz < 0.08:
+                    t_settle_ok = t_settle_ok or time.time()
+                    if time.time() - t_settle_ok > 0.5:
+                        offset = wrap(offset + push * err)
+                        t_settle_ok = None
+                else:
+                    t_settle_ok = None
+            time.sleep(0.1)
+        p1 = self.pose()
+        rec = {"cmd_deg": delta_deg, "push": push, "tol_deg": tol_deg, "reached_tol": t_in_tol is not None,
+               "t_reach_s": None if t_in_tol is None else round(t_in_tol, 2),
+               "final_err_deg": round(math.degrees(wrap(tgt - p1["yaw"])), 2), "offset_deg": round(math.degrees(offset), 1),
+               "err_trace_1s": [e for e in errs if abs(e[0] - round(e[0])) < 0.05][:25],
+               "pelvis_z_min": round(zmin, 3), "falls": p1["falls"] - p0["falls"]}
+        self.set_cmd(mode=IDLE, movement=[0.0, 0.0, 0.0], facing=self.facing_cmd(p1["yaw"]), speed=-1.0)
+        time.sleep(1.5)
+        self.log("body_turn_result", **{k: v for k, v in rec.items() if k != "err_trace_1s"})
+        return rec
+
     # ------------------------------------------------------------------ D
     def walk_cycle(self, speed: float, secs: float = 4.0, rest: float = 3.0):
         p0 = self.pose()
@@ -283,6 +337,16 @@ class Char(Driver):
             self.char["curve"].append(self.curve(spd, rate, 6.0))
         if "curves" in sec: self.check("curves_no_falls", all(r["falls"] == 0 for r in self.char["curve"]),
                    heading_lag_mean={r["yaw_rate_cmd_dps"]: r["heading_lag_deg_mean"] for r in self.char["curve"]})
+        # H. wl-body TurnToMotion emulation, as committed (push 0) and with the residual push (0.6)
+        if "bodyturn" in sec:
+            for push in (0.0, 0.6):
+                for dd in (90, -90, 180, 45, -45):
+                    self.char["body_turn"].append(self.turn_body_style(dd, push=push))
+            bt = self.char["body_turn"]
+            self.check("body_turn_as_committed_reaches_6deg", all(r["reached_tol"] for r in bt if r["push"] == 0.0),
+                       results={r["cmd_deg"]: (r["reached_tol"], r["t_reach_s"], r["final_err_deg"]) for r in bt if r["push"] == 0.0})
+            self.check("body_turn_with_push_reaches_6deg", all(r["reached_tol"] for r in bt if r["push"] > 0),
+                       results={r["cmd_deg"]: (r["reached_tol"], r["t_reach_s"], r["final_err_deg"]) for r in bt if r["push"] > 0})
         # G. gentle envelope: what P3 should use by default
         if "gentle" in sec:
             g = self.char["gentle"]

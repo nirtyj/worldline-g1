@@ -307,6 +307,7 @@ class Driver:
 
     def send_stop_and_check(self):
         """command stop=1 must terminate the deploy (zmq_manager.hpp:343-362 -> main() exits)."""
+        self.fall_watch_on = False    # after stop the deploy exits and the robot collapses by design (P1 backend)
         self.log("command_stop_sent")  # report_ref.py ends the controlled window here
         n0 = self.debug_count
         for _ in range(3):
@@ -317,20 +318,43 @@ class Driver:
         time.sleep(1.0)
         self.check("zmq_stop_ends_control", self.debug_count == n1, g1_debug_after_stop=self.debug_count - n0)
 
+    # ---------------------------------------------------------------- walk-diagnosis rules (docs/walk_diagnosis.md)
+    # Fall gate: MuJoCo's fall reset teleports the robot (base_sim.py:508-530), so every measurement after the first
+    # fall is meaningless; stop scoring there and report the remaining tests as not run.
+    # Commanded facing: commands are built from the last COMMANDED world facing (keyboard-client semantics), not from
+    # the measured yaw, which after a turn undershoot or a reset differs from what the planner was told.
+    SCENARIO = ["stand", "walk_forward", "frame_world_heading", "turn_in_place_90", "strafe_left", "stop_mid_walk",
+                "planner_timeout_idle", "long_stand", "no_falls_since_release"]
+
+    def fell(self) -> bool:
+        return self.pose()["falls"] - self.falls_at_release > 0
+
+    def abort_after_fall(self):
+        done = {r["test"] for r in self.results}
+        for t in self.SCENARIO:
+            if t not in done and not (t == "long_stand" and self.a.long_stand_secs <= 0):
+                self.check(t, False, not_run="aborted after the first fall (fall gate)")
+        if self.a.send_stop:
+            self.send_stop_and_check()
+        return self.finish()
+
     def run(self):
         a = self.a
         if not self.startup():
             return self.finish()
+        self.facing_w = self.yaw0  # commanded world facing (planner +X at start)
 
         # 3) stand
         ok, zmin, zmax, nf = self.upright_window(a.stand_secs)
         p = self.pose()
         self.check("stand", ok, secs=a.stand_secs, pelvis_z_min=round(zmin, 3), pelvis_z_max=round(zmax, 3), falls=nf,
                    drift_xy=round(math.hypot(p["base_pos"][0], p["base_pos"][1]), 3))
+        if self.fell():
+            return self.abort_after_fall()
 
-        # 4) walk forward (planner-frame +X of the CURRENT heading)
+        # 4) walk forward along the commanded facing
         p0 = self.pose()
-        hdg = p0["yaw"]
+        hdg = self.facing_w
         fwd_w = [math.cos(hdg), math.sin(hdg)]
         self.set_cmd(mode=SLOW_WALK, movement=self.world_to_planner(fwd_w), facing=self.world_to_planner(fwd_w), speed=a.walk_speed)
         ok_w, zmin, _, nf = self.upright_window(a.walk_secs)
@@ -345,10 +369,14 @@ class Driver:
         # frame check: displacement direction in world vs commanded world heading
         self.check("frame_world_heading", abs(math.degrees(wrap(math.atan2(dy, dx) - hdg))) < 15,
                    disp_dir_deg=round(math.degrees(math.atan2(dy, dx)), 1), cmd_heading_deg=round(math.degrees(hdg), 1))
+        if self.fell():
+            return self.abort_after_fall()
 
-        # 5) turn in place +90 deg (IDLE + new facing, like keyboard Q/E: keyboard_handler.hpp:556-566)
+        # 5) turn in place +90 deg from the commanded facing (IDLE + new facing; one 90 deg step on purpose, so the
+        #    known ~15 deg undershoot of a single large step stays visible; P3 uses <= 30 deg steps + correction)
         p0 = self.pose()
-        tgt = wrap(p0["yaw"] + math.radians(90))
+        tgt = wrap(self.facing_w + math.radians(90))
+        self.facing_w = tgt
         self.set_cmd(mode=IDLE, movement=[0.0, 0.0, 0.0], facing=self.world_to_planner([math.cos(tgt), math.sin(tgt)]), speed=-1.0)
         ok_t, zmin, _, nf = self.upright_window(a.turn_secs)
         p1 = self.pose()
@@ -356,10 +384,12 @@ class Driver:
         moved = math.hypot(p1["base_pos"][0] - p0["base_pos"][0], p1["base_pos"][1] - p0["base_pos"][1])
         self.check("turn_in_place_90", ok_t and abs(dyaw - 90) <= 15, dyaw_deg=round(dyaw, 1), translation_m=round(moved, 3),
                    pelvis_z_min=round(zmin, 3), falls=nf)
+        if self.fell():
+            return self.abort_after_fall()
 
         # 6) strafe left (movement perpendicular to facing; keyboard ','/'.': keyboard_handler.hpp:597-610)
         p0 = self.pose()
-        hdg = p0["yaw"]
+        hdg = self.facing_w
         left_w = [-math.sin(hdg), math.cos(hdg)]
         face_w = [math.cos(hdg), math.sin(hdg)]
         self.set_cmd(mode=SLOW_WALK, movement=self.world_to_planner(left_w), facing=self.world_to_planner(face_w), speed=a.strafe_speed)
@@ -372,10 +402,12 @@ class Driver:
         fwd = dx * face_w[0] + dy * face_w[1]
         self.check("strafe_left", ok_s and lat >= a.strafe_min_m, lateral_m=round(lat, 3), forward_m=round(fwd, 3),
                    dyaw_deg=round(math.degrees(wrap(p1["yaw"] - hdg)), 1), falls=nf)
+        if self.fell():
+            return self.abort_after_fall()
 
         # 7) stop mid-walk: walk, then IDLE; time until |v_xy| < 0.1 m/s and stays upright
         p0 = self.pose()
-        hdg = p0["yaw"]
+        hdg = self.facing_w
         fwd_w = [math.cos(hdg), math.sin(hdg)]
         self.set_cmd(mode=SLOW_WALK, movement=self.world_to_planner(fwd_w), facing=self.world_to_planner(fwd_w), speed=a.walk_speed)
         time.sleep(3.0)
@@ -401,6 +433,8 @@ class Driver:
         ok_u, zmin, _, nf = self.upright_window(3.0)
         self.check("stop_mid_walk", stop_s is not None and stop_s <= 1.5 and ok_u, v_before=round(v_before, 3),
                    stop_s=None if stop_s is None else round(stop_s, 2), pelvis_z_min=round(zmin, 3), falls=nf)
+        if self.fell():
+            return self.abort_after_fall()
 
         # 8) planner silence -> 1 s timeout -> IDLE, robot must keep standing (zmq_manager.hpp:582-630)
         self.set_cmd(mode=SLOW_WALK, movement=self.world_to_planner(fwd_w), facing=self.world_to_planner(fwd_w), speed=a.walk_speed)
@@ -411,6 +445,9 @@ class Driver:
         ok_u, zmin, _, nf = self.upright_window(4.0)
         v_end = math.hypot(*self.pose()["base_lin_vel_w"][:2])
         self.check("planner_timeout_idle", ok_u and v_end < 0.15, v_end=round(v_end, 3), pelvis_z_min=round(zmin, 3), falls=nf)
+        if self.fell():
+            self.keepalive_on = True
+            return self.abort_after_fall()
         self.set_cmd(mode=IDLE, movement=[0.0, 0.0, 0.0], facing=self.cmd["facing"], speed=-1.0)
         self.keepalive_on = True
         time.sleep(1.0)

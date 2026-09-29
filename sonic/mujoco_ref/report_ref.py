@@ -91,6 +91,21 @@ def main(run: Path):
     else:
         lowcmd_hz = change_hz = None
     rtf = (ts[-1] - ts[0]) / (t[-1] - t[0]) if len(t) > 2 else None
+    # --- timing gate (docs/walk_diagnosis.md rule 3): in the controlled window, the share of 20 ms sim windows that
+    #     did not see exactly one new leg-target vector, and the RTF. INVALID if irregular > 0.15 or RTF < 0.98:
+    #     such a run measures the box, not the controller.
+    irregular = rtf_ctl = None
+    if len(after_band) > 10:
+        idx = after_band
+        d_sim = np.diff(ts[idx]); d_chg = np.diff(chg[idx])
+        ok20 = np.abs(d_sim - 0.02) < 0.004  # consecutive 50 Hz trace samples (no reset jump)
+        irregular = float(np.mean(d_chg[ok20] != 1)) if ok20.any() else None
+        dw = t[idx[-1]] - t[idx[0]]
+        rtf_ctl = float((ts[idx[-1]] - ts[idx[0]]) / dw) if dw > 0 else None
+    verdict = "VALID" if (irregular is not None and irregular <= 0.15 and rtf_ctl is not None and rtf_ctl >= 0.98) else "INVALID"
+    timing_gate = {"irregular_20ms_frac": irregular, "rtf_controlled": rtf_ctl, "verdict": verdict,
+                   "sim_stalls_gt15ms": st.get("stalls_gt15ms"), "sim_stall_max_ms": st.get("stall_max_ms"),
+                   "rule": "INVALID if irregular > 0.15 or RTF < 0.98 (docs/walk_diagnosis.md)"}
     markers = {k: len(re.findall(p, dlog)) for k, p in {
         "init_done": r"Init Done", "planner_enabled": r"\[ZMQManager\] Planner enabled",
         "planner_initialized": r"Planner initialized successfully", "planner_motion_active": r"motion name is planner_motion",
@@ -113,7 +128,8 @@ def main(run: Path):
             except (IndexError, ValueError):
                 pass
     metrics = {
-        "run": str(run), "pass": res.get("pass"), "tests": {r["test"]: r for r in res.get("tests", [])},
+        "run": str(run), "pass": res.get("pass"), "timing_gate": timing_gate,
+        "tests": {r["test"]: r for r in res.get("tests", [])},
         "rtf_sim_over_wall": rtf, "sim_stats": st,
         "lowcmd_msg_hz_after_band": lowcmd_hz, "lowcmd_leg_target_change_hz_after_band": change_hz,  # wall-clock Hz in the controlled window
         "walk_windows_s": [(round(a - t0, 2), round(b - t0, 2)) for a, b in walk_windows],
@@ -170,7 +186,7 @@ def main(run: Path):
         axs[0].text(t_stop - t0, 1.05, " command stop:\n deploy exits", fontsize=7, va="top")
     fig.suptitle("SONIC deploy in MuJoCo reference loop (green = planner walking command active)")
     fig.savefig(rep / "timeseries.png", dpi=110, bbox_inches="tight")
-    print(json.dumps({k: metrics[k] for k in ("pass", "rtf_sim_over_wall", "lowcmd_msg_hz_after_band", "deploy_loop_latency",
+    print(json.dumps({k: metrics[k] for k in ("pass", "timing_gate", "rtf_sim_over_wall", "lowcmd_msg_hz_after_band", "deploy_loop_latency",
                                              "lowcmd_leg_target_change_hz_after_band", "touchdown_alternation_ratio", "falls")}))
 
 

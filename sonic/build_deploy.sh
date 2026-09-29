@@ -154,11 +154,24 @@ log "step 6: C++ build (g1_deploy_onnx_ref)"
 (
   cd "$DEPLOY_DIR"
   set +eu
-  export HAS_ROS2=0          # no ROS2 on the box; src/g1/g1_deploy_onnx_ref/CMakeLists.txt:1-24
   # deploy.sh:512-516 sources this before `just build`; it sets onnxruntime_DIR, CMAKE_PREFIX_PATH and the
   # CUDA/TRT library paths from CUDAToolkit_ROOT + TensorRT_ROOT (setup_env.sh:165-306).
   source scripts/setup_env.sh >/dev/null
+  # ROS2 OFF, always. setup_env.sh:123-150 sources /opt/ros/<distro>/setup.bash when it exists and exports
+  # HAS_ROS2=1; src/g1/g1_deploy_onnx_ref/CMakeLists.txt:1-24 then links the ROS2 input handler (rclcpp, rcl_yaml_param_parser,
+  # ...), and the binary no longer starts without a sourced ROS2 environment. /opt/ros/jazzy appeared on this box on
+  # 2026-09-29 (another component), and a rebuild produced exactly that. Undo the ROS2 environment and force HAS_ROS2=0.
+  export HAS_ROS2=0
+  strip_ros() { local IFS=:; local out=() p; for p in $1; do [[ "$p" == /opt/ros/* || -z "$p" ]] || out+=("$p"); done; echo "${out[*]}"; }
+  for v in CMAKE_PREFIX_PATH AMENT_PREFIX_PATH LD_LIBRARY_PATH PKG_CONFIG_PATH PYTHONPATH PATH; do
+    export "$v=$(strip_ros "${!v:-}")"
+  done
+  unset ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION COLCON_PREFIX_PATH
   set -eu
+  # a build that was configured with ROS2 (or against /opt/ros libraries) must be reconfigured from scratch
+  if [[ -f build/CMakeCache.txt ]] && grep -q "/opt/ros" build/CMakeCache.txt; then
+    log "build/ was configured against /opt/ros: clean rebuild"; rm -rf build target
+  fi
   [[ "${FORCE_BUILD:-0}" == 1 ]] && rm -rf build target
   mkdir -p build
   # == the .justfile `build` recipe (cmake -S .. -B . -DCMAKE_BUILD_TYPE=Release ...), but only the
@@ -194,5 +207,9 @@ out=$(cd "$DEPLOY_DIR" && LD_LIBRARY_PATH="$(deploy_ld_path)" "$DEPLOY_BIN" 2>&1
 echo "$out" | grep -q "Usage:" || die "deploy binary does not start: $out"
 (cd "$DEPLOY_DIR" && LD_LIBRARY_PATH="$(deploy_ld_path)" ldd "$DEPLOY_BIN") | grep -E "nvinfer|onnxruntime|cudart|zmq|not found" | sed 's/^/  /'
 if (cd "$DEPLOY_DIR" && LD_LIBRARY_PATH="$(deploy_ld_path)" ldd "$DEPLOY_BIN") | grep -q "not found"; then die "unresolved libraries"; fi
+# run_deploy.sh starts the binary WITHOUT a ROS2 environment: it must not depend on /opt/ros at all
+if (cd "$DEPLOY_DIR" && env -u LD_LIBRARY_PATH LD_LIBRARY_PATH="$(deploy_ld_path)" ldd "$DEPLOY_BIN") | grep -q "/opt/ros"; then
+  die "binary links /opt/ros libraries (ROS2 leaked into the build); rebuild with FORCE_BUILD=1"
+fi
 log "OK: $DEPLOY_BIN ($(du -h "$DEPLOY_BIN" | cut -f1)), TensorRT $trt_hdr, CUDA $CUDA_VER, onnxruntime $ORT_VERSION, $(( $(date +%s) - T0 ))s"
 fi

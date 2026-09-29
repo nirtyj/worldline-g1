@@ -18,14 +18,20 @@ Owner: deploy component (`worldline-g1/sonic/`). Status: **v2 (2026-09-29)**. Ev
 4. Walking **[MEASURED]**: SLOW_WALK reaches 85-95 % of the commanded speed at 0.5-0.7 m/s (about 0.25 m/s for a
    0.3 m/s command). Switching to IDLE stops the robot in 0.4-0.95 s. Walking drifts sideways about 2-5 cm per metre,
    so close the position loop on ground truth (§6).
-5. Turning in place **[MEASURED]**: IDLE + a new `facing` turns only about 80 % of the command (45° gives 35°,
-   90° gives 73-77°, 135° gives 116-120°); the planner's own target already stops short. Close the loop on
-   ground-truth yaw: after the robot settles, push the facing command past the target by the residual error. That
-   converges to within 3° in 2-4 iterations (7-10 s). Details in §6.
-6. Falls **[MEASURED]**: SONIC in MuJoCo falls now and then under aggressive commands (0.7 m/s, 35°/s curves,
-   135-180° facing jumps), more often while other jobs load the box. The deploy's own 50 Hz loop never missed a
-   tick; injected physics stalls up to 120 ms were mostly survivable. P3 should stay inside the conservative
-   envelope in §7 and treat a fall as `failed`.
+5. Turning in place **[MEASURED]**: IDLE + a new `facing` turns only about 80 % of the command (45° gives 35-37°,
+   90° gives 73-77°, 135° gives 115-120°), in MuJoCo and in Isaac alike. The planner's own target
+   (`g1_debug.base_quat_target`) already stops short; the deploy has no facing deadband (exact compare,
+   `DEPLOY.cpp:3671-3673`). **Action for P3:** `body/motions.py` `TurnToMotion` as committed in 9185dd7 (≤ 30° steps,
+   final command = target, success needs |err| < `yaw_tol_deg` = 6°) **never reached 6° on P1**: errors after 20 s
+   were +9.9° (90°), −15.2° (−90°), −10.4° (180°), +16.3° (45°), −12.4° (−45°), so every turn would time out as
+   `failed`. Adding a residual push (once |yaw rate| < 0.08 rad/s for 0.5 s, move the command past the target by
+   0.6 × the remaining error) reached < 6° in 2.6-6.4 s in 5 of 5 turns with no fall (§6, run `p1char-bodyturn-*`).
+   Push-and-settle loops converge to within 3° (§6, §7).
+6. Falls **[MEASURED]**: on **wl-isaac (P1)** SONIC had **0 falls** in 2 characterisation runs (about 12 min: 14
+   in-place turns up to 180°, 14 walk start/stop cycles at 0.3-0.7 m/s, 5 curves up to 35°/s, a 60 s stand) at
+   RTF 0.996 with P1's normal hitches (§7). The MuJoCo reference falls now and then (roughly once per 4 min of
+   manoeuvres even with valid timing, more on a busy box): a sim2sim gap, not an Isaac issue. The deploy's own
+   50 Hz loop never missed a tick. P3 should still treat a fall as `failed`.
 7. `command {stop:1}` **terminates the deploy process**. To stop walking, send planner IDLE, or stop publishing
    (after 1 s the deploy forces IDLE).
 
@@ -206,7 +212,7 @@ Required: `mode: i32`, `movement: f32[3]`, `facing: f32[3]`. Optional: `speed: f
   every 1 s while moving (`DEPLOY.cpp:3700-3732`; intervals `DEPLOY.cpp:231-234`). The planner runs at 10 Hz; its 30 Hz output is
   resampled to 50 Hz.
 
-### Start sequence and hand-over (what `sonic/mujoco_ref/drive_ref.py:182-235` does) [MEASURED]
+### Start sequence and hand-over (what `sonic/mujoco_ref/drive_ref.py:249-306` `startup()` does) [MEASURED]
 1. Simulator up, publishing `rt/lowstate` + `rt/secondary_imu` at the physics rate, elastic band **on**.
 2. Bind the planner/command PUB (the deploy's SUB connects to it) and wait ≥ 0.5 s (ZMQ slow joiner). Start
    streaming planner IDLE (`mode=0, movement=[0,0,0], facing=[1,0,0]`) at ≥ 10 Hz right away. Messages
@@ -292,6 +298,21 @@ stops 3-13° short. **Closed-loop turn** (what P3's `turn_to` should do): comman
 | −90° | +2.7°, +1.7° | 6.6 s, 8.2 s | 3 |
 | 180° (10 trials, incl. between walk cycles) | −3.1°..+3.4° (8 trials); one trial with tol 5° ended at 4.8°; one fell during a simulator-stall burst (§7) | 3.8-15 s | 2-4 |
 
+**wl-body `TurnToMotion` emulation on P1** (`char_ref.py --sections bodyturn`, run `p1char-bodyturn-20260929-015011`,
+the exact stepping of `body/motions.py:121-135` in commit 9185dd7: facing advances in ≤ 30° steps from the last
+commanded facing once the robot is within 15° of it; final command = target; success = |err| < 6°; timeout 20 s):
+
+| Δ | as committed: reached 6°? error at timeout | + residual push 0.6: time to < 6° (push applied) |
+|---|---|---|
+| +90° | no, +9.9° | 5.6 s (+6.2°) |
+| −90° | no, −15.2° | 4.1 s (−7.4°) |
+| 180° | no, −10.4° | 6.4 s (−6.1°) |
+| +45° | no, +16.3° | 2.7 s (+9.7°) |
+| −45° | no, −12.4° | 2.6 s (−9.1°) |
+
+The small final steps (15-30°) undershoot proportionally more than one big step. Without the push, the robot
+settles 10-16° short and stays there.
+
 With gain 1 the first correction overshoots (for example 13° → −8° → −1.7°), so a gain of about 0.5-0.7 on the
 residual should converge in fewer steps (untested). **SLOW_WALK with movement 0 and a new facing** reached
 86-88° for ±90° in 3 of 4 trials, but in one trial the planner target ran on to −130° and the robot translated
@@ -324,7 +345,11 @@ that the lag does not cut corners into furniture.
 ## 7. Falls in the MuJoCo reference: what does and does not cause them [MEASURED]
 
 SONIC in the MuJoCo reference loop is not fall-free. It passes the default scenario (`drive_ref.py`) in most
-runs, but falls now and then in the longer characterisation runs. Findings:
+runs, but falls now and then in the longer characterisation runs. An independent diagnosis
+(`docs/walk_diagnosis.md`) reached the same ranking (contention first). Its harness rules are now applied in
+`sonic/mujoco_ref`: stop scoring at the first fall, build commands from the commanded facing, a VALID/INVALID
+timing gate in `report_ref.py` (`metrics.json: timing_gate`), and refusal to run on a busy box unless `--allow-busy`.
+Findings:
 
 - **Not the deploy.** Its control loop ticked at exactly 50.0/s (`g1_debug.index`), including through every
   fall. Policy inference takes ≤ 6.2 ms and the planner ≤ 8.7 ms. Lowstate age at the policy is ≤ 12 ms.
@@ -371,7 +396,30 @@ isolated hitch, is what raises the fall rate**. The IDLE stand never fell: 3 × 
 in §8. Turn accuracy with the ramp and closed loop: every turn without a fall ended within 2.75° of target (20 of 20; 23 of 24 including the turns that fell).
 The Isaac (P1) numbers for the same scenario are below, and they are what M1 depends on.
 
-P1_CHAR_RESULTS
+**The same scenarios on wl-isaac (P1, Isaac Sim 5.1 / PhysX, empty scene, head camera 640x480 at 30 Hz, CPU PhysX
+200 Hz, `--rt-pace`) with the unmodified deploy** (`sonic/isaac_char/run_p1_char.sh`, host `lo`, DDS domain 0,
+ports +400; runs `p1char-20260929-013818` = open-loop turns + gentle envelope, `p1char-aggr-20260929-014450` =
+SLOW_WALK turns, closed-loop turns, 0.3-0.7 m/s cycles, 20-35°/s curves):
+
+| | Isaac P1 (2 runs, about 12 min of manoeuvres) |
+|---|---|
+| falls in the controlled window | **0** (14 in-place turns incl. 180°, 14 walk cycles at 0.3-0.7 m/s, 5 curves up to 35°/s, 60 s stand) |
+| open-loop IDLE turn (achieved / planner target) | 45°: 37.1 / 41.9; −45°: −35.1 / −40.0; 90°: 73.5 / 79.7; −90°: −75.6 / −83.3; 135°: 116.7 / 123.0; −135°: −115.2 / −123.3; same undershoot as MuJoCo |
+| closed-loop turn, gain 1 | +90°: −0.35° (9.3 s); −90°: +1.46° (8.2 s); 180°: +2.86° (11.0 s) |
+| ramped 30°/s + closed loop, gain 0.6 | 8 turns, final \|err\| 0.01-2.68°, 10.9-20 s (settling is slower than in MuJoCo) |
+| SLOW_WALK + zero movement turn | ±90° → residual 5.4° / −9.0°, 0.08-0.13 m translation, no fall |
+| steady speed (cmd → achieved) | 0.3 → 0.23-0.26; 0.4 → 0.22-0.37; 0.5 → 0.43-0.47; 0.7 → 0.59 m/s |
+| stop time (IDLE, v < 0.1 m/s) | 0.39-1.11 s |
+| lateral drift (to the right) | 0.05-0.13 m per 1.4-1.7 m at 0.4 m/s; 0.12-0.18 m per 1.8-2.5 m at 0.5-0.7 m/s |
+| curves (yaw achieved / commanded, mean lag) | 15°/s: 114 / 120, 8°; −15°/s: −104 / −120, 15°; ±20°/s: 105-106 / 120, 10-18°; 35°/s: 191 / 210, 23° |
+| 60 s IDLE stand | pelvis z ≥ 0.786 m, 0 falls |
+| P1 timing during the runs | RTF 0.996-0.997, worst 1 s 0.83-0.84; 12-18 hitches > 25 ms, 6-7 overruns (0.76-0.97 s dropped), 14-20 lowstate heartbeats; leg targets 49.5-50 Hz |
+
+**Conclusion: in the integration simulator the controller is markedly more robust than in the MuJoCo reference.**
+SONIC was trained in Isaac/PhysX (`gear_sonic/envs/manager_env/robots/g1.py`). The MuJoCo falls are a sim2sim
+gap made worse by box load, not a property that carries over to Isaac. Two runs on an empty floor do not prove
+the houses; the M1 drive test (E3) in the house is the real check. The undershoot, speed and drift numbers are
+the same in both sims, so P3's closed loops are needed either way.
 
 What this means for P1 (Isaac): keep physics-loop hitches short (they add risk and waste the deploy's 20 ms
 budget), but P1's current policy (catch up lag under 100 ms, drop beyond, lowstate heartbeat, `m1.md` §1.10) is
@@ -384,10 +432,17 @@ must end the motion as `failed`.
 
 | Run | What it shows |
 |---|---|
-| `quiet-a-20260929-003755/` | **Reference pass, 12/12 checks**: control start 0.2 s after `command start`; g1_debug 50.2 Hz; lowcmd 498 msg/s, leg targets 49.8/s; stand 15 s at z 0.787 m; walk 2.70 m at 0.5 m/s (displacement within 2.2° of the commanded heading); turn +76.3°; strafe 1.12 m; stop mid-walk in 0.78 s; planner-silence timeout → IDLE with no fall; `command stop` ends the process. `video_third_person.mp4`, `video_head_camera.mp4` (offline replay of the 50 Hz ground-truth qpos trace), `report/trajectory.png`, `report/timeseries.png` (pelvis z, yaw, speed, foot contacts, lowcmd leg targets), `metrics.json` (30 touchdowns while walking, left/right alternation 0.86). |
-| `char-20260929-005226/`, `char-20260929-010126/` | Planner response characterisation (§6): `char.json`, `drive_result.json`. Falls in these runs coincide with simulator stalls (§7). |
-| `stall-*` + `stall_matrix-*.txt` | Stall-injection matrix (§7). |
-| `mujoco-ref-20260928-225118` … `-234941` | Earlier runs: the hanging-start hand-over problem (§3 step 4) and the effect of load. |
+| `quiet-a-20260929-003755/` | **MuJoCo reference pass, 12/12 checks, timing gate VALID** (irregular 0.019, RTF 1.000): control start 0.2 s after `command start`; g1_debug 50.2 Hz; lowcmd 498 msg/s with leg targets changing 49.8/s; stand 15 s at z 0.787 m; walk 2.70 m at 0.5 m/s (displacement within 2.2° of the commanded heading); turn +76.3°; strafe 1.12 m; stop mid-walk in 0.78 s; planner-silence timeout → IDLE with no fall; `command stop` ends the process. `video_third_person.mp4`, `video_head_camera.mp4` (offline replay of the 50 Hz ground-truth qpos trace), `report/trajectory.png`, `report/timeseries.png` (pelvis z, yaw, speed, foot contacts, lowcmd leg targets), `metrics.json` (30 touchdowns while walking, left/right alternation 0.86). |
+| `p1char-20260929-013818/`, `p1char-aggr-20260929-014450/` | **The same driver against wl-isaac (P1) + the unmodified deploy**: 0 falls; turn, speed, stop, drift and curve numbers (§7); `trace.npz` (P1 50 Hz record: motor q, q_target, kp, foot contacts), `p1_stats_end.json`, `deploy.log`, `drive_trace.jsonl`, `char.json`. |
+| `p1char-bodyturn-*` | wl-body `TurnToMotion` emulation on P1 (§6, P3 turn guidance). |
+| `char-20260929-005226/`, `char-20260929-010126/` | MuJoCo planner-response characterisation (§6); falls coincide with a busy box (timing gate INVALID for `-010126`). |
+| `gentle-20260929-012145/`, `-012605/`, `-013025/` | MuJoCo conservative envelope (§7). |
+| `stall-{base,burst60,drop60,drop120}-*`, `stall_matrix-20260929-010715.txt` | MuJoCo stall-injection matrix (§7). |
+| `mujoco-ref-20260928-225118` … `-234941` | Earlier runs: the hanging-start hand-over and the effect of box load. |
 
-Reproduce: `bash /work/worldline-g1/sonic/mujoco_ref/run_ref_loop.sh [--driver char_ref.py] [--tag T] [--no-render]`
-(ports 5656/5657/5712, DDS domain 0 on the host `lo`; refuses to start while another deploy runs in the same netns).
+Reproduce:
+- MuJoCo: `bash /work/worldline-g1/sonic/mujoco_ref/run_ref_loop.sh [--driver char_ref.py] [--tag T] [--no-render] [--allow-busy] [-- driver args]`
+  (ports 5656/5657/5712, DDS domain 0 on the host `lo`; refuses to start while another deploy runs in the same
+  netns or while GPU/Isaac jobs run, unless `--allow-busy`).
+- Isaac: `bash /work/worldline-g1/sonic/isaac_char/run_p1_char.sh [--sections turns,gentle|slowwalk,closed,cycles,curves|bodyturn] [--house ID --netns]`
+  (host `lo`, DDS domain 0, ports +400; one Isaac instance).

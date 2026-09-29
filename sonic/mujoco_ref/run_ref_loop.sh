@@ -13,6 +13,7 @@
 #   --driver F    scenario script in this dir: drive_ref.py (default, pass/fail scenario) | char_ref.py (characterisation)
 #   --taskset C   run the sim and the deploy under taskset -c C (e.g. 0-3)
 #   --no-render   skip the offline mp4 render (render_ref.py) after the run
+#   --allow-busy  run even if other GPU / Isaac jobs are on the box (default: refuse, see docs/walk_diagnosis.md)
 #   --sim-args S  extra sim_ref.py args, e.g. "--inject-stall-ms 60 --inject-every-s 3 [--inject-drop]"
 #
 # Ports (build phase, contract +100): planner/command PUB 5656, g1_debug 5657, sim control REP 5712.
@@ -22,7 +23,7 @@ set -euo pipefail
 source "$(dirname "$0")/../sonic_env.sh"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-DRIVER=drive_ref.py; TASKSET=""; SIM_EXTRA=""; RENDER=1; INIT_YAW=0; LONG_STAND=0; VIDEO=""; NICE=""; RT=""; PACE=deadline; BAND_LOWER=0.20; STOP_TEST=--send-stop; TAG=mujoco-ref; DRIVE_EXTRA=()
+DRIVER=drive_ref.py; TASKSET=""; SIM_EXTRA=""; RENDER=1; ALLOW_BUSY=0; INIT_YAW=0; LONG_STAND=0; VIDEO=""; NICE=""; RT=""; PACE=deadline; BAND_LOWER=0.20; STOP_TEST=--send-stop; TAG=mujoco-ref; DRIVE_EXTRA=()
 ZMQ_PORT=5656; ZMQ_OUT_PORT=5657; CTL_PORT=5712
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
     --taskset) TASKSET="$2"; shift 2;;
     --sim-args) SIM_EXTRA="$2"; shift 2;;
     --no-render) RENDER=0; shift;;
+    --allow-busy) ALLOW_BUSY=1; shift;;
     --init-yaw-deg) INIT_YAW="$2"; shift 2;;
     --long-stand) LONG_STAND="$2"; shift 2;;
     --live-video) VIDEO=--video; shift;;
@@ -53,6 +55,15 @@ for p in $ZMQ_PORT $ZMQ_OUT_PORT $CTL_PORT; do
   ss -ltn "sport = :$p" | grep -q LISTEN && die "port $p busy"
 done
 [[ -z "$(deploys_in_my_netns)" ]] || die "a deploy is already running in this network namespace (DDS domain 0 on lo is exclusive)"
+# busy-box preflight (docs/walk_diagnosis.md rule 1): other Isaac / GPU jobs disturb the wall-clock timing between
+# the deploy and the sim, so the result would describe the box, not the controller. --allow-busy overrides (the run
+# is then marked busy in host.txt and the report's timing gate decides VALID/INVALID).
+ISAAC_PIDS=$(isaac_jobs | tr '\n' ' ')
+BUSY="$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>/dev/null | tr '\n' ';')${ISAAC_PIDS:+ isaac_pids=$ISAAC_PIDS}"
+if [[ -n "${BUSY// /}" && "$ALLOW_BUSY" != 1 ]]; then
+  rmdir "$RUN" 2>/dev/null; rm -f "$OUT_ROOT/$TAG-latest"
+  die "box busy (GPU/Isaac jobs: $BUSY); rerun on a quiet box or pass --allow-busy"
+fi
 
 cleanup() {
   set +e
@@ -93,7 +104,7 @@ if [[ -n "$RT" ]]; then
 fi
 ps -L -o tid,cls,rtprio,ni,comm -p "$DPID" > "$RUN/deploy_threads.txt" 2>/dev/null || true
 ps -L -o tid,cls,rtprio,ni,comm -p "$SPID" > "$RUN/sim_threads.txt" 2>/dev/null || true
-echo "sim_pid=$SPID deploy_pid=$DPID taskset=${TASKSET:-none} rt=${RT:-none} nice=${NICE:-0} nproc=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg)" > "$RUN/host.txt"
+echo "busy_at_start=[${BUSY:-}] sim_pid=$SPID deploy_pid=$DPID taskset=${TASKSET:-none} rt=${RT:-none} nice=${NICE:-0} nproc=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg)" > "$RUN/host.txt"
 
 # 3) drive
 ( while kill -0 "$DPID" 2>/dev/null; do echo "$(date +%s) $(ps -o %cpu=,rss= -p "$DPID")" ; top -b -n1 -H -p "$DPID" | sed -n '8,14p' | awk '{print "   thr", $1, $9, $10, $12}'; sleep 5; done ) > "$RUN/cpu.txt" 2>/dev/null &

@@ -61,5 +61,16 @@ deploys_in_my_netns() {
   return 0
 }
 
+# PIDs of running Isaac Lab / Isaac Sim python processes (argv[0] is the isaaclab env python). Matched on argv[0],
+# not the whole command line, so shells that merely mention the path are not counted.
+isaac_jobs() {
+  local p a0
+  for p in $(pgrep -f 'isaaclab/bin/python' || true); do
+    a0=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | head -1)
+    [[ "$a0" == */isaaclab/bin/python* ]] && echo "$p"
+  done
+  return 0
+}
+
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die()  { log "ERROR: $*"; exit 1; }
