@@ -107,9 +107,18 @@ up() {
   log "no ping through the link yet (server down? see $LOG_DIR/link-$LPORT.log); the link keeps retrying"
 }
 
+link_ssh_pids() {  # the ssh/autossh clients of this link only (never a shell whose command line mentions it)
+  local p
+  for p in $(pgrep -x ssh; pgrep -x autossh); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qF -- "-L 127.0.0.1:$LPORT:127.0.0.1:$PORT " && echo "$p"
+  done
+  return 0
+}
+
 down() {
   tmux kill-session -t "$SESSION" 2>/dev/null && log "tmux $SESSION killed" || log "no tmux $SESSION"
-  pkill -f -- "-L 127.0.0.1:$LPORT:127.0.0.1:$PORT" 2>/dev/null || true
+  local p; for p in $(link_ssh_pids); do kill "$p" 2>/dev/null && log "killed ssh $p"; done
+  return 0
 }
 
 status() {

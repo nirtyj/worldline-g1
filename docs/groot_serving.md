@@ -380,7 +380,12 @@ PASS  pty refused
 PASS  selftest key removed
 ```
 
-The main box was not touched in wave 1; the main→dev tunnel itself is untested (§7).
+Loopback run of the production commands on the dev box (`outputs/m2b_wave1/groot/link_uptest.log`; a temp key
+installed with `install-key --from 127.0.0.1`, `up --host 127.0.0.1 --local-port 25550`): `up` reported the
+PolicyServer answering through the link, `check` pinged in 4.9 ms; after the tunnel's ssh was killed, the reconnect
+loop restored it (a ping 1 s later succeeded, log: `ssh exited …; reconnect in 2 s`); `down` removed it (ping then
+failed as expected); `remove-key` left no test line. The main box was not touched in wave 1; the main→dev tunnel
+itself is untested (§7).
 
 ## 7. Open items
 
