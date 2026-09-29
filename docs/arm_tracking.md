@@ -24,7 +24,7 @@ RMS, 45-58 mm max over a reach-grasp-lift).
 | Balance | torso tilt ≤ 7.1° standing (arms moving), ≤ 6.8° walking; base drift ≤ 2.5 cm per segment | tilt ≤ 9.4°; drift ≤ 2.9 cm per segment | **pass** |
 | Latency (sine phase lag, shoulder/elbow/wrist roll) | 127-215 ms (0.2-1 Hz); step dead time 70-120 ms, t50 120-180 ms | residual −19..+75 ms after the lead | **fail** raw; pass only for clients that know their future targets |
 | Palm error, held poses | 17-52 mm (arms-up 75 mm) | 2-13 mm; counter reach 19-24 mm; arms-up 11-36 mm | **pass** for typical poses with the servo |
-| Palm error, reach-grasp-lift (1.0-1.5 s moves) | 40 mm RMS, 68 mm max | 22-25 mm RMS, 45-54 mm max | **fail** (> 20 mm) |
+| Palm error, reach-grasp-lift (1.0-1.5 s moves) | 40 mm RMS, 68 mm max | 22-25 mm RMS, 45-57 mm max | **fail** (> 20 mm) |
 | Wrist pitch | gain 0.22-0.46 at 0.2-1 Hz (not tracked) | unchanged (0.22-0.42) | **fail**: effectively a ±0.1 rad joint |
 | Hands (Dex3) | fingers and thumb_2 of the left hand within 0.02 rad; right hand closes to 0.72; both thumbs' rotation joints stuck | same | channel **pass**, sim hand **fail** (P1/asset, §3.7) |
 
@@ -113,8 +113,8 @@ table must be within ~0.35 m of the pelvis.
 ### 3.1 Balance, falls, drift
 
 0 falls in all runs (fall = gt `fallen` or pelvis z < 0.55 m). Standing with the arms moving: torso tilt ≤ 7.1° raw
-and ≤ 9.4° with the servo (both maxima during the fastest large move, arms-up → default: 2.7 rad of shoulder pitch in
-1.5 s); ≤ 11.4° with ki 4. Without override: tilt ≤ 2.9°. Pelvis height std ≤ 1 mm while standing. Base drift ≤ 2.5-3.0
+and ≤ 9.0° with the servo (both maxima during the fastest large move, arms-up → default: 2.7 rad of shoulder pitch in
+1.5 s); ≤ 11.4° with ki 4. The 9.4° whole-run maximum of run 3 is a walk leg *without* the override (§3.6). Without override: tilt ≤ 2.9°. Pelvis height std ≤ 1 mm while standing. Base drift ≤ 2.5-3.0
 cm per segment (≤ 0.4 cm without override), about 0.13-0.5 m summed over all standing segments of a run; the robot
 re-steps rather than slides. Plot: `pelvis.png`.
 

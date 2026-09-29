@@ -85,7 +85,8 @@ DEFAULT_ANGLES: tuple[float, ...] = (
 
 # URDF limits (rad): $WBC/gear_sonic/data/assets/robot_description/urdf/g1/main.urdf (the URDF P1 converts,
 # sim_isaac/g1_asset.py:29) for the body, g1_29dof_with_hand.urdf for the Dex3 joints. The deploy's
-# dex3_hands.hpp:460-463 MAX/MIN_LIMITS_* equal the hand values to 2 decimals.
+# dex3_hands.hpp:460-463 MAX/MIN_LIMITS_* equal the hand values to 2 decimals, except right thumb_1 max: the deploy
+# has 0.742, the URDF 0.72431163 (we clamp to the URDF, which is tighter).
 JOINT_LIMITS: dict[str, tuple[float, float]] = {
     "left_hip_pitch_joint": (-2.5307, 2.8798), "left_hip_roll_joint": (-0.5236, 2.9671),
     "left_hip_yaw_joint": (-2.7576, 2.7576), "left_knee_joint": (-0.087267, 2.8798),
