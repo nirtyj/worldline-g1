@@ -137,7 +137,7 @@ A pick that needs a reach stance adds the approach (15 s mean, §2).
 `world/workspace_cal.py coverage` runs every pickable that starts on a map surface through the runtime's own
 `check_reachability`, with the calibrated arm. The robot starts at the object's surface keypoint; on
 `needs_reposition` it moves to the stance and checks again. There are 130 pickables in H40/H15/K10/H38, 110 of them
-in the height band. `outputs/.../coverage_final/coverage.json`:
+in the height band (`outputs/m2b_wave2/world-cal/coverage_*/coverage.json`):
 
 | Stance rule | In-band pickables |
 |---|---|
@@ -167,8 +167,9 @@ What the runtime and config changes do, from 15 % towards 22.7 % (with the appro
 **Stands** (`mapgen`): `stand_off_m` [0.27, 0.45] (was [0.35, 0.50]) and `stand_clearance_m` 0.25. Place never
 repositions, and with the calibrated arm no spot on any user surface was in reach from a 0.35 m stand. From 0.27 m,
 the H40 and H15 user surfaces accept a placement. Live, go_to to the moved `kitchen_counter_1a` stand (0.30 m of raw
-clearance) succeeded 8 of 8, with the body's final error 1.6-6.1 cm. A deep-stretch split for L/U counter legs (`split_deep_m`) is in `world/mapgen.py` but off (0): it gains
-4 points and renames the counter stretches the bindings use.
+clearance) succeeded 8 of 8, with the body's final error 1.6-6.1 cm. A deep-stretch split for L/U counter legs
+(`split_deep_m`) is in `world/mapgen.py` but off (0): it gains 4 points and renames the counter stretches the
+bindings use.
 
 ## 5. Scenario decisions (eval/scenes.yaml)
 
