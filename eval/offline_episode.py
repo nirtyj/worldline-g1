@@ -167,6 +167,33 @@ def check_sequence(trace: list[dict[str, Any]], steps: list[Step]) -> list[dict[
     return out
 
 
+def manipulations(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every manipulate that ran, with each attempt behind its result (PLAN 6.4 groot_then_script: the GR00T attempt
+    and the labelled fallback are both in data.attempts): which executor did the manipulation, and which tried."""
+    out = []
+    for r in _results(trace):
+        if r.get("tool") != "manipulate" or r.get("kind") == "rejection" or r.get("status") == "rejected":
+            continue
+        d = r.get("data") or {}
+        out.append({"execution_id": r.get("execution_id"), "action": r.get("action") or d.get("action"),
+                    "status": r.get("status"), "reason": d.get("reason"), "executor": r.get("executor"),
+                    "skill": d.get("skill"), "arm": d.get("arm"), "stepping_stone": d.get("stepping_stone"),
+                    "attempts": [{k: a.get(k) for k in ("executor", "skill", "label", "status", "reason", "duration_s")}
+                                 for a in d.get("attempts") or []],
+                    "fallback_from": d.get("fallback_from")})
+    return out
+
+
+def manipulation_line(m: dict[str, Any]) -> str:
+    """'pick failed(ik_unreachable) by sonic_arm_script [STEPPING STONE]: groot_arms failed(grasp_missed) ->
+    sonic_arm_script failed(ik_unreachable)'."""
+    tries = " -> ".join(f"{a.get('executor')} {a.get('status')}" + (f"({a.get('reason')})" if a.get("reason") else "")
+                        for a in m["attempts"]) or "-"
+    what = f"{m['action']} {m['status']}" + (f"({m['reason']})" if m.get("reason") else "")
+    stone = " [STEPPING STONE]" if m.get("stepping_stone") else ""
+    return f"{what} by {m['executor']}{stone}, {m.get('arm') or '?'} arm: {tries}"
+
+
 def _int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
@@ -341,7 +368,8 @@ async def run_episode(*, speed: float = 40.0, scenario: str = SCENARIO, system1:
     return {"ok": ok, "scenario": scenario, "profile": profile, "url": url if live else None,
             "config": init_cfg, "speed": None if live else speed, "system1": None if live else system1,
             "planner": None if live else planner, "user": user, "score": score, "steps": steps, "checks": checks,
-            "wall_s": round(time.monotonic() - t0, 1), "trace": trace, "events": events}
+            "manipulate": manipulations(trace), "wall_s": round(time.monotonic() - t0, 1), "trace": trace,
+            "events": events}
 
 
 def write(result: dict[str, Any], out: Path) -> tuple[Path, Path]:
@@ -408,6 +436,8 @@ def main() -> int:
         print(f"  {'ok ' if s['ok'] else 'MISSING'}  {s['step']}")
     for c in result["checks"]:
         print(f"  {'ok ' if c['ok'] else 'FAIL'}  {c['check']}")
+    for m in result.get("manipulate") or []:
+        print(f"  manipulate {manipulation_line(m)}")
     sc = result["score"]
     verdict = "PASS*" if sc["fallback_pass"] else ("PASS" if sc["passed"] else "FAIL")
     print(f"\n{verdict} {result['scenario']} on {result['profile']}: {sc['note']} · {sc['decisions']} decisions · "

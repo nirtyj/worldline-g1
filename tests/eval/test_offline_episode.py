@@ -32,6 +32,12 @@ def test_the_offline_f1_episode_delivers_and_shows_the_f1_shape(tmp_path):
     # honesty: a lite pass is a labelled fallback pass, never a target pass (PLAN 2.3, 12.2)
     assert res["score"]["fallback_pass"] and not res["score"]["target_pass"]
     assert res["score"]["executors_used"]["manip"] == {"lite": 2}
+    # which executor manipulated, attempt by attempt (E1 reports it; on full: the GR00T attempt, then the fallback)
+    man = res["manipulate"]
+    assert [(m["action"], m["status"], m["executor"]) for m in man] == [("pick", "succeeded", "lite"),
+                                                                        ("place", "succeeded", "lite")], man
+    assert man[0]["attempts"] and man[0]["attempts"][0]["executor"] == "lite", man[0]
+    assert ep.manipulation_line(man[0]).startswith("pick succeeded by lite"), ep.manipulation_line(man[0])
     # the recorded trace is complete and ordered
     jl, summ = ep.write(res, tmp_path / "episode")
     rows = jl.read_text().splitlines()

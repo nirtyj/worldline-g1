@@ -3,7 +3,10 @@
 # page through an SSH tunnel, record it with the viz recorder, and pull the recording and the stack's logs.
 #
 #   BREV_NAME=<box> scripts/m2_smoke.sh --label NAME [--session wl-m2] [--profile sonic] [--timeout 600]
-#                                       [--out DIR] [--no-record]
+#                                       [--out DIR] [--no-record] [--scenario fetch_other_room]
+#
+# --scenario: the eval/suite.py scenario the referee plays (default fetch_other_room, F1). correction (F3) and
+# stop_resume (F4) deliver the same alarm clock, so the F1 shape checks still apply to them.
 #
 # Needs a stack already up on the box (scripts/m2_up.sh), started with the planner and System 1 the smoke test calls
 # for; the page's port and offset are read from the box's P5 state. Steps:
@@ -19,7 +22,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 INFRA=${INFRA:-$ROOT/../ludo_robotics_prep_g1/00_infra}
-LABEL=""; SESSION=wl-m2; PROFILE=sonic; TIMEOUT=600; OUT=$ROOT/outputs/m2b_wave1/ops; RECORD=1
+LABEL=""; SESSION=wl-m2; PROFILE=sonic; TIMEOUT=600; OUT=$ROOT/outputs/m2b_wave1/ops; RECORD=1; SCENARIO=fetch_other_room
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --label) LABEL="$2"; shift 2;;
@@ -28,6 +31,7 @@ while [[ $# -gt 0 ]]; do
     --timeout) TIMEOUT="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --no-record) RECORD=0; shift;;
+    --scenario) SCENARIO="$2"; shift 2;;
     -h|--help) sed -n '2,20p' "$0"; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
@@ -79,10 +83,10 @@ if [[ "$RECORD" == 1 ]]; then
 fi
 
 # ---- 3. the episode (the referee runs here, on the laptop)
-say "episode: eval.offline_episode --url ws://127.0.0.1:$PORT/ws --profile $PROFILE --timeout $TIMEOUT"
+say "episode: eval.offline_episode --url ws://127.0.0.1:$PORT/ws --profile $PROFILE --scenario $SCENARIO --timeout $TIMEOUT"
 T0=$SECONDS
 (cd "$ROOT" && .venv-rt/bin/python -m eval.offline_episode --url "ws://127.0.0.1:$PORT/ws" --profile "$PROFILE" \
-   --timeout "$TIMEOUT" --out "$DEST/episode") 2>&1 | tee "$DEST/episode.txt"
+   --scenario "$SCENARIO" --timeout "$TIMEOUT" --out "$DEST/episode") 2>&1 | tee "$DEST/episode.txt"
 RC=${PIPESTATUS[0]}
 say "episode finished in $((SECONDS - T0)) s wall, exit $RC"
 
