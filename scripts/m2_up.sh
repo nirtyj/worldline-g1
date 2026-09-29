@@ -55,7 +55,8 @@ case "$VIZ" in off|min|low|high) ;; *) echo "--viz must be off, min, low or high
 [[ "$OFFSET" =~ ^[0-9]+$ ]] || { echo "--port-offset must be a number" >&2; exit 2; }
 [[ "$VIZ" != off ]] && ISAAC_ARGS="${ISAAC_ARGS:+$ISAAC_ARGS }--viz $VIZ"
 P5_PORT=${P5_PORT:-$((8765 + OFFSET))}
-export NAV_BACKEND=astar WL_PORT_OFFSET=$OFFSET ISAAC_ARGS
+# one tree and one state dir for every script this calls (m1_up.sh, m2_p5.sh, m1_down.sh read these from the env)
+export WL PY_RT PY_BODY LOGD M2_STATE NAV_BACKEND=astar WL_PORT_OFFSET=$OFFSET ISAAC_ARGS
 P5_ARGS=(--session "$SESSION" --port-offset "$OFFSET" --port "$P5_PORT" --profile "$PROFILE" --scene "$SCENE"
          ${PLANNER:+--planner "$PLANNER"} ${SYSTEM1:+--system1 "$SYSTEM1"})
 
@@ -76,6 +77,7 @@ print(parse_scene(sys.argv[1], load_profile(sys.argv[2]))[0])' "$SCENE" "$PROFIL
 if [[ "$DRY" == 1 ]]; then
   HOUSE=$(house_of 2>/dev/null || echo "${SCENE%%@*}")
   echo "session=$SESSION profile=$PROFILE scene=$SCENE house=$HOUSE port_offset=$OFFSET nav_backend=$NAV_BACKEND"
+  echo "tree: WL=$WL (child scripts see WL=$(bash -c 'echo $WL') M2_STATE=$(bash -c 'echo $M2_STATE'))"
   echo "m1_up: bash $WL/scripts/m1_up.sh --house $HOUSE --port-offset $OFFSET --session $SESSION (ISAAC_ARGS='$ISAAC_ARGS')"
   echo "p5: bash $WL/scripts/m2_p5.sh start ${P5_ARGS[*]}"
   echo "page: http://127.0.0.1:$P5_PORT (laptop: BREV_NAME=<box> 00_infra/tunnel.sh $P5_PORT)"

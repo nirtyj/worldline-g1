@@ -15,6 +15,7 @@ set -uo pipefail
 WL=${WL:-/work/worldline-g1}
 PY_BODY=${PY_BODY:-$WL/.venv/bin/python}
 M2_STATE=${M2_STATE:-$WL/outputs/m2}
+export WL PY_BODY M2_STATE                  # m2_p5.sh and m1_down.sh act on the same tree and state
 SESSION=wl-m2; OFFSET=""; P5_ONLY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in

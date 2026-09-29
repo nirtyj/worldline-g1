@@ -79,6 +79,7 @@ def test_up_dry_run(tmp_path):
     assert "--port 9065 --profile full --scene procthor-train-40@a" in out   # 8765 + offset
     assert "nav_backend=astar" in out                                   # Nav2 deferred (PLAN §0.8)
     assert "groot:" in out                                              # full plans the link check (or its skip note)
+    assert f"child scripts see WL={ROOT} M2_STATE={tmp_path / 'state'})" in out   # m1_up.sh/m2_p5.sh use this tree
     r = _run([str(SCRIPTS / "m2_up.sh"), "--dry-run", "--p5-port", "8795",
               "--planner", "brains.scripted:create", "--system1", "tests.kept.system1_stub:create"], _env(tmp_path))
     assert r.returncode == 0, r.stderr
