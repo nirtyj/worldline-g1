@@ -123,9 +123,10 @@ async def test_every_tool_returns_a_valid_envelope(backend):
     reach = await _run(robot, clock, "check_reachability",
                        {"object_type": "banana", "candidates": [], "at": kp})
     _check(reach)
-    # PLAN 6.4 order says not_found for "no instance in candidates"; not_seen_here leaks nothing either
+    # PLAN 6.4 step 2: no instance of that type in candidates -> not_found, with no object id (nothing leaks)
     assert reach.status == "succeeded" and reach.data["reachable"] is False
-    assert reach.data["reason"] in ("not_found", "not_seen_here") and reach.data["visible"] is False
+    assert reach.data["reason"] == "not_found" and reach.data["visible"] is False
+    assert reach.data["object_id"] is None
 
 
 async def test_halt_is_fast_and_stops_a_walk(backend):

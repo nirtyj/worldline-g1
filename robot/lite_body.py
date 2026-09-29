@@ -35,6 +35,9 @@ class LiteFaults:
     final_error_m: float = 0.0               # arrive this far short of the goal
 
 
+MAX_DT_S = 1.0                               # a longer stall than this (a debugger, a GC pause) is not integrated
+
+
 class LiteBody:
     name = "lite"
 
@@ -148,7 +151,19 @@ class LiteBody:
             return "halted"
         return state.get("stop")
 
+    def _dt(self, state: dict) -> float:
+        """Sim seconds since the last motion step of this op (capped at MAX_DT_S). Motion integrates over the
+        elapsed sim time, not a fixed tick, so a loaded event loop at a high clock speed does not make the body
+        lag the sim clock that every timeout is measured on."""
+        now = self.clock.now()
+        last = state.get("t_step")
+        state["t_step"] = now
+        if last is None:
+            return self.tick
+        return min(max(0.0, now - last), MAX_DT_S)
+
     async def _turn(self, state: dict, target: float, tol: float = math.radians(3.0)) -> str | None:
+        state["t_step"] = self.clock.now()
         while True:
             why = self._stopping(state) or self._fault_now(state)
             if why:
@@ -158,7 +173,7 @@ class LiteBody:
             if abs(err) <= tol:
                 self.world.set_robot_pose(p.x, p.y, target)
                 return None
-            step = math.copysign(min(abs(err), self.turn_rate * self.tick), err)
+            step = math.copysign(min(abs(err), self.turn_rate * self._dt(state)), err)
             self.world.set_robot_pose(p.x, p.y, p.yaw + step, wz=math.copysign(self.turn_rate, err))
             await self.clock.sleep(self.tick)
 
@@ -174,14 +189,21 @@ class LiteBody:
         return None
 
     async def _glide(self, v: float, pts, s: float, total: float) -> float:
-        """Decelerate to rest over stop_s along the path; returns the new arc length."""
-        n = max(1, int(self.stop_s / self.tick))
-        for i in range(n):
-            v_i = v * (1.0 - (i + 1) / n)
-            s = min(total, s + v_i * self.tick)
+        """Decelerate linearly to rest over stop_s (sim time) along the path; returns the new arc length."""
+        t0 = self.clock.now()
+        last = t0
+        while True:
+            now = self.clock.now()
+            el = min(now - t0, self.stop_s)
+            dt = min(max(0.0, now - last), MAX_DT_S)
+            last = now
+            v_i = v * (1.0 - el / self.stop_s) if self.stop_s > 0 else 0.0
+            s = min(total, s + v_i * dt)
             x, y = _interp(pts, s)
             p = self.world.robot_pose()
             self.world.set_robot_pose(x, y, p.yaw, vx=v_i * math.cos(p.yaw), vy=v_i * math.sin(p.yaw))
+            if el >= self.stop_s:
+                break
             await self.clock.sleep(self.tick)
         p = self.world.robot_pose()
         self.world.set_robot_pose(p.x, p.y, p.yaw)
@@ -212,6 +234,7 @@ class LiteBody:
         s = 0.0
         last_prog_t, last_prog_s = self.clock.now(), 0.0
         timeout = float(a.get("timeout_s") or 180.0)
+        state["t_step"] = self.clock.now()
         while s < total - 1e-6:
             why = self._stopping(state) or self._fault_now(state)
             if why:
@@ -223,8 +246,9 @@ class LiteBody:
                 data["walked_m"] = round(s, 3)
                 return "failed", {**data, "reason": "timeout"}
             stuck = self.faults.stuck_after_s is not None and self.clock.now() - state["t0"] >= self.faults.stuck_after_s
+            dt = self._dt(state)
             if not stuck:
-                s = min(total, s + v * self.tick)
+                s = min(total, s + v * dt)
             if s - last_prog_s > 0.08:
                 last_prog_t, last_prog_s = self.clock.now(), s
             elif self.clock.now() - last_prog_t > 3.0:

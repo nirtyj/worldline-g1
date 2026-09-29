@@ -3,10 +3,12 @@
 Checks, in THOR's order (thor/robot.py:434-459) so prompts and eval semantics carry over, plus the G1 ones:
 
   1. base_moving          the body is walking / turning (or navigate is running)
-  2. not_found            the object_id / candidates name nothing that exists
+  2. not_found            the object_id / candidates name nothing that exists; without candidates, nothing of that
+                          type is visible, in the last scan here or in a hand. Same answer (and no object id)
+                          whether or not an instance exists elsewhere, so "no banana" is never revealed
   3. in_hand              already held
-  4. not_seen_here        not visible now and not in the last scan here -> visible=false (positions never leak;
-                          also the answer for a type with no visible instance, so "no banana" is never revealed)
+  4. not_seen_here        a candidate that is not visible now and not in the last scan here -> visible=false
+                          (positions never leak)
   5. inside_or_on_<x>     its where is not a map surface (fridge, chair, floor, ...)
   6. too_high / too_low   object centre above obj_z_max_m / below obj_z_min_m (squat mode deferred)
   7. in the reach window  forward reach_fwd_m and |lateral| <= reach_lat_max_m in the CURRENT pelvis frame, and
@@ -228,12 +230,15 @@ class ReachabilityModel:
             same_type = [c for c in known if objs[c].type == object_type] or known
             ordered = sorted(same_type, key=lambda c: (c not in visible, c not in seen))
         else:
+            # No candidates from belief: only what the robot perceives now (visible, the last scan here, its
+            # hands) can bind an instance. Nothing perceivable -> not_found (PLAN 6.4 step 2: "no instance of that
+            # type in candidates"), the same answer whether or not one exists elsewhere, with no object id, so
+            # neither an unseen instance's id nor an absence (eval missing_object) leaks.
             of_type = [oid for oid, o in objs.items() if o.type == object_type]
             ordered = sorted(of_type, key=lambda c: (c not in visible, c not in seen, c))
-            ordered = [c for c in ordered if c in visible or c in seen or objs[c].held_by] or ordered[:1]
+            ordered = [c for c in ordered if c in visible or c in seen or objs[c].held_by]
             if not ordered:
-                # no instance of that type anywhere: answer as unseen (never reveal absence, eval missing_object)
-                return res(reason="not_seen_here")
+                return res(reason="not_found")
         oid = ordered[0]
         o = objs[oid]
         # 3. in hand

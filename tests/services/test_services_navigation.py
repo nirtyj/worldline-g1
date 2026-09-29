@@ -67,12 +67,18 @@ def test_unknown_location_fails_without_moving():
     run(main())
 
 
+# House 38's walk from the start to bedroom_bed_1b passes straight through the living_room_dining_table_1a/1b stands
+# (0.9-2.8 m along the path); from 3.2 m to 8 m it is > 0.7 m from every keypoint. A robot stopped there is
+# `between`, not `at` a keypoint it happened to cross (at() is "a keypoint within 0.30 m").
+BETWEEN_S = 9.0                          # ~4 m along at 0.45 m/s: well inside the keypoint-free stretch
+
+
 def test_cancel_mid_walk_ends_between_and_stops():
     s = Stack()
 
     async def main():
         h = s.robot.start(s.ex("navigate", {"location": "bedroom_bed_1b"}))
-        await s.clock.sleep(4.0)
+        await s.clock.sleep(BETWEEN_S)
         assert s.robot.base_state()["moving"]
         h.cancel("correction")
         r = await h.result()
@@ -149,7 +155,7 @@ def test_service_timeout_is_timed_out():
     s = Stack()
 
     async def main():
-        r = await s.run("navigate", {"location": "bedroom_bed_1b", "timeout_s": 3.0})
+        r = await s.run("navigate", {"location": "bedroom_bed_1b", "timeout_s": BETWEEN_S})
         assert r.status == "timed_out" and r.data["reason"] == "timeout"
         assert r.data["between"] == ["start", "bedroom_bed_1b"]
     run(main())

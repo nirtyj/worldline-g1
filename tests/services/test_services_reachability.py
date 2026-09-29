@@ -73,11 +73,21 @@ def test_not_found_for_an_unknown_id():
 def test_not_seen_here_hides_positions():
     s = Stack()
     s.put_at("living_room_tv_stand_1a")
-    r = _check(s, "alarm_clock")                     # it is in the bedroom
-    assert r.reason == "not_seen_here" and r.visible is False
+    r = _check(s, "alarm_clock", candidates=["alarm_clock_1"])   # belief names it; it is in the bedroom
+    assert r.reason == "not_seen_here" and r.visible is False and r.object_id == "alarm_clock_1"
     assert r.distance_m is None and r.stance is None
-    r2 = _check(s, "banana")                         # no banana anywhere: same answer, nothing revealed
-    assert r2.reason == "not_seen_here" and r2.object_id is None
+
+
+def test_nothing_perceivable_is_not_found_and_leaks_nothing():
+    """PLAN 6.4 step 2. Without candidates, an unseen alarm clock (it exists, in the bedroom) and a banana (there
+    is none) get the same answer, with no object id: neither an unseen instance nor an absence leaks."""
+    s = Stack()
+    s.put_at("living_room_tv_stand_1a")
+    r = _check(s, "alarm_clock")
+    r2 = _check(s, "banana")
+    for x in (r, r2):
+        assert x.reason == "not_found" and x.visible is False and x.object_id is None
+        assert x.distance_m is None and x.stance is None and x.suggest_location is None
 
 
 def test_in_hand_and_hand_full():

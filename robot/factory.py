@@ -4,7 +4,7 @@
             "@" selects the MolmoSpaces house). config/stack.yaml `scenes:` may map a scene key to a house and set
             per-scene overrides such as `user_surface`.
 
-    lite      LiteWorld(recorded house) + LiteBody (kinematic)            frames: none
+    lite      LiteWorld(recorded house) + LiteBody (kinematic)            frames: LiteFrames (schematic; `frames: none` off)
     bringup   IsaacGTWorldModel(P1 5600/5601) + SonicBody(wl-body 5610)   frames: viz FrameTap
     sonic     same                                                        (+ scan/manip executors per profile)
     full      same (+ groot_sonic stub)
@@ -47,14 +47,14 @@ def build(profile: str | StackProfile, scene: str | None = None, clock: Any = No
     cam = camera_of(prof)
     user_surface = kw.get("user_surface", scfg.get("user_surface"))
     if prof.world == "lite":
-        from world.frames import NoFrames
+        from world.frames import LiteFrames, NoFrames
         from world.lite_world import LiteWorld
 
         from .lite_body import LiteBody
         world = LiteWorld(kw.get("house_dir") or house, scene_key=scene, map_params=mp, camera=cam,
                           user_surface=user_surface)
         body = LiteBody(world, clock, prof.g1.get("walking"))
-        frames = NoFrames()
+        frames = kw.get("frames") or (LiteFrames(world) if prof.frames == "lite" else NoFrames())
     elif prof.world == "isaac":
         from world.frames import IsaacFrames
         from world.isaac_client import IsaacGTWorldModel

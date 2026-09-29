@@ -8,4 +8,4 @@ scan_executor: turn_in_place      # same interim executor as sonic, driven by th
 manipulation:
   executors: [lite]
 nav_executor: lite
-frames: none
+frames: lite                      # world/frames.py LiteFrames: schematic head frames from GT detections (labelled)
