@@ -232,7 +232,11 @@ name: for that op send `upper_body_mj17[k]` or `arm_targets_named(k)`, never `up
 vector read as mj17 puts left-arm values on right-arm joints. The waist is left to the op's default
 (`waist: "ref"`, SONIC's own reference), which holds the stand waist.
 
-Proposed skill registry entry (config/skills.yaml is owned by world/runtime; request in the wave-1 result):
+Proposed skill registry entry (config/skills.yaml is owned by world/runtime; request in the wave-1 result). **As
+built:** `config/skills.yaml` has `groot.pick.apple.arena_static_experimental.v0` (apple) and
+`groot.pick.any.arena_static_experimental.v0` (any pickupable, the same sentence with the label swapped), status
+`available` (SkillSpec has no `off_the_shelf`), label `experimental`, prompt = `groot.obs.DEFAULT_PROMPT` (the
+integrator switched it from Arena's string after §6.2.1):
 
 ```yaml
   - skill_id: groot.pick.apple.arena_static.v0

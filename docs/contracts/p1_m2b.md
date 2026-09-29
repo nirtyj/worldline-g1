@@ -411,7 +411,13 @@ heavy op while SONIC holds the robot), `internal` (an exception; the text says w
 - `world/frames.py IsaacFrames` subscribes 5565 itself and keeps the §5.2 metadata. `viz.tap.FrameTap` (the page and
   recorder) still passes only `t_wall, t_sim, seq` of 5565 frames through `meta("head")`; it shows the head camera
   correctly (it takes the first image when `ego_view` is absent).
-- `services/executors/groot_arms.py ZmqSensors` reads ego_view from 5566 with `t_capture_mono` (§5.2).
+- `services/executors/groot_arms.py ZmqSensors` reads ego_view from 5566 with `t_capture_mono` (§5.2). The session
+  enables the camera BEFORE its view check (`detections` answers `camera_off` otherwise, §7) with `{hz: 30,
+  consumer: <execution id>, ttl_s: 10}`, renews it every 3 s and disables it at the end. Live (dev box, wave-1
+  integration, `docs/M2b_wave1.md` §3): first frame 0.182 and 0.205 s after enabling, 29.4 Hz received during a
+  12.6 s session, view check 1891 and 13213 px of the target (`instance_id_segmentation_fast`).
+- Both fakes serve the same keys for every op and topic above: `tests/contract/test_p1_m2b_fakes.py` runs
+  `tools/fake_p1.py` and `tests/fakes/fake_p1_world.py` side by side against this document.
 
 ---
 

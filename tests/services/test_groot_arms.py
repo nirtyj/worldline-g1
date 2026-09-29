@@ -30,6 +30,7 @@ from services.executors.kinematic_attach import ManipJob  # noqa: E402
 from services.skills import load_skill_specs  # noqa: E402
 from tests.fakes.fake_arm_body import FakeArmBody  # noqa: E402
 from tests.fakes.fake_policy_server import FakePolicyServer  # noqa: E402
+from groot.obs import DEFAULT_PROMPT  # noqa: E402
 from world.model import Detection, ObjectState, RobotPose  # noqa: E402
 
 APPLE = "groot.pick.apple.arena_static_experimental.v0"
@@ -78,8 +79,8 @@ class FakeWorld:
     def palm_position(self, arm):
         return tuple((self.box[0][i] + self.box[1][i]) / 2 for i in range(3)) if self.palm else None
 
-    def enable_camera(self, camera, on, *, consumer="runtime", ttl_s=None):
-        self.cam_calls.append((camera, on, consumer, ttl_s, time.monotonic()))
+    def enable_camera(self, camera, on, *, consumer="runtime", ttl_s=None, hz=None):
+        self.cam_calls.append((camera, on, consumer, ttl_s, time.monotonic(), hz))
         return {"name": camera, "on": on}
 
     def hands(self):
@@ -209,7 +210,7 @@ def test_success_from_ground_truth_hands_over_to_the_carry_hold():
         end = r.body.messages("end", "man-1")[-1]
         assert end["args"]["hold_on_end"] == "target" and end["reply"]["ok"]
         assert r.body.hold["mode"] == "target"
-        assert r.srv.prompts and set(r.srv.prompts) == {"move the apple to the plate"}
+        assert r.srv.prompts and set(r.srv.prompts) == {DEFAULT_PROMPT}          # the dataset's own sentence
         assert {"manip.phase", "groot.inference", "arm.progress", "policy.health"} <= r.sink.types()
 
 
@@ -462,11 +463,12 @@ def test_view_check_skipped_is_labelled_and_the_camera_is_leased():
         off = [c for c in r.world.cam_calls if not c[1]]
         assert len(on) >= 2 and len(off) == 1 and off[0][4] > on[-1][4]         # enabled, renewed, released
         assert {(c[0], c[2], c[3]) for c in r.world.cam_calls} == {("ego_view", "man-1", 10.0)}
+        assert {c[5] for c in on} == {30.0} and off[0][5] is None               # the rate travels with every enable
+        assert out.data["camera_first_frame_s"] is not None and on[0][4] < r.body.log[0]["t"]  # camera before arm
 
 
 # ================================================================================================ registry, profile
 def test_registry_backend_and_the_experimental_skills():
-    from groot.obs import ARENA_PROMPT
     from robot.profile import load_profile
 
     assert EXECUTOR_OF_BACKEND["groot"] == "groot_arms" and DEPRECATED_EXECUTORS == {"groot_sonic": "groot_arms"}
@@ -477,7 +479,7 @@ def test_registry_backend_and_the_experimental_skills():
         assert s.status == "available" and s.embodiment_tag == "new_embodiment" and s.arms == ("left",)
         assert s.checkpoint.startswith("nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace@")
         assert s.policy_endpoint == "tcp://127.0.0.1:5550" and s.success["kind"] == "gt_lifted"
-    assert SKILLS[APPLE].prompt_template == ARENA_PROMPT                 # the checkpoint's trained instruction
+    assert SKILLS[APPLE].prompt_template == DEFAULT_PROMPT               # the checkpoint's dataset sentence
     assert SKILLS["groot.pick.bottle.cloudwalk.v0"].status == "planned"  # retired with groot_sonic
     reg = StaticSkillRegistry(SKILLS.values(), vocab=["apple", "alarm_clock"], backend_order=BACKEND_ORDER["full"])
     assert reg.select("pick", "apple", "left").skill_id == APPLE
@@ -486,7 +488,7 @@ def test_registry_backend_and_the_experimental_skills():
     exe = GrootArmExecutor(FakeWorld(), arm=None, sensors=None, helpers=_groot_helpers())
     job = ManipJob("pick", "alarm_clock_1", "left", ANY)
     job.object_type = "alarm_clock"
-    assert exe._prompt(SKILLS[ANY], job) == "move the alarm clock to the plate"
+    assert exe._prompt(SKILLS[ANY], job) == DEFAULT_PROMPT.replace("apple", "alarm clock")
     prof = load_profile("full")
     assert prof.manip_executors == ("groot_arms", "sonic_arm_script", "kinematic_attach")
     assert prof.manip_policy == "groot_then_script"

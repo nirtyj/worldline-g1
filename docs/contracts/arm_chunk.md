@@ -1,9 +1,12 @@
 # Arm op, chunk mode (body B.8): the wire between `groot_arms` (P5) and wl-body (P3)
 
-Status: **v0.1, 2026-09-29, contract only.** Written by the runtime owner of `groot_arms` (R.4) for the body owner,
-who implements it in wave 2 (B.8, `docs/M2.md` §7.2). The runtime side is built against it now:
-`services/executors/groot_arms.py` sends exactly these messages, and `tests/fakes/fake_arm_body.py` is an in-process
-implementation of this document that the offline tests run against. Nothing here has run on the box yet.
+Status: **v0.1, 2026-09-29.** Written by the runtime owner of `groot_arms` (R.4) for the body owner (B.8, `docs/M2.md`
+§7.2). The runtime side is built against it: `services/executors/groot_arms.py` sends exactly these messages, and
+`tests/fakes/fake_arm_body.py` is an in-process implementation of this document that the offline tests run against.
+**As built (integration, wave 1):** the body owner implemented chunk mode in `body/arm.py` on the body branch
+(master `4b081c2`, not yet merged into this branch). §8 lists the differences found; `groot_arms` was run against
+that ArmChannel on a trial merge (`tests/services/test_groot_arms_body_arm.py`, 3/3). No chunk has reached SONIC on a
+box yet.
 
 Sources: `docs/groot_arms_design.md` §5.2-§5.5 (what GR00T needs), the `arm` op v0.5 as it stands in the G0 working
 tree (`body/arm.py`, `body/client.py`, `docs/contracts/m1.md` §3.9; read, not modified), `docs/contracts/m1.md`
@@ -238,3 +241,27 @@ not list `"chunk"` makes the executor unhealthy ("body arm op has no chunk mode 
   `slew_frac`).
 - [u] Whether `hold_on_end: "target"` stays on the arm op or moves to a separate CarryLock op in B.7. If it moves,
   `groot_arms` changes one call; the wire above stays.
+
+---
+
+## 8. As built by the body (master `4b081c2` `body/arm.py`), reconciled in wave 1
+
+Read in `body/arm.py` on master (read-only) and exercised by `tests/services/test_groot_arms_body_arm.py`, which runs
+the real `GrootArmExecutor` (real `groot/` helpers, the fake PolicyServer) against the real `ArmChannel` ticking at
+50 Hz in wall time over the body's own test plant (`body/tests/arm_sim.py`). The test skips on this branch (no
+`body/arm.py`) and runs after the wave-2 merge. On a trial merge (this branch + master's `body/`, `tools/`): 3 passed
+(a full session, a body halt latch, a cancel).
+
+| Item | Contract v0.1 | Body as built | Runtime now |
+|---|---|---|---|
+| `lead_s` default | 0.0 | `arm_lead_s` 0.15 when the start omits it (G0: SONIC's ~0.15 s arm lag, `docs/arm_tracking.md` §0) | `groot_arms` sends `lead_s: 0.15` (`GrootArmsConfig.lead_s`, `config/profiles/full.yaml`); its own expiry check adds `lead_s`. 0 vs 0.15 stays the G2 A/B |
+| Chunk session watchdog | ends into `hold_on_end`, `ended_by: "watchdog"` | the same; terminal `failed`, reason `client_silent`; B.3 publishes `body.fault{policy_lost}` (an event, not FAULT) | `watchdog` → `failed(policy_stall)` (unchanged) |
+| Halt latch | messages with `control_epoch <= halt_epoch` → `halted` | the same, plus: every `arm` message while latched → `halted`; the active session ends `canceled`, `ended_by: "halt"`, hold measured | `halted` / `ended_by: halt` → `failed(halted)` (unchanged). The runtime's HaltGate epochs are still not the executions' `control_epoch` (R.2) |
+| Required fields | `session_id`, `generation`, `control_epoch` | missing ones → `bad_args` (not `bad_chunk`) | always sent |
+| Ended session ids | `stale_session` | kept in a bounded map, `stale_session {ended: true, ended_by}` | `stale_session` → `failed(controller_unavailable)` |
+| `stop {arms: true}` | not specified | ends the session `canceled` (reason `stop`); the stream is then refused `arm_stopped` until `restart: true` | not sent by `groot_arms`; a refused `arm_stopped` ends the session `failed(halted)` (`BODY_FATAL`) |
+| Progress | `arm.progress` 5 Hz | 5 Hz `progress` with `kind: "chunk"`, `clamped_frac`, `clamped_frac_total`, `slew_frac`, `lead_s`, `max_step_rad`, `chunks{...}` | read as specified |
+
+Open for wave 2: replay the fake body's sequences against the real channel in `body/tests` (the body owner's half of
+§7); measure `slew_frac` on real GR00T chunks (the dev-box smoke saw a max arm step of 0.127 rad per 20 ms in 1 of 30
+chunks, `docs/M2b_wave1.md` §3).

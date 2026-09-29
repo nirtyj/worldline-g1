@@ -19,6 +19,7 @@ pytest.importorskip("groot.actions")
 registry = pytest.importorskip("services.executors.registry")
 
 from api.execution import Rejected  # noqa: E402
+from groot.obs import DEFAULT_PROMPT  # noqa: E402
 from services.executors.groot_arms import GrootArmExecutor, _groot_helpers, hand_closure  # noqa: E402
 from tests.fakes.fake_arm_body import FakeArmBody  # noqa: E402
 from tests.fakes.fake_policy_server import FakePolicyServer  # noqa: E402
@@ -102,7 +103,12 @@ def test_groot_pick_through_the_manipulation_service():
             assert s.world.hands()["left"] == "alarm_clock_1"
             assert "groot_arms" in d.get("detail", "") and "experimental" in d.get("detail", "")
             assert [ph["phase"] for ph in d["phases"]][-2:] == ["execute", "carry_lock"]
-            assert o.srv.prompts[-1] == "move the alarm clock to the plate"
+            # the executor's data reaches the result (typed fields + the rest in data); the service keeps its own
+            assert d["inferences"] >= 1 and isinstance(d["chunks_dropped"], dict)
+            assert [a["executor"] for a in d["attempts"]] == ["groot_arms"] and d["latency_ms"]["n"] >= 1
+            assert d["label"] == "experimental" and d["hold_on_end"] == "target" and d["prompt"]
+            assert d["base_shift_m"] < 0.05 and d["skill_label"] == "experimental"
+            assert o.srv.prompts[-1] == DEFAULT_PROMPT.replace("apple", "alarm clock")
             assert o.body.messages("end", o.exe.last_session.id)[-1]["args"]["hold_on_end"] == "target"
         run(main())
     finally:

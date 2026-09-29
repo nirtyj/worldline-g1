@@ -19,7 +19,10 @@ skills:
     checkpoint: nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace@7f78bebf1a90131e7304beacfcd47eb27bad16ab
     policy_port: 5550
     policy_endpoint: tcp://127.0.0.1:5550
-    prompt_template: "move the apple to the plate"   # the trained instruction = groot.obs.ARENA_PROMPT (a test pins it)
+    # groot.obs.DEFAULT_PROMPT (a test pins it): the released dataset's own tasks.jsonl sentence for this task. Open loop
+    # it reproduced the demos' arm motion better than Arena's eval string "move the apple to the plate" in 3 of 3 runs
+    # (docs/groot_serving.md §6.2.1); the closed-loop comparison is G2
+    prompt_template: "Pick up the apple from the shelf and place it onto the plate on the same shelf next to it."
     hand_type: dex3
     action_horizon: 40
     control_hz: 50.0
@@ -39,7 +42,8 @@ skills:
     checkpoint: nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace@7f78bebf1a90131e7304beacfcd47eb27bad16ab
     policy_port: 5550
     policy_endpoint: tcp://127.0.0.1:5550
-    prompt_template: "move the {label} to the plate"   # the trained sentence with the object swapped in (untrained)
+    # the trained sentence (groot.obs.DEFAULT_PROMPT) with the object swapped in (untrained)
+    prompt_template: "Pick up the {label} from the shelf and place it onto the plate on the same shelf next to it."
     hand_type: dex3
     action_horizon: 40
     control_hz: 50.0
