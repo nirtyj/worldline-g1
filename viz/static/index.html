@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 Sim Viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%234fb3ff'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0e1013; --panel: #161a1f; --panel2: #1c2128; --line: #2a3139; --text: #e6e9ee; --muted: #8b95a3;
+    --accent: #4fb3ff; --ok: #3ddc84; --warn: #ffb547; --bad: #ff5d5d; --rec: #ff3b3b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line);
+    background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+  .brand { font-weight: 650; letter-spacing: .2px; }
+  .brand span { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+  .pill { font: 12px var(--mono); padding: 3px 8px; border-radius: 999px; background: var(--panel2);
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pill::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); margin-right: 6px; vertical-align: 1px; }
+  .pill.ok { color: var(--text); } .pill.ok::before { background: var(--ok); }
+  .pill.warn::before { background: var(--warn); } .pill.bad::before { background: var(--bad); }
+  .hdr-right { display: flex; gap: 10px; align-items: center; }
+  select, button { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  button:hover { border-color: #3a4450; } button:active { transform: translateY(1px); }
+  button.rec { display: inline-flex; gap: 8px; align-items: center; }
+  button.rec::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--rec); }
+  button.rec.on { background: #3a1416; border-color: var(--rec); }
+  button.rec.on::before { animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  main { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; padding: 12px 16px; }
+  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .pane { position: relative; background: #000; border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; }
+  .pane img, .pane canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+  .pane.r169 { aspect-ratio: 16 / 9; } .pane.r43 { aspect-ratio: 4 / 3; } .pane.map { aspect-ratio: 1 / 1; }
+  .pane .cap { position: absolute; left: 8px; top: 8px; font: 12px var(--mono); background: rgba(0,0,0,.62);
+    padding: 3px 8px; border-radius: 6px; pointer-events: none; }
+  .pane .cap b { color: var(--accent); font-weight: 600; }
+  .pane .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted);
+    font-size: 13px; text-align: center; padding: 20px; pointer-events: none; }
+  .maptools { position: absolute; right: 8px; top: 8px; display: flex; gap: 4px; }
+  .maptools button { padding: 2px 8px; font-size: 12px; background: rgba(0,0,0,.6); }
+  .maptools button.on { border-color: var(--accent); color: var(--accent); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .tel { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px 14px; }
+  .tel div { min-width: 0; } .tel label { display: block; color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .5px; }
+  .tel span { font: 15px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+  .tel .bad { color: var(--bad); } .tel .ok { color: var(--ok); }
+  .drive { display: grid; grid-template-columns: auto auto 1fr; gap: 16px; align-items: start; }
+  .pad { display: grid; grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(2, 48px); gap: 6px; }
+  .pad button { padding: 0; font: 15px var(--mono); touch-action: none; user-select: none; -webkit-user-select: none; }
+  .pad button.held { background: #17364f; border-color: var(--accent); }
+  .btncol { display: flex; flex-direction: column; gap: 6px; }
+  .btncol button.stop { background: #3a1416; border-color: #6b2227; }
+  .sliders label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .sliders input { flex: 1; } .sliders output { font: 12px var(--mono); color: var(--text); width: 64px; }
+  .hint { color: var(--muted); font-size: 12px; } .hint kbd { font: 11px var(--mono); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; background: var(--panel2); }
+  .log { font: 12px var(--mono); color: var(--muted); max-height: 128px; overflow: auto; margin-top: 8px;
+    white-space: pre-wrap; }
+  .log .e-ok { color: var(--ok); } .log .e-bad { color: var(--bad); } .log .e-info { color: var(--accent); }
+  .recinfo { font-size: 12px; color: var(--muted); } .recinfo a { color: var(--accent); }
+  .extras { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; padding: 10px; } header { padding: 8px 10px; }
+    .drive { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Worldline G1<span>sim viewer</span></div>
+  <div class="pills" id="pills"></div>
+  <div class="hdr-right">
+    <select id="level" title="VizCams level (P1 REP op viz_level)">
+      <option value="">viz level</option><option value="off">off</option><option value="min">min</option><option value="low">low</option>
+      <option value="high">high</option>
+    </select>
+    <button class="rec" id="rec" title="Record head/chase/top + composite + telemetry on the box">Record</button>
+  </div>
+</header>
+
+<main>
+  <div class="col">
+    <div class="pane r169" id="pane-chase">
+      <img id="img-chase" alt="Chase camera">
+      <div class="empty" id="empty-chase">No chase frames yet (VizCams on the frames port).</div>
+      <div class="cap"><b>CHASE</b> <span id="cap-chase"></span></div>
+    </div>
+    <div class="panel tel" id="tel"></div>
+    <div class="panel">
+      <div class="drive">
+        <div class="btncol">
+          <button id="b-stand" title="stand (release the band)">Stand</button>
+          <button id="b-stop" class="stop" title="stop (Space)">Stop</button>
+          <button id="b-status">Status</button>
+        </div>
+        <div class="pad" id="pad">
+          <button data-k="q" title="turn left (Q)">&#x27F2;</button>
+          <button data-k="w" title="forward (W)">&#x2191;</button>
+          <button data-k="e" title="turn right (E)">&#x27F3;</button>
+          <button data-k="a" title="strafe left (A)">&#x2190;</button>
+          <button data-k="s" title="back (S)">&#x2193;</button>
+          <button data-k="d" title="strafe right (D)">&#x2192;</button>
+        </div>
+        <div class="sliders">
+          <label>vx <input type="range" id="sp-v" min="0.1" max="0.8" step="0.05" value="0.4"><output id="o-v"></output></label>
+          <label>vy <input type="range" id="sp-vy" min="0.1" max="0.4" step="0.05" value="0.25"><output id="o-vy"></output></label>
+          <label>yaw <input type="range" id="sp-w" min="0.1" max="1.2" step="0.05" value="0.5"><output id="o-w"></output></label>
+          <div class="hint">Hold <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>Q</kbd><kbd>E</kbd> to walk,
+            <kbd>Space</kbd> stop. Click the map: <b>go_to</b>; shift-click: <b>turn_to</b>.</div>
+          <div class="recinfo" id="recinfo"></div>
+        </div>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="pane r43" id="pane-head">
+      <img id="img-head" alt="Head camera">
+      <div class="empty" id="empty-head">No head camera frames yet.</div>
+      <div class="cap"><b>HEAD</b> <span id="cap-head"></span></div>
+    </div>
+    <div class="pane map" id="pane-top">
+      <canvas id="map"></canvas>
+      <div class="empty" id="empty-top">Waiting for a top-down frame, the P1 scene, or gt.pose.</div>
+      <div class="cap"><b>TOP</b> <span id="cap-top"></span></div>
+      <div class="maptools">
+        <button id="t-occ" class="on" title="occupancy grid from P1 get_occupancy">occ</button>
+        <button id="t-traj" class="on" title="trajectory from gt.pose">traj</button>
+        <button id="t-rooms" class="on" title="room outlines from get_scene_info">rooms</button>
+        <button id="t-clear" title="clear the trajectory">clear</button>
+      </div>
+    </div>
+    <div class="extras" id="extras"></div>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const S = {
+    ws: null, hello: null, tel: null, traj: [], target: null, keys: new Set(), lastWalk: null, walkTimer: null,
+    top: { img: null, extent: null, w: 0, h: 0 }, topdown: null, occ: null,
+    show: { occ: true, traj: true, rooms: true }, fps: {}, counts: {}, recording: false, reqN: 0,
+  };
+  window.__viz = S;  // for automated checks
+
+  // ---------------------------------------------------------------- panes
+  const PANES = {
+    chase: { img: $("img-chase"), empty: $("empty-chase"), cap: $("cap-chase") },
+    head: { img: $("img-head"), empty: $("empty-head"), cap: $("cap-head") },
+  };
+  function extraPane(name) {
+    if (PANES[name]) return PANES[name];
+    const div = document.createElement("div");
+    div.className = "pane r169";
+    div.innerHTML = `<img alt="${name}"><div class="empty">…</div><div class="cap"><b>${name.toUpperCase()}</b> <span></span></div>`;
+    $("extras").appendChild(div);
+    PANES[name] = { img: div.querySelector("img"), empty: div.querySelector(".empty"), cap: div.querySelector(".cap span") };
+    return PANES[name];
+  }
+  function countFrame(s) {
+    const now = performance.now();
+    const f = S.fps[s] || (S.fps[s] = { t: [], v: 0 });
+    f.t.push(now); while (f.t.length && now - f.t[0] > 2000) f.t.shift();
+    f.v = f.t.length > 1 ? (f.t.length - 1) * 1000 / (f.t[f.t.length - 1] - f.t[0]) : 0;
+    S.counts[s] = (S.counts[s] || 0) + 1;
+  }
+  function ack(s) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify({ type: "ack", s })); }
+
+  function onFrame(buf) {
+    const dv = new DataView(buf);
+    const n = dv.getUint32(0);
+    const hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
+    const blob = new Blob([new Uint8Array(buf, 4 + n)], { type: "image/jpeg" });
+    const url = URL.createObjectURL(blob);
+    const s = hdr.s;
+    const img = new Image();
+    img.onload = () => {
+      countFrame(s);
+      if (s === "top" && hdr.extent) {
+        S.top = { img, extent: hdr.extent, w: img.naturalWidth, h: img.naturalHeight, robot: hdr.robot, t_sim: hdr.t_sim };
+        $("empty-top").hidden = true;
+        drawMap();
+      } else {
+        const p = extraPane(s);
+        const old = p.img.dataset.url;
+        p.img.src = url; p.img.dataset.url = url;
+        if (old) URL.revokeObjectURL(old);
+        p.empty.hidden = true;
+        p.cap.textContent = `${(S.fps[s].v || 0).toFixed(1)} fps${hdr.t_sim != null ? "  t " + Number(hdr.t_sim).toFixed(2) : ""}`;
+      }
+      if (s === "top") URL.revokeObjectURL(url);
+      ack(s);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); ack(s); };
+    img.src = url;
+  }
+
+  // ---------------------------------------------------------------- map
+  const canvas = $("map"), ctx = canvas.getContext("2d");
+  let view = null; // {x0,y0,x1,y1, s, ox, oy}
+  function worldExtent() {
+    if (S.top.extent) return S.top.extent;
+    if (S.topdown && S.topdown.extent) return S.topdown.extent;
+    const sc = S.hello && S.hello.scene;
+    if (sc && sc.bounds) { const b = sc.bounds; return [b[0] - .5, b[1] - .5, b[2] + .5, b[3] + .5]; }
+    if (S.occ && S.occ.extent) return S.occ.extent;
+    if (S.traj.length) {
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (const [x, y] of S.traj) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+      return [x0 - 3, y0 - 3, x1 + 3, y1 + 3];
+    }
+    return null;
+  }
+  function w2c(x, y) { return [view.ox + (x - view.x0) * view.s, view.oy + (view.y1 - y) * view.s]; }
+  function c2w(u, v) { return [view.x0 + (u - view.ox) / view.s, view.y1 - (v - view.oy) / view.s]; }
+  function drawImageExtent(img, ext, alpha) {
+    const [a, b] = w2c(ext[0], ext[3]), [c, d] = w2c(ext[2], ext[1]);
+    ctx.globalAlpha = alpha; ctx.drawImage(img, a, b, c - a, d - b); ctx.globalAlpha = 1;
+  }
+  function drawMap() {
+    const dpr = window.devicePixelRatio || 1;
+    const r = canvas.getBoundingClientRect();
+    if (canvas.width !== Math.round(r.width * dpr) || canvas.height !== Math.round(r.height * dpr)) {
+      canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#0a0c0f"; ctx.fillRect(0, 0, r.width, r.height);
+    const ext = worldExtent();
+    if (!ext) { view = null; return; }
+    const ew = ext[2] - ext[0], eh = ext[3] - ext[1];
+    const pane = $("pane-top"), want = (ew / eh).toFixed(3);
+    if (pane.dataset.ar !== want) { pane.dataset.ar = want; pane.style.aspectRatio = `${ew} / ${eh}`; return requestAnimationFrame(drawMap); }
+    const W = r.width, H = r.height;
+    const s = Math.min(W / ew, H / eh);
+    view = { x0: ext[0], y0: ext[1], x1: ext[2], y1: ext[3], s, ox: (W - ew * s) / 2, oy: (H - eh * s) / 2 };
+    $("empty-top").hidden = true;
+    if (S.top.img) drawImageExtent(S.top.img, S.top.extent, 1);
+    else if (S.topdown && S.topdown.img) drawImageExtent(S.topdown.img, S.topdown.extent, 1);
+    if (S.show.occ && S.occ && S.occ.img) drawImageExtent(S.occ.img, S.occ.extent, S.top.img ? .55 : .9);
+    const sc = S.hello && S.hello.scene;
+    if (S.show.rooms && sc && sc.rooms) {
+      ctx.lineWidth = 1; ctx.strokeStyle = "rgba(160,190,255,.45)"; ctx.fillStyle = "rgba(200,215,255,.8)";
+      ctx.font = "11px ui-monospace, Menlo, monospace";
+      for (const rm of sc.rooms) {
+        if (!rm.polygon || rm.polygon.length < 3) continue;
+        ctx.beginPath(); rm.polygon.forEach(([x, y], i) => { const [u, v] = w2c(x, y); i ? ctx.lineTo(u, v) : ctx.moveTo(u, v); });
+        ctx.closePath(); ctx.stroke();
+        let cx = 0, cy = 0; rm.polygon.forEach(([x, y]) => { cx += x; cy += y; });
+        const [u, v] = w2c(cx / rm.polygon.length, cy / rm.polygon.length);
+        ctx.fillText(rm.type || rm.name || rm.id || "", u - 20, v);
+      }
+    }
+    if (S.show.traj && S.traj.length > 1) {
+      ctx.lineWidth = 2; ctx.strokeStyle = "rgba(79,179,255,.95)"; ctx.beginPath();
+      S.traj.forEach(([x, y], i) => { const [u, v] = w2c(x, y); i ? ctx.lineTo(u, v) : ctx.moveTo(u, v); });
+      ctx.stroke();
+    }
+    if (S.target) {
+      const [u, v] = w2c(S.target[0], S.target[1]);
+      ctx.strokeStyle = "#3ddc84"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(u, v, 9, 0, 2 * Math.PI); ctx.moveTo(u - 13, v); ctx.lineTo(u + 13, v); ctx.moveTo(u, v - 13); ctx.lineTo(u, v + 13); ctx.stroke();
+    }
+    const p = S.tel && S.tel.pose;
+    if (p && p.base_pos) {
+      const [u, v] = w2c(p.base_pos[0], p.base_pos[1]);
+      const yaw = p.yaw || 0, L = Math.max(12, Math.min(26, 0.5 * s));
+      ctx.fillStyle = p.fallen ? "#ff5d5d" : "#ff7a2f"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(u + L * Math.cos(yaw), v - L * Math.sin(yaw));
+      ctx.lineTo(u + .5 * L * Math.cos(yaw + 2.5), v - .5 * L * Math.sin(yaw + 2.5));
+      ctx.lineTo(u, v);
+      ctx.lineTo(u + .5 * L * Math.cos(yaw - 2.5), v - .5 * L * Math.sin(yaw - 2.5));
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+    $("cap-top").textContent = (S.top.img ? `${(S.fps.top ? S.fps.top.v : 0).toFixed(1)} fps` : (S.topdown ? "P1 render_topdown" : "")) +
+      `  ${(ext[2] - ext[0]).toFixed(1)}×${(ext[3] - ext[1]).toFixed(1)} m`;
+  }
+  new ResizeObserver(drawMap).observe(canvas);
+  canvas.addEventListener("click", (ev) => {
+    if (!view) return;
+    const r = canvas.getBoundingClientRect();
+    const [x, y] = c2w(ev.clientX - r.left, ev.clientY - r.top);
+    const p = S.tel && S.tel.pose;
+    if (ev.shiftKey && p && p.base_pos) {
+      const yaw = Math.atan2(y - p.base_pos[1], x - p.base_pos[0]);
+      cmd("turn_to", { yaw: +yaw.toFixed(3) });
+    } else {
+      S.target = [x, y];
+      cmd("go_to", { x: +x.toFixed(3), y: +y.toFixed(3) });
+    }
+    drawMap();
+  });
+  for (const [id, key] of [["t-occ", "occ"], ["t-traj", "traj"], ["t-rooms", "rooms"]]) {
+    $(id).onclick = () => { S.show[key] = !S.show[key]; $(id).classList.toggle("on", S.show[key]); drawMap(); };
+  }
+  $("t-clear").onclick = () => { S.traj = []; S.target = null; send({ type: "clear_traj" }); drawMap(); };
+  function loadImg(url, cb) { const im = new Image(); im.onload = () => cb(im); im.src = url + "?t=" + Date.now(); }
+
+  // ---------------------------------------------------------------- telemetry
+  const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
+  function pill(name, state, text) { return `<span class="pill ${state}" title="${name}">${text}</span>`; }
+  function renderTel() {
+    const t = S.tel; if (!t) return;
+    const p = t.pose, b = t.body, pills = [];
+    const st = t.streams || {};
+    for (const n of Object.keys(st).sort()) {
+      const s = st[n], age = s.age_s, lim = s.snapshot ? 30 : 1.5;
+      pills.push(pill(n, age == null ? "" : age < lim ? "ok" : age < 3 * lim ? "warn" : "bad",
+        `${n} ${s.fps ? s.fps.toFixed(1) : "–"}/s → ${(S.fps[n] ? S.fps[n].v : 0).toFixed(1)}`));
+    }
+    const pa = t.pose_age_s;
+    pills.push(pill("gt.pose", pa == null ? "" : pa < 1 ? "ok" : "bad", `gt.pose ${t.pose_hz ? t.pose_hz.toFixed(0) + "Hz" : "–"}`));
+    pills.push(pill("body", !b ? "" : b.age_s < 2 ? (b.fault ? "bad" : "ok") : "bad", `body ${b ? (b.fault ? "FAULT " + b.fault : (b.op || "idle")) : "–"}`));
+    pills.push(pill("P1 REP", t.p1_ok ? "ok" : "", `P1 ${t.p1 && t.p1.rtf_1s != null ? "rtf " + fmt(t.p1.rtf_1s) : t.p1_ok ? "ok" : "–"}`));
+    $("pills").innerHTML = pills.join("");
+    const fc = (p && p.foot_contact) || {};
+    const cells = [
+      ["t_sim", p ? fmt(p.t_sim, 2) : "–"], ["RTF", p ? fmt(p.rtf, 2) : "–"],
+      ["x", p && p.base_pos ? fmt(p.base_pos[0]) : "–"], ["y", p && p.base_pos ? fmt(p.base_pos[1]) : "–"],
+      ["yaw°", p && p.yaw != null ? fmt(p.yaw * 180 / Math.PI, 1) : "–"], ["pelvis_z", p ? fmt(p.pelvis_z, 3) : "–"],
+      ["fallen", p ? (p.fallen ? '<b class="bad">FALLEN</b>' : '<b class="ok">no</b>') : "–"],
+      ["feet L/R", p ? `${fc.left ? "●" : "○"} ${fc.right ? "●" : "○"}` : "–"],
+      ["band", p && p.band != null ? String(p.band) : "–"],
+      ["body op", b ? `${b.op || "idle"}${b.phase ? "/" + b.phase : ""}` : "–"],
+      ["control", b ? (b.in_control ? '<b class="ok">in control</b>' : "no") : "–"],
+      ["fault", b && b.fault ? `<b class="bad">${b.fault}</b>` : "–"],
+    ];
+    if (p && p.note) cells.push(["note", `<b style="color:var(--warn)">${p.note}</b>`]);
+    $("tel").innerHTML = cells.map(([k, v]) => `<div><label>${k}</label><span>${v}</span></div>`).join("");
+    if (p && p.base_pos) {
+      const last = S.traj[S.traj.length - 1], x = p.base_pos[0], y = p.base_pos[1];
+      if (!last || (x - last[0]) ** 2 + (y - last[1]) ** 2 > 0.0009) { S.traj.push([x, y]); if (S.traj.length > 5000) S.traj.shift(); }
+    }
+    const rec = t.rec || {};
+    S.recording = !!rec.recording;
+    $("rec").classList.toggle("on", S.recording);
+    $("rec").textContent = S.recording ? `Stop ${fmt(rec.elapsed_s, 0)}s` : "Record";
+    drawMap();
+  }
+
+  // ---------------------------------------------------------------- log + commands
+  function log(text, cls = "") {
+    const el = $("log"), line = document.createElement("div");
+    line.className = cls; line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+    el.prepend(line); while (el.childNodes.length > 60) el.removeChild(el.lastChild);
+  }
+  function send(o) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(o)); }
+  function cmd(op, args = {}) { send({ type: "cmd", op, args, req: ++S.reqN }); if (op !== "walk") log(`→ ${op} ${JSON.stringify(args)}`, "e-info"); }
+
+  const KEYMAP = { w: [1, 0, 0], s: [-1, 0, 0], a: [0, 1, 0], d: [0, -1, 0], q: [0, 0, 1], e: [0, 0, -1] };
+  function walkVec() {
+    let vx = 0, vy = 0, wz = 0;
+    for (const k of S.keys) { const m = KEYMAP[k]; if (m) { vx += m[0]; vy += m[1]; wz += m[2]; } }
+    return { vx: +(vx * +$("sp-v").value).toFixed(2), vy: +(vy * +$("sp-vy").value).toFixed(2), yaw_rate: +(wz * +$("sp-w").value).toFixed(2) };
+  }
+  function updateWalk(force = false) {
+    document.querySelectorAll("#pad button").forEach((b) => b.classList.toggle("held", S.keys.has(b.dataset.k)));
+    if (!S.keys.size) {
+      if (S.lastWalk) { cmd("stop"); S.lastWalk = null; }
+      clearInterval(S.walkTimer); S.walkTimer = null; return;
+    }
+    const v = walkVec(), key = JSON.stringify(v);
+    if (force || key !== S.lastWalk) { cmd("walk", { ...v, duration_s: 3.0 }); S.lastWalk = key; }
+    if (!S.walkTimer) S.walkTimer = setInterval(() => updateWalk(true), 2000);  // keepalive while held
+  }
+  const typing = (ev) => ["INPUT", "SELECT", "TEXTAREA"].includes(ev.target.tagName) && ev.target.type !== "range";
+  window.addEventListener("keydown", (ev) => {
+    if (typing(ev) || ev.metaKey || ev.ctrlKey) return;
+    const k = ev.key.toLowerCase();
+    if (k === " ") { ev.preventDefault(); S.keys.clear(); S.lastWalk = null; updateWalk(); cmd("stop"); return; }
+    if (KEYMAP[k] && !S.keys.has(k)) { S.keys.add(k); updateWalk(); }
+  });
+  window.addEventListener("keyup", (ev) => { const k = ev.key.toLowerCase(); if (S.keys.delete(k)) updateWalk(); });
+  window.addEventListener("blur", () => { if (S.keys.size) { S.keys.clear(); updateWalk(); } });
+  document.querySelectorAll("#pad button").forEach((b) => {
+    const k = b.dataset.k;
+    b.addEventListener("pointerdown", (ev) => { ev.preventDefault(); b.setPointerCapture(ev.pointerId); S.keys.add(k); updateWalk(); });
+    const up = () => { if (S.keys.delete(k)) updateWalk(); };
+    b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up);
+  });
+  for (const [id, out] of [["sp-v", "o-v"], ["sp-vy", "o-vy"], ["sp-w", "o-w"]]) {
+    const f = () => { $(out).textContent = $(id).value + (id === "sp-w" ? " r/s" : " m/s"); }; $(id).oninput = f; f();
+  }
+  $("b-stand").onclick = () => cmd("stand", {});
+  $("b-stop").onclick = () => { S.keys.clear(); S.lastWalk = null; updateWalk(); cmd("stop"); };
+  $("b-status").onclick = () => cmd("status");
+  $("rec").onclick = () => { send({ type: "record", action: S.recording ? "stop" : "start" }); log(S.recording ? "stopping recording…" : "starting recording…", "e-info"); };
+  $("level").onchange = (ev) => { if (ev.target.value) send({ type: "viz_level", level: ev.target.value }); };
+
+  function onJson(m) {
+    switch (m.type) {
+      case "hello":
+        S.hello = m;
+        if (m.traj && m.traj.length && !S.traj.length) S.traj = m.traj.slice();
+        if (m.occupancy) loadImg(m.occupancy.url, (im) => { S.occ = { img: im, extent: m.occupancy.extent }; drawMap(); });
+        if (m.topdown && m.topdown.extent) loadImg(m.topdown.url, (im) => { S.topdown = { img: im, extent: m.topdown.extent }; drawMap(); });
+        drawMap(); break;
+      case "tel": S.tel = m; renderTel(); break;
+      case "reply":
+        if (m.op === "walk" && m.ok) break;
+        log(`← ${m.op}: ${m.ok ? "ok" : "FAILED"} ${m.state || ""} ${m.error || ""}${m.op === "status" && m.data ? " " + JSON.stringify(m.data).slice(0, 300) : ""}`, m.ok ? "e-ok" : "e-bad");
+        break;
+      case "body_event":
+        if (m.op === "walk" && (m.state === "progress" || m.state === "accepted" || (m.state === "canceled"))) break;
+        log(`body.event ${m.op || ""} ${m.state || ""} ${m.data && Object.keys(m.data).length ? JSON.stringify(m.data).slice(0, 160) : ""}`,
+          m.state === "succeeded" ? "e-ok" : m.state === "failed" ? "e-bad" : "");
+        if (m.op === "go_to" && ["succeeded", "failed", "canceled"].includes(m.state)) { S.target = null; drawMap(); }
+        break;
+      case "record":
+        if (m.action === "stop" && m.summary) {
+          const d = m.summary.dir || "", name = d.split("/").pop();
+          $("recinfo").innerHTML = `Last recording <b>${name}</b> (${fmt(m.summary.duration_s, 1)} s): ` +
+            `<a href="/recordings/${name}/contact_sheet.png" target="_blank">contact sheet</a> · ` +
+            `<a href="/recordings/${name}/composite.mp4" target="_blank">composite.mp4</a> · ` +
+            `<a href="/recordings/${name}/" target="_blank">files</a>`;
+          log(`recording saved: ${d}`, "e-ok");
+        } else if (m.action === "start") {
+          S.recording = !!m.ok; $("rec").classList.toggle("on", S.recording);
+          log(m.ok ? `recording → ${m.dir}` : `record failed: ${m.error}`, m.ok ? "e-ok" : "e-bad");
+        }
+        break;
+      case "viz_level": log(`viz level: ${m.ok ? m.level : "failed: " + m.error}`, m.ok ? "e-ok" : "e-bad"); break;
+    }
+  }
+
+  function connect() {
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+    ws.binaryType = "arraybuffer";
+    S.ws = ws;
+    ws.onmessage = (ev) => { if (typeof ev.data === "string") onJson(JSON.parse(ev.data)); else onFrame(ev.data); };
+    ws.onopen = () => log("connected", "e-ok");
+    ws.onclose = () => { log("disconnected; retrying in 2 s", "e-bad"); setTimeout(connect, 2000); };
+  }
+  connect();
+})();
+</script>
+</body>
+</html>
