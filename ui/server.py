@@ -53,6 +53,7 @@ from websockets.exceptions import ConnectionClosed  # noqa: E402
 
 from ui.cameras import (EGO_PORT, CameraFeed, CameraSource, NoCameras, ScanThumbs, SubCamera,  # noqa: E402
                         TapCameras, WithPanes, WorldCameras, head_caption)
+from ui.demo import DemoRunner, HubHost  # noqa: E402
 from ui.groot_strip import GrootStrip  # noqa: E402
 from ui.interactive_user import InteractiveUser  # noqa: E402
 from ui.recorder import CallRecorder  # noqa: E402
@@ -283,6 +284,10 @@ def _finished(e: Any) -> bool:
     return str(getattr(e, "status", "")).lower() not in ("queued", "running", "cancelling", "executing", "canceling")
 
 
+def _thinking(rt: Any) -> bool:
+    return bool(getattr(rt, "_thinking", False) or getattr(rt, "_interpreting", False) or getattr(rt, "_working", False))
+
+
 def derive_tool_state(active: list[dict[str, Any]], paused: bool, reconciling: bool, body_mode: str | None) -> str:
     """PLAN 5.8's tool state when the runtime does not publish its own: api.state_machine.derive_state
     over the page's execution entries, or the same rules here if api/ is not importable."""
@@ -473,6 +478,20 @@ class Session:
             return 0
         task = getattr(rt, "task", None)
         return task.intent_version if task is not None else getattr(rt, "version", 0)
+
+    def busy(self, ignore_wait: bool = False) -> bool:
+        """What tools/say.py reads from a frame (runtime.active, speech included, and runtime.thinking), without
+        building one. ignore_wait: a running wait_and_observe is not busy (say.py --idle-ignores-wait)."""
+        rt = self.runtime
+        if rt is None:
+            return False
+        for e in list(getattr(rt, "history", []) or []):
+            if _finished(e):
+                continue
+            tool = _tool_of(e) or (getattr(e, "data", None) or {}).get("skill")
+            if not (ignore_wait and tool == "wait_and_observe"):
+                return True
+        return _thinking(rt)
 
     def hear(self, text: str, directive: dict[str, Any] | None = None) -> None:
         if self.runtime is None:
@@ -708,8 +727,7 @@ class Session:
                 if getattr(h, "cancel_requested", False):
                     cancel_req.add(str(getattr(h, "execution_id", None) or getattr(h, "entry_id", "")))
         history = list(getattr(rt, "history", []) or [])
-        thinking = bool(getattr(rt, "_thinking", False) or getattr(rt, "_interpreting", False)
-                        or getattr(rt, "_working", False))
+        thinking = _thinking(rt)
         speech = getattr(rt, "speech", None)
         speech_state = None
         if speech is not None and hasattr(speech, "items"):
@@ -786,6 +804,8 @@ class Hub:
         self.s1_gate: Any = None                     # which head-camera frames System 1 gets
         self.thumbs = ScanThumbs()                   # head-camera thumbnails of each scan
         self._thumb_i = 0                            # the trace rows the thumbnails have seen
+        self.port: int | None = None                 # this page's own port (main sets it): the demo's restart and recorder
+        self.demo = DemoRunner(HubHost(self, lambda m: broadcast(self.clients, dumps(m))))   # the Demo panel (ui/demo.py)
 
     # ------------------------------------------------------------------ cameras
     def _cameras_for(self, s: Session) -> CameraSource:
@@ -974,6 +994,16 @@ class Hub:
     def _notice(self, text: str) -> None:
         broadcast(self.clients, dumps({"type": "notice", "text": text}))
 
+    async def say(self, text: str) -> None:
+        """One chat line, as the page's Send does it: a stop word halts first (no model call), then System 1 labels
+        the line and the runtime hears it. The Demo panel says its lines through here too."""
+        s = self.session
+        if s is None:
+            raise RuntimeError("nothing is running")
+        if self.deps.is_stop(text) and s.runtime is not None:
+            s.runtime.emergency_stop(text, source="keyword")   # halt() first; System 1 labels it next
+        s.hear(text, await self._route(s, text))            # every message goes through System 1
+
     # ------------------------------------------------------------------
     async def reset(self, scene: str, agent: str, model: str, forget: bool = False, profile: str | None = None,
                     reset_sim: dict[str, Any] | None = None) -> None:
@@ -1096,6 +1126,7 @@ class Hub:
             else:
                 await ws.send(dumps({"type": "loading", "scene": self.default, "profile": self.profile,
                                      "meta": self.meta()}))
+            await ws.send(dumps(self.demo.steps_message()))
             async for raw in ws:
                 if isinstance(raw, (bytes, bytearray)):
                     continue
@@ -1117,12 +1148,13 @@ class Hub:
                 text = str(msg.get("text", "")).strip()
                 if not text:
                     return
-                if self.deps.is_stop(text) and s.runtime is not None:
-                    s.runtime.emergency_stop(text, source="keyword")   # halt() first; System 1 labels it next
-                s.hear(text, await self._route(s, text))            # every message goes through System 1
+                await self.say(text)
             elif kind == "hello" and s is not None:          # the page missed the first init
                 await ws.send(dumps({**s.init_message(), "meta": self.meta()}))
+                await ws.send(dumps(self.demo.steps_message()))
                 self._send_cameras(force=True, ws=ws)
+            elif kind == "demo":                              # the Demo panel: run, stop, record, fresh (ui/demo.py)
+                await self.demo.handle(msg)
             elif kind == "persona":                            # off, quiet, medium, optimize
                 level = str(msg.get("level") or "medium")
                 if level not in ("off", "quiet", "medium", "optimize"):
@@ -1172,6 +1204,7 @@ class Hub:
             await ws.send(dumps({"type": "notice", "text": str(e)}))
 
     def close(self) -> None:
+        self.demo.close()                             # a running demo stops; the stack lock goes back
         for src in (self._tap, self._fixed_cameras, self._ego or None):
             if src is not None:
                 try:
@@ -1222,6 +1255,7 @@ async def main() -> None:
     args = ap.parse_args()
     load_env_files()
     hub = Hub(args.scene, args.profile, cameras=args.cameras, port_offset=args.port_offset, system1=args.system1)
+    hub.port = args.port
     if args.planner != "agent.model:create_brain":
         hub.deps.create_planner = lambda info, spec=args.planner: _import(spec)(info)
     if args.speed != 1.0:

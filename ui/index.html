@@ -444,6 +444,44 @@
   .g-node .gc { font: 10.5px var(--sans); fill: var(--muted); }
   .guide { padding: 10px 14px 12px; font-size: 13px; border-top: 1px solid var(--line); max-height: 30%; overflow: auto; }
 
+  /* Demo panel (ui/demo.py): the steps of config/demo_steps.yaml, the same list as scripts/demo.sh, over the chat */
+  .demo { flex: none; max-height: 52%; overflow-y: auto; margin: 0 10px 6px; padding: 8px 10px 9px; background: var(--panel);
+          border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 7px; align-content: start; }
+  .demo-bar { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+  .demo-bar .btn { padding: 2px 8px; font-size: 12.5px; }
+  .demo-rec { display: inline-flex; gap: 5px; align-items: center; font: 12.5px var(--sans); color: var(--text); cursor: pointer; margin: 0 1px; }
+  .demo-rec.on { color: var(--bad); font-weight: 700; }
+  .demo-rec.off { opacity: .45; cursor: not-allowed; }
+  .switch.rec input:checked + i { background: #4a1c1c; border-color: var(--bad); }
+  .switch.rec input:checked + i::after { background: var(--bad); }
+  .switch input:disabled { cursor: not-allowed; }
+  .demo-confirm { border: 1px solid var(--warn); background: #1f170b; border-radius: 6px; padding: 8px 10px; font-size: 13px; display: grid; gap: 8px; color: #ffe2bf; }
+  .demo-now { font: 12px/1.45 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+  .demo-now b { color: var(--user); font-weight: 600; }
+  .demo-now .rec { color: var(--bad); }
+  .demo-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  .dstep { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 5px 7px 6px;
+           border-radius: 6px; background: var(--ground); border-left: 3px solid var(--line); }
+  .dstep.st-running { border-left-color: var(--runtime); background: #0f1a2b; }
+  .dstep.st-pass { border-left-color: var(--robot); }
+  .dstep.st-fail { border-left-color: var(--bad); }
+  .dchip { font: 700 9.5px var(--mono); letter-spacing: .05em; text-transform: uppercase; padding: 1px 5px; border-radius: 4px; min-width: 48px;
+           display: inline-flex; gap: 5px; align-items: center; justify-content: center; background: #222b3d; color: var(--muted); }
+  .dchip.running { background: #16304f; color: #8cc4ff; }
+  .dchip.pass { background: #173022; color: var(--robot); }
+  .dchip.fail { background: #4a1c1c; color: var(--bad); }
+  .dchip .dot { width: 6px; height: 6px; }
+  .dtitle { font: 700 13px/1.3 var(--sans); overflow-wrap: anywhere; }
+  .dtitle .n { color: var(--muted); font: 600 11px var(--mono); margin-right: 5px; }
+  .dshows { grid-column: 1 / -1; font-size: 12px; line-height: 1.35; color: var(--muted); overflow: hidden;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .demo .mini:disabled { opacity: .4; cursor: not-allowed; }
+  .demo .mini:disabled:hover { color: var(--muted); border-color: var(--line); }
+  .ddetail { grid-column: 1 / -1; font: 11.5px/1.4 var(--mono); color: #b8c4d8; overflow-wrap: anywhere; }
+  .dstep.st-fail .ddetail { color: #ffc2c2; }
+  .mini.demo-on { color: var(--text); border-color: var(--runtime); background: #1b3358; }
+  .banner.restart { border-color: var(--warn); background: #1f170b; color: #ffe2bf; }
+
   .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--raised); border: 1px solid var(--bad); padding: 8px 14px; border-radius: 8px; }
 </style>
 </head>
@@ -470,8 +508,25 @@
 
   <main id="main" data-ws="world">
     <section class="pane chatpane">
-      <h2>Chat <span class="right"><label class="opt" style="margin:0;text-transform:none;letter-spacing:0" title="Show the runtime's progress lines (heading to…, passing…, found…) between messages"><input type="checkbox" id="chk-progress" checked> progress</label>
+      <h2>Chat <span class="right"><button class="mini" type="button" id="btn-demo" aria-expanded="false" aria-controls="demo" title="The demo steps (config/demo_steps.yaml, the same list as scripts/demo.sh): run one or all and watch each PASS or FAIL">Demo</button>
+        <label class="opt" style="margin:0;text-transform:none;letter-spacing:0" title="Show the runtime's progress lines (heading to…, passing…, found…) between messages"><input type="checkbox" id="chk-progress" checked> progress</label>
         <button class="mini" type="button" id="btn-clear-chat" title="Clears this view only; the robot keeps its memory">Clear</button></span></h2>
+      <div class="demo" id="demo" hidden aria-label="Demo steps">
+        <div class="demo-bar" id="demo-bar">
+          <button class="btn primary" type="button" id="demo-all" title="Say every step's lines in order, as if typed here, and judge each step">Run all</button>
+          <button class="btn stop" type="button" id="demo-stop" disabled title="Sends no further demo lines, then says “stop” to the robot once">Stop</button>
+          <label class="demo-rec" id="demo-rec-l"><span class="switch rec"><input type="checkbox" id="demo-rec" aria-label="Record with the Sim Viewer"><i></i></span>Record</label>
+          <button class="btn" type="button" id="demo-fresh">Fresh restart</button>
+        </div>
+        <div class="demo-confirm" id="demo-confirm" hidden role="alertdialog" aria-label="Restart the stack?">
+          <div><b>Restart the whole stack?</b> Isaac, SONIC and this page go down and come back with the same profile and house
+            (about a minute). The robot starts standing, hands empty. The page reconnects by itself.</div>
+          <div class="demo-bar"><button class="btn stop" type="button" id="demo-fresh-yes">Restart the stack</button>
+            <button class="btn" type="button" id="demo-fresh-no">Cancel</button></div>
+        </div>
+        <div class="demo-now" id="demo-now" aria-live="polite"></div>
+        <ol class="demo-steps" id="demo-steps"></ol>
+      </div>
       <div class="scroll" id="chat-scroll">
         <div id="banner-slot"></div>
         <div class="world-card" id="world-card"></div>
@@ -1552,6 +1607,7 @@
     for (const c of $("world-card").querySelectorAll(".chip")) c.addEventListener("click", () => send(c.textContent));
   }
   function banner() {
+    if (S.demo.restarting) { restartBanner(); return; }
     const slot = $("banner-slot");
     const msgs = [];
     if (S.meta && !S.meta.gemini_key) msgs.push("GEMINI_API_KEY is missing ($WORLDLINE_ENV, .env or ~/.config/ludo-g1/secrets.env), so the Gemini planner can't run.");
@@ -1597,6 +1653,7 @@
     const msg = JSON.parse(ev.data);
     if (msg.type === "init") {
       S.meta = msg.meta || S.meta; S.map = msg.map; if (S.meta && S.meta.system1) S.s1 = S.meta.system1; S.layout = msg.layout; S.config = msg.config; S.error = msg.error;
+      if (S.demo.restarting) { S.demo.restarting = null; toast("The stack is back up"); renderDemo(); }
       S.lastEv = -1; S.lastTr = -1; S.chatByUid = {}; S.lastRobotMsg = {};
       S.calls = {}; S.traceAll = []; S.callsCleared = 0; S.callsLog = msg.calls_log; S.hud = { label: null, noticed: null }; closeDrawer();
       if (S.cams.__scene !== msg.config.scene) { S.cams = { __scene: msg.config.scene }; showCam(); }
@@ -1622,7 +1679,11 @@
     } else if (msg.type === "memory") {
       V.memory.memory(msg);
       if (S.space === "brain") renderSpace();
-    } else if (msg.type === "notice") toast(msg.text);
+    } else if (msg.type === "demo_steps") demoSteps(msg);
+    else if (msg.type === "demo_run") demoRun(msg);
+    else if (msg.type === "demo_record") demoRecord(msg);
+    else if (msg.type === "demo_fresh") demoFresh(msg);
+    else if (msg.type === "notice") toast(msg.text);
   }
 
   // ------------------------------------------------------------------ model calls
@@ -1775,6 +1836,123 @@
     svg.addEventListener("pointerup", end); svg.addEventListener("pointercancel", end);
   })();
 
+  // ------------------------------------------------------------------ Demo panel (ui/demo.py; config/demo_steps.yaml)
+  // The same steps as scripts/demo.sh. The server says each line through the chat's own path, so the chat shows it as
+  // usual; this panel shows which step runs, the line being said, and each step's PASS/FAIL with its evidence.
+  S.demo = { steps: [], st: {}, running: false, runState: null, current: null, line: null, summary: "", error: null,
+             record: { on: false, busy: false }, fresh: { ok: false }, confirm: false, restarting: null, freshLog: null };
+  const DSTATES = ["idle", "running", "pass", "fail"];
+  function demoOpen(on) {
+    $("demo").hidden = !on;
+    $("btn-demo").setAttribute("aria-expanded", String(on));
+    $("btn-demo").classList.toggle("demo-on", on);
+    remember("demo", on ? "1" : "0");
+  }
+  function demoSteps(msg) {
+    const D = S.demo, st = msg.state || {};
+    D.steps = msg.steps || []; D.error = msg.error || null; D.fresh = msg.fresh || { ok: false };
+    D.record = { ...D.record, ...(msg.record || {}) };
+    D.running = !!st.running; D.current = st.current ?? null; D.line = st.line || null; D.summary = st.summary || "";
+    D.st = { ...(st.steps || {}) };
+    renderDemo();
+  }
+  function demoRun(msg) {
+    const D = S.demo;
+    D.running = !!msg.running;
+    if (msg.step == null) {                                   // the run as a whole
+      D.summary = msg.detail || ""; D.runState = msg.state;
+      if (msg.state !== "running") { D.current = null; D.line = null; }
+      if (D.running) demoOpen(true);
+    } else {
+      D.st[msg.step] = { state: msg.state, detail: msg.detail || "", s: msg.s };
+      if (msg.state === "running") {
+        D.current = msg.step;
+        D.line = msg.line ? { step: msg.step, text: msg.line, phase: msg.detail } : (D.line && D.line.step === msg.step ? D.line : null);
+      } else if (D.current === msg.step) { D.line = null; }
+    }
+    renderDemo();
+  }
+  function demoRecord(msg) {
+    const was = S.demo.record || {};
+    S.demo.record = { ...was, ...msg };
+    if (!msg.busy && msg.detail && (was.busy || !msg.on)) toast(msg.detail);
+    renderDemo();
+  }
+  function demoFresh(msg) {
+    const D = S.demo;
+    if (msg.state === "restarting") {
+      D.restarting = Date.now(); D.confirm = false; D.freshLog = msg.log || null;
+      restartBanner();
+    } else if (msg.state === "failed") {
+      D.restarting = null; banner(); toast(msg.detail || "The restart did not happen");
+    }
+    renderDemo();
+  }
+  function restartBanner() {
+    const D = S.demo;
+    if (!D.restarting) return;
+    const s = Math.round((Date.now() - D.restarting) / 1000);
+    $("banner-slot").innerHTML = `<div class="banner restart">Restarting the stack (~60 s): Isaac, SONIC and this page come back with the same profile and house. ${s} s so far; the page reconnects by itself.` +
+      (s > 300 ? ` It is taking long: see <code>${esc(D.freshLog || "runs/demo/fresh-*.log")}</code> on the box.` : "") + `</div>`;
+  }
+  setInterval(() => { if (S.demo.restarting) restartBanner(); }, 1000);
+  function demoTip(s) {
+    const asked = (s.if_asked || []).map(([re, r]) => ` (if it asks /${re}/: “${r}”)`).join("");
+    return `Says ${(s.lines || []).map((l) => `“${l}”`).join(", then ")}${asked}\nPASS when: ${s.pass_text || s.rule.rule}` +
+      `${s.needs ? `\nNeeds: ${s.needs}` : ""}\nWaits up to ${s.max_s} s on a line. "@N" = N s after the previous line.`;
+  }
+  function renderDemo() {
+    const D = S.demo, rec = D.record || {};
+    const busy = D.running || !!D.restarting;
+    $("demo-all").disabled = busy || !D.steps.length;
+    $("demo-stop").disabled = !D.running;
+    const chk = $("demo-rec"), off = rec.available === false;
+    chk.checked = !!rec.on; chk.disabled = !!rec.busy || off;
+    $("demo-rec-l").classList.toggle("on", !!rec.on);
+    $("demo-rec-l").classList.toggle("off", off);
+    $("demo-rec-l").title = off ? `No Sim Viewer to record: ${rec.viz || "none"}` : (rec.detail || "Sim Viewer recording (POST /api/record): composite.mp4, contact sheet");
+    const fr = $("demo-fresh"), fresh = D.fresh || {};
+    fr.disabled = busy || !fresh.ok; fr.hidden = D.confirm;
+    fr.title = fresh.ok ? `Restart the stack: ${fresh.why || "m2_down.sh, then m2_up.sh"}` : `Fresh restart is ${fresh.why || "not available"}`;
+    $("demo-confirm").hidden = !D.confirm;
+    let now;
+    if (D.error) now = `<span class="bad">${esc(D.error)}</span>`;
+    else if (D.restarting) now = "Restarting the stack…";
+    else if (D.line && D.line.text) now = `step ${D.line.step} · you <b>“${esc(D.line.text)}”</b> · ${esc(D.line.phase || "")}`;
+    else if (D.running) now = D.current != null ? `step ${D.current} · starting…` : esc(D.summary || "starting…");
+    else if (D.summary) now = `<span class="${D.runState === "pass" ? "ok" : D.runState === "fail" ? "bad" : ""}">${esc(D.summary)}</span>`;
+    else now = `${D.steps.length} steps, said as if typed in the chat. Hover a step for its lines and PASS rule.`;
+    if (rec.on || rec.busy) now += `<div class="rec">● ${esc(rec.detail || "recording")}</div>`;
+    setHTML($("demo-now"), now);
+    setHTML($("demo-steps"), D.steps.map((s) => {
+      const st = D.st[s.id] || D.st[String(s.id)] || { state: "idle", detail: "" };
+      const state = DSTATES.includes(st.state) ? st.state : "idle";
+      const detail = state === "pass" || state === "fail" ? st.detail : "";
+      return `<li class="dstep st-${state}" title="${esc(demoTip(s))}">
+        <span class="dchip ${state}">${state === "running" ? `<span class="dot"></span>` : ""}${state}</span>
+        <span class="dtitle"><span class="n">${esc(s.id)}</span>${esc(s.title)}</span>
+        <button class="mini" type="button" data-run="${esc(s.id)}"${busy ? " disabled" : ""} title="Run step ${esc(s.id)} only">Run</button>
+        <span class="dshows">${esc(s.shows)}</span>
+        ${detail ? `<span class="ddetail">${st.s != null ? esc(st.s) + " s · " : ""}${esc(detail)}</span>` : ""}
+      </li>`;
+    }).join("") || `<li class="empty">No demo steps.</li>`);
+  }
+  $("btn-demo").addEventListener("click", () => demoOpen($("demo").hidden));
+  $("demo-all").addEventListener("click", () => wsSend({ type: "demo", action: "run", steps: "all" }));
+  $("demo-stop").addEventListener("click", () => wsSend({ type: "demo", action: "stop" }));
+  $("demo-steps").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-run]");
+    if (b && !b.disabled) wsSend({ type: "demo", action: "run", steps: [Number(b.dataset.run)] });
+  });
+  $("demo-rec").addEventListener("change", (e) => {
+    S.demo.record = { ...S.demo.record, busy: true };
+    wsSend({ type: "demo", action: "record", on: e.target.checked });
+    renderDemo();
+  });
+  $("demo-fresh").addEventListener("click", () => { S.demo.confirm = true; renderDemo(); $("demo-fresh-yes").focus(); });
+  $("demo-fresh-no").addEventListener("click", () => { S.demo.confirm = false; renderDemo(); });
+  $("demo-fresh-yes").addEventListener("click", () => { S.demo.confirm = false; wsSend({ type: "demo", action: "fresh" }); renderDemo(); });
+
   // ------------------------------------------------------------------ feed pane: tabs, clear
   function setTab(tab) {
     S.tab = tab;
@@ -1794,7 +1972,8 @@
       setTimeout(() => { if (!S.layout && ws.readyState === 1) ws.send(JSON.stringify({ type: "hello" })); }, 2500);
     };
     ws.onclose = () => {
-      $("banner-slot").innerHTML = `<div class="banner">Lost the connection to the server. Retrying… (is <code>python ui/server.py</code> still running?)</div>`;
+      if (S.demo.restarting) restartBanner();
+      else $("banner-slot").innerHTML = `<div class="banner">Lost the connection to the server. Retrying… (is <code>python ui/server.py</code> still running?)</div>`;
       setTimeout(connect, 2000);
     };
   }
@@ -1881,11 +2060,13 @@
     if (e.key === "n" || e.key === "N") { const st = S.state && S.state.runtime && S.state.runtime.step; if (st && st.waiting) wsSend({ type: "step", mode: "next" }); }
   });
   let saved = {};
-  try { saved = { space: localStorage.getItem("worldline.space"), rtab: localStorage.getItem("worldline.rtab"), cam: localStorage.getItem("worldline.cam") }; } catch { /* private window: fine */ }
+  try { saved = { space: localStorage.getItem("worldline.space"), rtab: localStorage.getItem("worldline.rtab"), cam: localStorage.getItem("worldline.cam"), demo: localStorage.getItem("worldline.demo") }; } catch { /* private window: fine */ }
   if (["head", "chase", "top", "ego"].includes(saved.cam)) S.cam = saved.cam;
   showCam();
   setRtab(["now", "state", "memory", "proc"].includes(saved.rtab) ? saved.rtab : "now");
   setSpace(saved.space === "brain" ? "brain" : "world");
+  demoOpen(saved.demo === "1");
+  renderDemo();
   connect();
 })();
 </script>
