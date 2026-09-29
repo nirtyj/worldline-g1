@@ -9,6 +9,8 @@
 #   bash scripts/groot_link.sh keygen                        # ~/.ssh/groot_link_ed25519 (once); prints the public key
 #   bash scripts/groot_link.sh up --host DEV_IP [--port 5550] [--local-port 5550] [--user ubuntu]
 #   bash scripts/groot_link.sh down | status | check [--local-port 5550]
+#   bash scripts/groot_link.sh ensure [--local-port 5550]     # check; if the link is down, bring it up again with the
+#                                                            # host of the last `up` (m2_up.sh --profile full runs this)
 # DEV box:
 #   bash scripts/groot_link.sh install-key 'ssh-ed25519 AAAA… groot-link@main' [--from MAIN_IP] [--port 5550]
 #                                                            (or --pub-file FILE)
@@ -89,11 +91,15 @@ keygen() {
   cat "$KEY.pub"
 }
 
+STATE_ENV() { echo "$LOG_DIR/link-$LPORT.env"; }   # the last `up`'s host/user/port, for `ensure`
+
 up() {
-  [[ -n "$HOST" ]] || die "--host DEV_IP required"
+  if [[ -z "$HOST" && -f "$(STATE_ENV)" ]]; then source "$(STATE_ENV)"; HOST="$LINK_HOST"; USER_="$LINK_USER"; PORT="$LINK_PORT"; fi
+  [[ -n "$HOST" ]] || die "--host DEV_IP required (no earlier up recorded in $(STATE_ENV))"
   [[ -f "$KEY" ]] || die "no $KEY (run: groot_link.sh keygen, then install the key on the dev box)"
   tmux has-session -t "$SESSION" 2>/dev/null && { log "tmux $SESSION already up"; status; return 0; }
   mkdir -p "$LOG_DIR"
+  printf 'LINK_HOST=%q\nLINK_USER=%q\nLINK_PORT=%q\n' "$HOST" "$USER_" "$PORT" > "$(STATE_ENV)"
   local ssh_cmd; ssh_cmd="$(tunnel_cmd)"
   local runner
   if command -v autossh >/dev/null 2>&1; then
@@ -127,6 +133,18 @@ status() {
   echo "ping:    $(ping_port "$LPORT" 2 2>/dev/null || true)"
   [[ -f "$LOG_DIR/link-$LPORT.log" ]] && { echo "log tail:"; tail -3 "$LOG_DIR/link-$LPORT.log"; }
   return 0
+}
+
+ensure() {  # the link answers, or is brought up again (the tmux loop itself can be killed by hand or a reboot)
+  if ping_port "$LPORT" 3 2>/dev/null; then return 0; fi
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    log "tmux $SESSION is up but the PolicyServer does not answer (dev-box server down? see $LOG_DIR/link-$LPORT.log)"
+    return 1
+  fi
+  [[ -f "$(STATE_ENV)" ]] || { log "link down and no earlier up recorded ($(STATE_ENV)): run up --host DEV_IP"; return 1; }
+  log "link down: bringing it up again with the last host"
+  up
+  ping_port "$LPORT" 3
 }
 
 install_key() {
@@ -198,9 +216,10 @@ case "$cmd" in
   down) down;;
   status) status;;
   check) ping_port "$LPORT" 3;;
+  ensure) ensure;;
   install-key) install_key;;
   remove-key) remove_key;;
   auth-line) [[ -n "$PUB" ]] || die "auth-line 'ssh-ed25519 AAAA…' [--from IP]"; auth_line "$PUB" "$FROM" "$PORT";;
   selftest) selftest;;
-  *) sed -n '2,20p' "$0"; exit 2;;
+  *) sed -n '2,22p' "$0"; exit 2;;
 esac

@@ -373,15 +373,27 @@ def ego_view_check(world: Any, sensors: Any, object_id: str, out_png: Path | Non
     """The GR00T view check the W2.5 bar uses, from P1's instance segmentation of ego_view (docs/contracts/p1_m2b.md
     §7): the target's pixels and bbox, and whether its bbox centre sits below the image's upper third (v >= 160 of
     480: Arena's training frames show the apple in the lower part). Saves the frame it judged."""
-    world.enable_camera("ego_view", True, consumer=consumer, ttl_s=10.0, hz=30.0)
+    out: dict[str, Any] = {"camera": "ego_view", "object": object_id}
+    try:
+        world.enable_camera("ego_view", True, consumer=consumer, ttl_s=10.0, hz=30.0)
+    except Exception as e:  # noqa: BLE001 - an M1 P1 has no camera op (its 5565 stream is always on)
+        out["enable_camera"] = f"unavailable: {e}"[:160]
     try:
         time.sleep(settle_s)
         sid = world.map.objects[object_id].scene_id
-        rep = world.rpc.call("detections", timeout_s=3.0, camera="ego_view", min_px=1, bbox=True)
-        mine = [d for d in rep.get("detections") or [] if str(d.get("id")) == str(sid)]
-        out: dict[str, Any] = {"camera": "ego_view", "method": rep.get("method"), "object": object_id,
-                               "render_seq": rep.get("render_seq"), "cam_pose_wl": rep.get("cam_pose_wl")}
-        if mine:
+        try:
+            rep = world.rpc.call("detections", timeout_s=3.0, camera="ego_view", min_px=1, bbox=True)
+            if rep.get("ok") is False:
+                raise RuntimeError(rep.get("code") or rep.get("error"))
+        except Exception as e:  # noqa: BLE001 - an M1 P1 has no `detections` op (P1.6)
+            rep = None
+            out.update(px=None, ok=None, detections=f"unavailable: {e}"[:160])
+        mine = [d for d in (rep or {}).get("detections") or [] if str(d.get("id")) == str(sid)]
+        if rep is not None:
+            out.update(method=rep.get("method"), render_seq=rep.get("render_seq"), cam_pose_wl=rep.get("cam_pose_wl"))
+        if rep is None:
+            pass
+        elif mine:
             d = mine[0]
             u0, v0, u1, v1 = (float(x) for x in d["bbox"])
             uc, vc = (u0 + u1) / 2.0, (v0 + v1) / 2.0
@@ -403,7 +415,10 @@ def ego_view_check(world: Any, sensors: Any, object_id: str, out_png: Path | Non
                 out["frame"] = out_png.name
         return out
     finally:
-        world.enable_camera("ego_view", False, consumer=consumer)
+        try:
+            world.enable_camera("ego_view", False, consumer=consumer)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _steps(q: np.ndarray) -> np.ndarray:
@@ -418,6 +433,27 @@ def _palms(q17: np.ndarray) -> dict[str, np.ndarray]:
     from body.g1_kin import named_from_mj17, points
     pts = [points(named_from_mj17(v)) for v in q17]
     return {k: np.array([p[k] for p in pts]) for k in ("left_palm", "right_palm")}
+
+
+def one_epoch_space(robot: Any) -> bool:
+    """True on the M2b façade (R.2): SonicBody.fence maps an execution's control_epoch/generation onto the body's
+    numbers and HaltGate works in control_epoch space. False on the M1 façade (raw numbers, its own gate counter)."""
+    return hasattr(robot.gate, "resume_epoch") and callable(getattr(robot.body, "fence", None))
+
+
+def session_job(robot: Any, sid: str, ce: int, skill: Any, object_id: str, object_type: str, arm: str = "left"):
+    """(Execution, ManipJob) for one groot_arms session, fenced the way ManipulationService fences it: the body's
+    numbers from SonicBody.fence on the M2b façade, else the execution's own."""
+    from api.execution import Execution
+    from services.executors.kinematic_attach import ManipJob
+    ex = Execution(execution_id=sid, tool_name="manipulate", args={}, generation=1, control_epoch=ce)
+    one = one_epoch_space(robot)
+    fence = dict(robot.body.fence(ex)) if one else {}
+    j = ManipJob("pick", object_id, arm, skill.skill_id, epoch=ce if one else robot.gate.epoch)
+    for k, v in dict(execution_id=sid, generation=int(fence.get("generation", 1)),
+                     control_epoch=int(fence.get("control_epoch", ce)), object_type=object_type, skill=skill).items():
+        setattr(j, k, v)
+    return ex, j
 
 
 def g2_session_report(kind: str, out, s, sends: list[dict], t_trig: float | None, receipt: dict | None,
@@ -447,10 +483,13 @@ def g2_session_report(kind: str, out, s, sends: list[dict], t_trig: float | None
         r["chunks_accepted_after_trigger"] = sum(1 for m in late if m["ok"] and not m["dropped"])
     if receipt is not None:
         body = receipt.get("body") or {}
-        r["halt_receipt"] = {"acked": receipt.get("acked"), "rtt_ms": receipt.get("rtt_ms"),
-                             "wait_ms": receipt.get("wait_ms"), "handle_ms": body.get("handle_ms"),
-                             "kind": body.get("kind"), "arms_latched": body.get("arms_latched"),
-                             "arm": body.get("arm"), "epoch": receipt.get("epoch")}
+        # BodyClient.halt (lane) -> {acked, rtt_ms, wait_ms, body}; G1Robot.halt (R.2) -> {stopped, rtt_ms, ...}
+        r["halt_receipt"] = {"acked": receipt.get("acked", receipt.get("stopped")), "rtt_ms": receipt.get("rtt_ms"),
+                             "wait_ms": receipt.get("wait_ms"), "latency_ms": receipt.get("latency_ms"),
+                             "handle_ms": body.get("handle_ms"), "kind": body.get("kind"),
+                             "arms_latched": body.get("arms_latched"), "arm": body.get("arm"),
+                             "epoch": receipt.get("epoch"),
+                             "raw": {k: v for k, v in receipt.items() if k != "body"}}
     if traj:
         t, q = traj["t"], traj["q17"]
         st = _steps(q)
@@ -550,7 +589,12 @@ async def g2_async(a: argparse.Namespace) -> dict:
                                                "height_above_floor": round(o.pos[2], 3)}}
 
         # 1. the executor: real chunks into the real arm op, every message recorded
-        sensors = ZmqSensors(f"tcp://127.0.0.1:{5566 + off}", f"tcp://127.0.0.1:{5557 + off}", "ego_view").start()
+        sensors = ZmqSensors(f"tcp://127.0.0.1:{a.camera_port + off}", f"tcp://127.0.0.1:{5557 + off}",
+                             a.camera_key).start()
+        rep["camera"] = {"port": a.camera_port, "key": a.camera_key,
+                         "label": "Arena ego_view (P1 5566, OD1)" if a.camera_port == 5566 else
+                         "INTERIM: not Arena's ego_view (an M1 P1 stream); the policy's visual input is "
+                         "off-distribution"}
         rep["view"] = await asyncio.to_thread(ego_view_check, world, sensors, a.object, out / "view_check.png")
         port = BodyArmPort.of(robot.body)
         if port is None:
@@ -584,16 +628,23 @@ async def g2_async(a: argparse.Namespace) -> dict:
                 await asyncio.sleep(0.1)
         pose_task = asyncio.ensure_future(sample_poses())
 
-        # 2. the sessions
+        # 2. the sessions. Epochs: the M2b façade (R.2: SonicBody.fence, HaltGate in control_epoch space) maps an
+        # execution's runtime control_epoch onto the body's space; the M1 façade sends it raw and its HaltGate counts
+        # its own epochs. Either way a halt fences this session's control_epoch and the next session carries a newer
+        # one (the body refuses control_epoch <= its halt epoch after the resume: stale_command).
+        one_space = one_epoch_space(robot)
+        rep["epoch_space"] = "one (R.2: SonicBody.fence)" if one_space else "M1 façade (raw control_epoch)"
+        acquire = getattr(robot.body, "acquire", None) if one_space else None
+        release_fn = getattr(robot.body, "release", None) if one_space else None
+        ce = max(int(getattr(robot.gate, "epoch", 0)), int(getattr(robot.gate, "resume_epoch", 0) or 0)) + 1
         sessions = []
         for i, kind in enumerate(a.plan):
             sid = f"g2-{i + 1:02d}-{kind}"
-            ce = robot.gate.epoch + 1              # above every halt so far (a halt at n fences control_epoch <= n)
-            ex = Execution(execution_id=sid, tool_name="manipulate", args={}, generation=1, control_epoch=ce)
-            j = ManipJob("pick", a.object, a.arm_side, skill.skill_id, epoch=robot.gate.epoch)
-            for k, v in dict(execution_id=sid, generation=1, control_epoch=ce, object_type=otype, skill=skill).items():
-                setattr(j, k, v)
+            ex, j = session_job(robot, sid, ce, skill, a.object, otype, a.arm_side)
             h = ResultHandle(ex)
+            lease = None
+            if callable(acquire):
+                lease = await acquire(ex, "ARM_STREAM")
             rec.session, traj.session = sid, sid
             t_start = time.monotonic()
             task = asyncio.ensure_future(exe.run(j, h))
@@ -610,6 +661,9 @@ async def g2_async(a: argparse.Namespace) -> dict:
                     t_trig = time.monotonic()
                     if kind == "C":
                         h.cancel("g2 cancel")
+                    elif one_space:
+                        receipt = await asyncio.to_thread(robot.halt, ce)    # gate latch at ce, then the B.1 lane
+                        halt_epoch = ce
                     else:
                         halt_epoch = robot.gate.halt()             # the runtime latch first, then the body's lane
                         receipt = await asyncio.to_thread(bc.halt, halt_epoch, 0.03, "g2")
@@ -630,10 +684,23 @@ async def g2_async(a: argparse.Namespace) -> dict:
             row["fell"] = any(x[5] for x in win)
             row["pelvis_z_min"] = round(min((x[4] for x in win if x[4] is not None), default=float("nan")), 3)
             row["base_drift_m"] = round(math.hypot(win[-1][1] - win[0][1], win[-1][2] - win[0][2]), 3) if win else None
+            row["fence"] = {"control_epoch": j.control_epoch, "generation": j.generation, "runtime_ce": ce,
+                            "lease": None if lease is None else {k: lease.get(k) for k in ("ok", "reason")}}
+            if callable(release_fn):
+                try:
+                    await release_fn(sid)
+                except Exception:  # noqa: BLE001
+                    pass
             if kind == "H" and halt_epoch is not None:
-                robot.gate.resume(halt_epoch)
-                row["resume"] = await asyncio.to_thread(bc.resume, halt_epoch)
-                row["resume"] = {"ok": row["resume"].get("ok"), "error": row["resume"].get("error")}
+                if one_space:
+                    ce = halt_epoch + 1
+                    rr = await asyncio.to_thread(robot.resume, ce)
+                    row["resume"] = {"control_epoch": ce, "body": rr if isinstance(rr, dict) else None}
+                else:
+                    robot.gate.resume(halt_epoch)
+                    rr = await asyncio.to_thread(bc.resume, halt_epoch)
+                    row["resume"] = {"ok": rr.get("ok"), "error": rr.get("error")}
+                    ce = halt_epoch + 1
             # arms back to SONIC's own reference between sessions (stop {arms: true}: blend 1.5 s)
             hs = await asyncio.to_thread(bc.stop, True, 10.0, True)
             row["release"] = {"ok": hs.ok, "reason": hs.reason}
@@ -730,6 +797,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--rest-s", type=float, default=2.5)
     g.add_argument("--frame-every", type=int, default=5)
     g.add_argument("--seed", type=int, default=7)
+    g.add_argument("--camera-port", type=int, default=5566, help="GR00T's view: P1 ego_view 5566 (M1 P1: 5565)")
+    g.add_argument("--camera-key", default="ego_view")
     a = ap.parse_args(argv)
     a.walks = [tuple(w.split(":", 1)) for w in (a.walk or ["kitchen_counter_1a:kitchen_counter_1b"])]
     if a.g2:

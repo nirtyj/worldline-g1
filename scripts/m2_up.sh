@@ -13,10 +13,10 @@
 #   4. stand          m1_up.sh: SONIC takes the weight, band released, upright
 #   5. P5 wl-runtime  scripts/m2_p5.sh start: ui.server --profile P --scene S, SimClock(1.0) (wall-second timeouts);
 #                     ready = HTTP 200 + an `init` for that scene/profile with no error (scripts/p5_probe.py)
-#   6. GR00T link     --profile full only: scripts/groot_link.sh check (owner groot_srv; the PolicyServer runs on the
-#                     dev box, reached through an SSH tunnel, OD3). Skipped with a note when the script is absent;
-#                     a failed check is a warning, because `full` then rejects GR00T calls as `policy unavailable`
-#                     and keeps its labelled fallbacks.
+#   6. GR00T link     --profile full only: scripts/groot_link.sh ensure (the PolicyServer runs on the dev box,
+#                     reached through an SSH tunnel, OD3, docs/groot_serving.md §5: ping it, and bring the tunnel up
+#                     again with the last host if it is down). A failed check is a warning, because `full` then
+#                     rejects GR00T calls as `policy unavailable` and keeps its labelled fallbacks.
 # Defaults: session wl-m2, scene procthor-train-40 (H40, the F1 house), no viz cameras, the live planner and
 # System 1 (scripts/m2_p5.sh). go_to stays A* + pure pursuit (NAV_BACKEND=astar; Nav2 is deferred, PLAN §0.8).
 # --viz passes P1's VizCams level (docs/viz.md: min for recordings and demos, never high with SONIC in the loop).
@@ -82,7 +82,7 @@ if [[ "$DRY" == 1 ]]; then
   echo "p5: bash $WL/scripts/m2_p5.sh start ${P5_ARGS[*]}"
   echo "page: http://127.0.0.1:$P5_PORT (laptop: BREV_NAME=<box> 00_infra/tunnel.sh $P5_PORT)"
   if [[ "$PROFILE" == full && "$GROOT_CHECK" == 1 ]]; then
-    if [[ -f "$WL/scripts/groot_link.sh" ]]; then echo "groot: bash $WL/scripts/groot_link.sh check"
+    if [[ -f "$WL/scripts/groot_link.sh" ]]; then echo "groot: bash $WL/scripts/groot_link.sh ensure"
     else echo "groot: skipped (scripts/groot_link.sh not present; owner groot_srv)"; fi
   fi
   exit 0
@@ -159,7 +159,7 @@ cp "$M2_STATE/p5-$SESSION.env" "$RUN/p5.env" 2>/dev/null || true
 GROOT=n/a
 if [[ "$PROFILE" == full && "$GROOT_CHECK" == 1 ]]; then
   if [[ -f "$WL/scripts/groot_link.sh" ]]; then
-    if bash "$WL/scripts/groot_link.sh" check 2>&1 | tee -a "$LOG_UP"; then GROOT=ok; stage groot
+    if bash "$WL/scripts/groot_link.sh" ensure 2>&1 | tee -a "$LOG_UP"; then GROOT=ok; stage groot
     else GROOT=failed; say "WARNING: GR00T link check failed: full rejects GR00T calls (policy unavailable) and uses its fallbacks"; fi
   else
     GROOT=skipped; say "GR00T link check skipped: scripts/groot_link.sh is not in this tree (owner groot_srv)"

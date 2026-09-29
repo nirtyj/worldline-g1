@@ -148,17 +148,17 @@ def lat_stats(v: list[float]) -> dict:
 
 
 async def main_async(a: argparse.Namespace) -> dict:
-    from api.execution import Execution, ResultHandle
+    from api.execution import ResultHandle
     from body.client import BodyClient
     from body.config import ep
     from body.p1_client import PoseSub
     from robot.factory import build
     from services.executors.groot_arms import (BodyArmPort, GrootArmExecutor, GrootArmsConfig, ZmqSensors,
                                                _groot_helpers)
-    from services.executors.kinematic_attach import ManipJob
     from services.skills import load_skill_specs
     from sim.clock import SimClock
     from sim_isaac.tools.rtf_cameras import summarize, walk_pattern
+    from tools.groot_live_smoke import one_epoch_space, session_job
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -178,8 +178,10 @@ async def main_async(a: argparse.Namespace) -> dict:
     sub.start()
     cad = DebugCadence(ep(5557 + off))
     cad.start()
-    sensors = ZmqSensors(f"tcp://127.0.0.1:{5566 + off}", f"tcp://127.0.0.1:{5557 + off}", "ego_view").start()
+    sensors = ZmqSensors(f"tcp://127.0.0.1:{a.camera_port + off}", f"tcp://127.0.0.1:{5557 + off}",
+                         a.camera_key).start()
     res: dict[str, Any] = {"tool": "groot_timing_gate", "scene": a.scene, "endpoint": a.endpoint,
+                           "camera": {"port": a.camera_port, "key": a.camera_key},
                            "rounds": a.rounds, "stand_s": a.stand_s, "walk_s": a.walk_s, "gpu_apps_before": gpu_apps(),
                            "label": "deliberate GR00T-load measurement (PLAN §0.10 d)", "runs": []}
     skill = {x.skill_id: x for x in load_skill_specs()}[a.skill]
@@ -212,13 +214,15 @@ async def main_async(a: argparse.Namespace) -> dict:
                 elif phase == "stand_groot":
                     n += 1
                     sid = f"tg-{n:02d}"
-                    ex = Execution(execution_id=sid, tool_name="manipulate", args={}, generation=1,
-                                   control_epoch=robot.gate.epoch + 1)
-                    j = ManipJob("pick", a.object, "left", skill.skill_id, epoch=robot.gate.epoch)
-                    for k, v in dict(execution_id=sid, generation=1, control_epoch=robot.gate.epoch + 1,
-                                     object_type=world.object(a.object).type, skill=skill).items():
-                        setattr(j, k, v)
+                    ce = max(int(robot.gate.epoch), int(getattr(robot.gate, "resume_epoch", 0) or 0)) + 1
+                    ex, j = session_job(robot, sid, ce, skill, a.object, world.object(a.object).type)
+                    acq = getattr(robot.body, "acquire", None) if one_epoch_space(robot) else None
+                    if callable(acq):
+                        await acq(ex, "ARM_STREAM")
                     o = await exe.run(j, ResultHandle(ex))
+                    rel = getattr(robot.body, "release", None) if callable(acq) else None
+                    if callable(rel):
+                        await rel(sid)
                     run["session"] = {"status": o.status, "reason": o.reason,
                                       "inferences": o.data.get("inferences"), "chunks_sent": o.data.get("chunks_sent"),
                                       "latency_ms": o.data.get("latency_ms"), "slew_frac": o.data.get("slew_frac"),
@@ -226,8 +230,11 @@ async def main_async(a: argparse.Namespace) -> dict:
                     await asyncio.to_thread(bc.stop, True, 10.0, True)      # arms back to SONIC (blend 1.5 s)
                 else:
                     if phase == "walk_groot":
-                        await asyncio.to_thread(world.enable_camera, "ego_view", True, consumer="timing-gate",
-                                                ttl_s=30.0, hz=30.0)
+                        try:
+                            await asyncio.to_thread(world.enable_camera, "ego_view", True, consumer="timing-gate",
+                                                    ttl_s=30.0, hz=30.0)
+                        except Exception as e:  # noqa: BLE001 - an M1 P1: no ego_view render product to add
+                            run["ego_view"] = f"enable_camera unavailable: {e}"[:160]
                         await asyncio.sleep(0.5)
                         load = ClientLoad(sensors, a.endpoint, skill.prompt_template.format(label="potato"))
                         load.start()
@@ -238,7 +245,10 @@ async def main_async(a: argparse.Namespace) -> dict:
                     if load is not None:
                         load.stop()
                         load.join(3.0)
-                        await asyncio.to_thread(world.enable_camera, "ego_view", False, consumer="timing-gate")
+                        try:
+                            await asyncio.to_thread(world.enable_camera, "ego_view", False, consumer="timing-gate")
+                        except Exception:  # noqa: BLE001
+                            pass
                         run["client"] = {"latency_ms": lat_stats(load.lat), "errors": load.errors[:5],
                                          "n_errors": len(load.errors), "obs_stale": load.stale}
                 t1 = time.monotonic()
@@ -298,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--walk-s", type=float, default=40.0)
     ap.add_argument("--settle-s", type=float, default=3.0)
     ap.add_argument("--no-home", action="store_true")
+    ap.add_argument("--camera-port", type=int, default=5566, help="GR00T's view: P1 ego_view 5566 (M1 P1: 5565)")
+    ap.add_argument("--camera-key", default="ego_view")
     a = ap.parse_args(argv)
     res = asyncio.run(main_async(a))
     print("TIMING_GATE " + json.dumps(res.get("summary"), default=str), flush=True)
