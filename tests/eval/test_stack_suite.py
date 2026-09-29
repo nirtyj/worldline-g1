@@ -81,20 +81,27 @@ class GrootPage(FakePage):
     "stop" halts it (a stop row with a receipt, then failed(halted)); otherwise it fails grasp_missed after 4 s,
     except the second plain trial, which lifts the object (GT: hand:right)."""
 
-    def __init__(self) -> None:
+    def __init__(self, dead_after: int | None = None) -> None:
         super().__init__(H40_LAYOUT, H40_OBJECTS, self._on_say)
         self.trials = 0
         self.current: dict | None = None
+        self.dead_after = dead_after          # from this trial on the body refuses GR00T at `enter` (the fallback runs)
+
+    def dead(self, n: int) -> bool:
+        return self.dead_after is not None and n >= self.dead_after
 
     async def _on_say(self, page: FakePage, text: str) -> None:
         t = text.lower()
         if t.startswith("bring me"):
             self.trials += 1
             eid = f"man-{self.trials:06d}"
-            self.current = {"eid": eid, "open": True}
+            self.current = {"eid": eid, "open": True, "n": self.trials}
             await self.frame(trace=[{"t": self.t, "type": "started", "tool": "manipulate", "action": "pick",
                                      "execution_id": eid, "args": {"action": "pick", "skill_id": "groot.pick.alarm_clock.arena_static.v0"}}],
                              active=[{"id": eid, "tool": "manipulate"}])
+            if not self.dead(self.trials):     # the GR00T session runs: groot_arms' first inference event
+                await self.frame(events=[{"t": self.t, "type": "groot.inference", "session": eid, "ok": True,
+                                          "latency_ms": 40.0}])
             asyncio.get_running_loop().create_task(self._finish_later(eid, self.trials))
         elif self.current and self.current["open"] and ("never mind" in t or t == "stop"):
             cur = self.current
@@ -102,9 +109,9 @@ class GrootPage(FakePage):
             if t == "stop":
                 await self.frame(trace=[{"t": self.t, "type": "stop", "receipt": {"accepted": True, "stopped": True,
                                                                                   "latency_ms": 4.0}}])
-                await self._result(cur["eid"], "failed", "halted")
+                await self._result(cur["eid"], "failed", "halted", cur["n"])
             else:
-                await self._result(cur["eid"], "cancelled", "cancelled")
+                await self._result(cur["eid"], "cancelled", "cancelled", cur["n"])
         else:
             await self.frame()
 
@@ -116,13 +123,23 @@ class GrootPage(FakePage):
             self.current["open"] = False
             if n == 2:
                 self.objects["alarm_clock_1"]["where"] = "hand:right"
-            await self._result(eid, "succeeded" if n == 2 else "failed", None if n == 2 else "grasp_missed")
+            await self._result(eid, "succeeded" if n == 2 else "failed", None if n == 2 else "grasp_missed", n)
 
-    async def _result(self, eid: str, status: str, reason: str | None) -> None:
+    async def _result(self, eid: str, status: str, reason: str | None, n: int = 0) -> None:
+        skill = "groot.pick.alarm_clock.arena_static.v0"
+        if self.dead(n):                      # groot_then_script: GR00T refused at enter, the script's result
+            data = {"executor": "sonic_arm_script", "skill": "sonic.script.pick.v0", "reason": reason, "inferences": 0,
+                    "attempts": [{"executor": "groot_arms", "skill": skill, "status": "failed",
+                                  "reason": "controller_unavailable"},
+                                 {"executor": "sonic_arm_script", "skill": "sonic.script.pick.v0", "status": status,
+                                  "reason": reason}],
+                    "fallback_from": {"executor": "groot_arms", "status": "failed", "reason": "controller_unavailable"}}
+            ex = "sonic_arm_script"
+        else:
+            data = {"executor": "groot_arms", "skill": skill, "reason": reason, "inferences": 7, "label": "experimental"}
+            ex = "groot_arms"
         await self.frame(trace=[{"t": self.t, "type": "result", "tool": "manipulate", "action": "pick",
-                                 "execution_id": eid, "status": status, "executor": "groot_arms",
-                                 "data": {"executor": "groot_arms", "skill": "groot.pick.alarm_clock.arena_static.v0",
-                                          "reason": reason, "inferences": 7, "label": "experimental"}}])
+                                 "execution_id": eid, "status": status, "executor": ex, "data": data}])
 
 
 def test_e5_scores_ten_trials_from_the_page_alone(monkeypatch):
@@ -150,3 +167,29 @@ def test_e5_scores_ten_trials_from_the_page_alone(monkeypatch):
     assert "1/4 plain picks ended in hand (GT)" in res["extra"]["success"]
     assert any("experimental GR00T skill" in h for h in res["honesty"])
     assert res["target_pass"]                                                 # groot_arms is a target executor
+    assert all(t["groot_running_at_act"] for t in trials if t["kind"] in ("cancel", "halt"))
+
+
+def test_e5_fails_when_gr00t_never_ran_and_the_stops_hit_the_fallback(monkeypatch):
+    """The offline E5 rehearsal (M2b wave 2): from trial 4 the body refused every GR00T session at `enter`
+    (stale_session), so GR00T ran 0 inferences and every cancel and halt landed on sonic_arm_script - and the old
+    scorer still said cancel 3/3, halt 3/3. GR00T plumbing is only met when GR00T ran and was the one stopped."""
+    monkeypatch.setattr(ss.suite, "LOAD_TIMEOUT_S", 5.0)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(ss.asyncio, "sleep", lambda s, *a: real_sleep(min(s, 0.02)))
+    monkeypatch.setattr(ss.suite.asyncio, "sleep", lambda s, *a: real_sleep(min(s, 0.02)))
+
+    async def go():
+        page = GrootPage(dead_after=4)
+        run = ss.StackRun(page, "full", 0.02, ss.HookInjector({}))
+        reader = asyncio.create_task(run.reader())
+        try:
+            return await ss.run_one(next(s for s in ss.SPECS if s.id == "E5"), run, local=False)
+        finally:
+            reader.cancel()
+    res = asyncio.run(go())
+    crit = {c["name"] if isinstance(c, dict) and "name" in c else str(c): c for c in res["criteria"]}
+    assert res["verdict"] != "PASS", res["criteria"]
+    text = " ".join(str(c) for c in res["criteria"])
+    assert "3/10 with inferences > 0" in text and "cancel 0/3" in text and "halt 0/3" in text, text
+    assert crit                                                               # criteria are listed one by one

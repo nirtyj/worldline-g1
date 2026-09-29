@@ -158,6 +158,18 @@ class StackRun(suite.Run):
         t0 = self.now()
         await self.until(lambda: self.now() - t0 >= seconds, timeout)
 
+    async def wait_event(self, pred: Callable[[dict[str, Any]], bool], timeout: float) -> dict[str, Any] | None:
+        box: list[dict[str, Any]] = []
+
+        def found() -> bool:
+            for e in self.events:
+                if pred(e):
+                    box.append(e)
+                    return True
+            return False
+        await self.until(found, timeout)
+        return box[0] if box else None
+
     async def inject(self, name: str, **kw: Any) -> tuple[bool, str]:
         ok, note = await self.injector.do(name, **kw)
         self.injected.append(f"{name}: {note}" if ok else f"{name} FAILED: {note}")
@@ -794,6 +806,7 @@ async def g14_reposition_handoff(r: StackRun, o: Outcome) -> None:
 # E5: GR00T plumbing (full)
 # ----------------------------------------------------------------------------------------------------------
 E5_PLAN = ("plain",) * 4 + ("cancel",) * 3 + ("halt",) * 3
+INFERENCE_EVENTS = ("groot.inference", "vla.inference", "groot_inference")
 
 
 async def e5_groot_plumbing(r: StackRun, o: Outcome, trials: tuple[str, ...] = E5_PLAN,
@@ -810,7 +823,13 @@ async def e5_groot_plumbing(r: StackRun, o: Outcome, trials: tuple[str, ...] = E
             continue
         t_act = None
         if kind in ("cancel", "halt"):
-            await r.wait_sim(2.0, 30)
+            # act while the GR00T session runs: 0.5 s after its first inference (a fixed delay can land on the
+            # labelled fallback once a zero-shot attempt ends early, and then E5 would score the script, not GR00T)
+            eid = pick.get("execution_id")
+            first = await r.wait_event(lambda e: e.get("type") in INFERENCE_EVENTS
+                                       and (e.get("session") or e.get("execution_id")) == eid, r.wait(30))
+            row["groot_running_at_act"] = first is not None
+            await r.wait_sim(0.5 if first is not None else 2.0, 30)
             t_act = r.now()
             await r.say("No, never mind." if kind == "cancel" else "stop")
         res = await r.wait_row(lambda x: x.get("type") == "result" and x.get("execution_id") == pick.get("execution_id"),
@@ -842,15 +861,21 @@ async def e5_groot_plumbing(r: StackRun, o: Outcome, trials: tuple[str, ...] = E
     ran = [x for x in rows if x.get("status")]
     o.check("every trial ran a pick", len(ran) == len(trials), [x.get("error") for x in rows if x.get("error")])
     o.check("0 falls", not any(x.get("fell") for x in rows))
+    # GR00T plumbing means GR00T ran: a session the body refused at `enter` (0 inferences) hands straight to the
+    # fallback, and a cancel or halt that lands on the fallback says nothing about the GR00T session
+    o.check(f"every GR00T attempt ran the policy ({sum(bool(x.get('inferences')) for x in ran)}/{len(ran)} with "
+            f"inferences > 0)", bool(ran) and all(x.get("inferences") for x in ran),
+            [(x["trial"], x.get("groot_status"), x.get("groot_reason")) for x in ran if not x.get("inferences")][:5])
     canc = [x for x in rows if x["kind"] == "cancel"]
-    o.check(f"cancel {sum(x.get('status') == 'cancelled' and (x.get('took_s') or 99) <= 3.0 for x in canc)}/"
-            f"{len(canc)} (cancelled within the 3 s grace)",
-            bool(canc) and all(x.get("status") == "cancelled" and (x.get("took_s") or 99) <= 3.0 for x in canc))
+    ok_c = [x.get("status") == "cancelled" and (x.get("took_s") or 99) <= 3.0 and x.get("groot_status") == "cancelled"
+            for x in canc]
+    o.check(f"cancel {sum(ok_c)}/{len(canc)} (the GR00T session cancelled within the 3 s grace)",
+            bool(canc) and all(ok_c), [(x["trial"], x.get("groot_status"), x.get("executor")) for x in canc])
     halt = [x for x in rows if x["kind"] == "halt"]
-    o.check(f"halt {sum(bool((x.get('receipt') or {}).get('stopped')) and x.get('status') == 'failed' for x in halt)}/"
-            f"{len(halt)} (receipt stopped, result failed(halted))",
-            bool(halt) and all((x.get("receipt") or {}).get("stopped") and x.get("status") == "failed"
-                               and x.get("reason") == "halted" for x in halt))
+    ok_h = [bool((x.get("receipt") or {}).get("stopped")) and x.get("status") == "failed"
+            and x.get("reason") == "halted" and x.get("groot_reason") == "halted" for x in halt]
+    o.check(f"halt {sum(ok_h)}/{len(halt)} (receipt stopped, the GR00T session failed(halted))",
+            bool(halt) and all(ok_h), [(x["trial"], x.get("groot_reason"), x.get("executor")) for x in halt])
     o.check("every result names groot_arms (or its GR00T attempt, before a labelled fallback), the skill and the GT "
             "outcome",
             bool(ran) and all(x.get("groot_executor") == "groot_arms"
