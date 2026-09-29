@@ -1,6 +1,6 @@
 # SONIC arm and hand tracking through the arm channel (recommendation (b))
 
-Status: **measured on the live M1 stack, 2026-09-29** (box `ludo-g1-brev2`, procthor-train-38, P1 Isaac Sim 5.1 at
+Status: **measured on the live M1 stack, 2026-09-29** (G0 §0-§7; body wave §8; wave-2 fixes of the verifier's defects §9) (box `ludo-g1-brev2`, procthor-train-38, P1 Isaac Sim 5.1 at
 RTF 0.98-1.00 median, unmodified deploy @ `b042411`). 4 runs, about 22 minutes of testing, 0 falls.
 Code: `body/arm.py`, `body/joint_map.py`, `body/g1_kin.py`, `body/sonic_mux.py` (overlay), `tools/arm_track_test.py`.
 Contract: `docs/contracts/m1.md` §3.9. Evidence: `outputs/arm_track/<run>/` (§7).
@@ -436,4 +436,148 @@ Consequence: no waist scan while carrying (CarryLock), or a smaller yaw.
 .venv/bin/python -m tools.arm_wave_test scan --at-counter --scan-hold-variants --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-scan
 .venv/bin/python -m tools.arm_track_test --lead 0.15 --servo-model gated --phases static,steps --no-plots --out outputs/body_wave/$(date +%Y%m%d-%H%M%S)-servo
 python -m tools.arm_wave_test chunk --fake --sessions 3 --cancels 1 --halts 1 --out /tmp/aw     # plumbing on the fakes
+```
+
+## 9. Wave 2 (2026-09-29, owner body-fix): the body-wave verifier's defects B-D1..B-D4 and B-low
+
+Status: **built and run live on the dev box `ludo-g1-arena`** (procthor-train-38, unmodified deploy, P1 with the
+rebuilt Dex3 G1 USD: `.asset_hash` 24d3c85f... → d3069de7..., `outputs/m2b_wave2/bodyfix/g1_asset_build.log`),
+body code = the laptop tree pushed at 11:14 / 11:28 box time (md5 of `body/arm.py`, `body/arm_script.py` checked on
+the box). 0 falls and 0 `command{stop}` in every run of this section. Code: `body/arm.py` (lock-free latch, wire lock,
+ownership-aware latch/resume, `ScriptPending`), `body/ik_worker.py` (new), `body/arm_script.py` (prepare / solve /
+finish, `clear_z`, `avoid_boxes`, `approach`, `preshape`), `body/g1_kin.py` (`hand_points`, `forearm_points`),
+`body/carry.py`, `body/service.py` (deferred replies, the worker, `sys.setswitchinterval`), `body/velocity.py`,
+`tools/halt_test.py` (`--script --chunk --carry --free-walks`), `tools/arm_wave_test.py` (`grasp`, `--clear`,
+`--rise-gap`). Contract: `docs/contracts/m1.md` §3 v0.7, `docs/contracts/arm_chunk.md` v0.2. Evidence:
+`outputs/m2b_wave2/bodyfix/` (laptop; the box has the same under `/work/worldline-g1/outputs/m2b_wave2/bodyfix/`).
+
+**Validity (walk_diagnosis rules).** No other GPU job ran: the GR00T PolicyServer (tmux `groot-server`, 6.6 GB) was
+loaded but idle, and no GR00T request can reach it while the dev stack lock is held (it was, owner `bodyfix`). P1
+RTF over the runs: `rtf_total` 0.996-0.997, `rtf_1s_min` 0.825-0.868, 1.6 % of 1 s windows below 0.95. **P1 published
+lowstate heartbeats during the runs** (`heartbeat_pubs` +3 / +20 / +5 in the three grasp runs, from a 2 Hz
+`get_stats` poll, `p1_stats.jsonl`): P1 has a render hitch of 45-133 ms about every 30 s (`get_stats.hitches_last`,
+head camera only, also with the robot standing still). By rule 3 these runs are therefore **INVALID as SONIC
+timing-gate evidence**; the body-side measurements below (halt handling and receipt, the wire, the palm errors) do
+not depend on SONIC's timing, and no fall or instability was seen. The hitch is a P1 issue (request to isaac).
+
+### 9.1 B-D1: a halt waited behind the arm_script IK
+
+Two causes, both confirmed:
+1. `ArmChannel.latch()` took the arm lock, which `handle_arm_script` held for the whole IK (198-233 ms for an
+   unreachable goal: every iteration of both DLS stages).
+2. **The GIL convoy.** Even without the lock, a thread running `g1_kin.ik_palm` starves every other thread in the
+   process: numpy's `linalg.solve` releases and re-takes the GIL every iteration, each re-take counts as a switch, so
+   a waiting thread never gets to force one. Laptop probe (`outputs/m2b_wave2/bodyfix/gil_probe/`, a PULL thread's
+   receive latency, 60 messages from another process): idle p50 0.47 / max 0.74 ms; the IK looping in the same
+   process **p50 64.5 s**, p99 131 s; the IK in a spawn worker process p50 0.09 / max 0.15 ms. (FK at 50 Hz in the
+   same process: p99 1.15 ms; a 40-iteration IK at 50 Hz: p99 6.2 ms.) So a worker *thread* would not have fixed it.
+
+Fix: the IK runs in a worker **process** (`body/ik_worker.py`, one spawn-context process started with the service,
+ready in 0.39 s live); `arm_script` prepares the goal on the control thread (cheap), submits the solve and answers the
+ROUTER request when it is back (a `ScriptPending` the service polls every loop), re-checking the gate first; the
+settle's 10 Hz re-solve goes to the worker too. `latch()` never takes the arm lock: under a wire lock held for
+microseconds it sets the flag, freezes the override and queues the rest for the next tick (the tick checks for a
+queued latch before it commits a pose). The service sets `sys.setswitchinterval(0.001)`.
+
+Live, `tools/halt_test.py --walk 10 --script 20 --chunk 10 --carry 10 --free-walks 3`
+(`outputs/m2b_wave2/bodyfix/halt-20260929-111624/`, `all_pass: true`):
+
+| Halts | n | body handling (lane receive → publish) | client receipt (send → `body.halted` at the client) |
+|---|---|---|---|
+| during an unreachable-goal arm_script IK (377-429 ms in the worker; the halt 4-29 ms after the request; all 20 overlapped: the script answered `halted` after the solve) | 20 | p50 0.069, p99 0.128, max 0.136 ms | p50 0.51, max 0.86 ms |
+| mid chunk session | 10 | p50 0.094, max 0.171 ms | p50 0.52, max 2.78 ms |
+| mid walk (0.27-0.90 m/s at the halt) | 10 | p50 0.088, max 0.158 ms | p50 0.54, max 0.75 ms |
+| on a CarryLock hold | 10 | p50 0.083, max 0.169 ms | p50 0.45, max 0.58 ms |
+| with free arms | 1 | 0.082 ms | 0.42 ms |
+| **all** | **51** | **p50 0.083, p99 0.17, max 0.171 ms** (bar p99 < 10) | **p50 0.51, p95 0.81, max 2.78 ms** (bar max < 30) |
+
+Before (verifier `outputs/body_wave/bverify/20260929-095605-D/lock_live.json`): 176-221 ms receipts during the IK.
+First IDLE planner message on the SONIC input after the send: p50 0.61, max 2.02 ms. Walks: 10/10 `canceled`
+(halt), at rest (M1 E3 criterion) p50 0.86, max 1.18 s, travel after the halt p50 0.21, max 0.40 m. The arm latch
+was applied by the next tick 4.0-18.8 ms after the lane (chunk trials, `latch.apply_ms`).
+
+### 9.2 B-D2: the latch held the measured hand q
+
+The latch copied `g1_debug.left/right_hand_q`, which lags a closed hand (an object, or just the finger PD), so every
+halt commanded the hand a little more open (verifier: 0.9936 → 0.9461 over 10 halts), and it replaced a CarryLock
+`target` hold by a `latched` one (CarryLock read disengaged). Fix: a halt keeps a hold **exactly** (pose, hands,
+waist, carry), and a session it stops leaves the hands' **last target**. Live (same run): 10 halt/resume cycles on a
+CarryLock hold (right hand closed to 0.99): the hand command on the wire identical in all 10 (latched and after the
+resume), CarryLock engaged 10/10 latched and 10/10 after the resume, measured closure 0.985 before and after; 10
+chunk sessions halted with hands closing to 0.6: the hand command after the halt equal to the last target 10/10.
+Unit tests pin it with a plant whose hand stops at 93 % of its target (`test_repeated_halts_*`).
+
+### 9.3 B-D3: a halt froze SONIC's free arms
+
+The latch always installed a measured hold, even with no arm op, and resume kept it (9 later walks ran with frozen
+arms). Fix: the latch acts on who owns the arms (a moving session → a latched measured hold; a hold → kept; a blend
+→ paused; **free arms → left free**), and resume gives back exactly what it found. Live: a halt while standing with
+free arms: `arms_latched` false, arm mode `off`, no override on the wire while latched; after the resume the arm mode
+`off` and 3 walks with 0 % override on the wire, the shoulder pitches swinging 0.10-0.89 rad (3 walks before the
+halt: 0.11-0.99 rad; the swing depends on the walk, not on the halt).
+
+### 9.4 B-D4: scripted grasp palm error p90 4.5-4.9 cm
+
+Root cause (geometry, then live): the palm target of the scripted "hover" grasp was the object top + 3 cm, but the
+Dex3 hand is a slab ±4.4 cm thick about the palm origin (P1's collision meshes; the palm z axis is near vertical at
+table-height reaches), so the goal put the hand 1.4-1.8 cm **into** the object: the palm stopped 1.4-2.8 cm high,
+as the verifier saw. And the pregrasp, rising from the arm's rest pose at the A* stance (the pelvis ~0.23 m from
+the dresser edge), swept the open fingers forward under the dresser top: live `grasp-20260929-112144-base`, the
+measured palm stalled at world z ~0.95 under the 0.981 m top edge while the command went on up, SONIC stepped back
+0.22 m (pelvis_shift 0.216 m, palm error 15-18 cm), and the next goals were out of reach (`ik_unreachable`).
+
+Fixes (body): `arm_script` `clear_z` raises the palm goal until the hand's collision boxes (`g1_kin.hand_points`:
+palm, finger and thumb boxes at the solved orientation and the hand pose the phase ends with) clear the surface by
+`clearance_m` (1 cm); `avoid_boxes` checks the joint-space path (hand + forearm) against world boxes and searches via
+points; the IK retries from SONIC's default arm when the current seed stalls. Tool sequence (`arm_wave_test grasp
+--clear --rise-gap 0.40`): go_to 0.40 m from the support edge, raise the hand over the support there (`carry` phase,
+`avoid_boxes` = the support), `approach` in with the arm held, then pregrasp / grasp with `clear_z` = the object top
+and `avoid_boxes` = support + object.
+
+| Run (`outputs/m2b_wave2/bodyfix/`) | Object / support (top) | Goal raise over top + 3 cm | Palm error to the commanded goal, per grasp p90 (tool: FK of g1_debug on GT pelvis, last 1 s) | body `palm_err_b` p90 (tracking) | Palm error to the naive point (top + 3 cm), p90 |
+|---|---|---|---|---|---|
+| `grasp-20260929-112922-clear` | Fork / CounterTop 0.937 | 5.1-5.3 cm | 1.82, 1.71, 1.82 cm | 1.67-1.78 cm | 6.6-6.8 cm |
+| | RemoteControl / Dresser 0.981 | 3.4-3.8 cm | 1.21, 1.44, 1.35 cm | 1.22-1.32 cm | 4.1-4.9 cm |
+| | CellPhone / DiningTable 0.741 | – | not run: the A* stance snapped away from the chairs and `approach` answered `too_far` | | |
+| `grasp-20260929-113427-clear2` | Potato / CounterTop 0.937 (object top 1.04) | 2.5-2.7 cm | 1.91, 1.65, 1.30 cm | 1.26-1.78 cm | 3.3-3.8 cm |
+| | RemoteControl / DiningTable 0.680 | – | not run: `approach` `goal_in_obstacle` (chairs) | | |
+
+**9 grasps, 3 objects, 2 surfaces: per-grasp p90 1.21-1.91 cm; pooled p90 1.73 cm (300 samples, run 112922) and
+1.65 cm (150 samples, run 113427); max 2.04 cm. The < 3 cm bar is met against the goal the script commands.** Honest
+reading: that goal is 2.5-5.3 cm above "object top + 3 cm", by construction (the lowest collision-free hover of this
+hand at this orientation); against the naive point the error is 3.3-6.8 cm and is the raise. SONIC's pelvis moved
+0.3-1.4 cm during the grasps (was 2-5 cm), the mean palm error vector (pelvis frame) at most 1.3 cm in any axis.
+0 falls. The raise phase itself: collision-free path found (`path.ok`) at 0.40 m on the counter; at the dresser the
+checked path reported hits (the forearm margin is conservative) and the raise still succeeded. Low dining tables
+surrounded by chairs are not reachable with this stance logic (A* snap + `approach` too_far / goal_in_obstacle).
+
+### 9.5 B-low
+
+| Item | Fix | Test / live |
+|---|---|---|
+| The latch / `measured` hold commanded the **measured** waist while sessions sent SONIC's reference: a 0.12-0.14 rad waist step at every arm / chunk halt | holds keep the waist as the session sent it (`ref` stays the live reference, `cmd` / a scan's yaw the values on the wire) | `test_latch_keeps_the_sessions_waist`, `test_measured_hold_on_end_keeps_the_waist_too`; live: waist change on the wire in the 1 s after 10 chunk halts p50 0.000, max 0.015 rad (SONIC's own reference moving) |
+| v0.5 `end` during the watchdog hold reported `failed` / `client_silent` | the owner's `end` is a client end: `succeeded` | `test_v05_end_during_the_watchdog_hold_succeeds` |
+| Chunk-session fence gaps (`release: true`, a non-chunk `end` skipped it) | every message acting on a chunk session's stream is fenced (`bad_args` without `session_id`, `stale_session` for another / older session or an ended one); a hold keeps its session's fence for `release` | `test_chunk_session_fence_covers_end_release_and_keepalive`; live: 30 chunks sent after 10 halt acks, 30 rejected `halted`, none on the wire |
+| `stale_command` meant two things | the late-message case carries `data.why: "t_wall"` (+ `age_s`, `watchdog_s`) in the arm op and the velocity op; the fences' keep `why: control_epoch \| resume_epoch \| generation` (ops-groot's `groot_arms` already keys on it: `t_wall` is counted, not fatal) | `test_stale_t_wall_says_why` |
+| m1.md §3.4 / §3.10 / §3.11 drift | re-checked against the code: body.state keys, the arm ops in the op table, the reasons list (`planner_frame_unknown`, `not_stopped`, `stale_goal`), which refusals get events, the `body.stale_command` payload, the halt steps and payloads | `docs/contracts/m1.md` v0.7 |
+| B.5 pitch row impossible | documented: SONIC does not move waist pitch under the override (G0), the scan is yaw-only (`pitch_deg` ≠ 0 is `bad_args`), and the arms turn with the waist (§8.5) | m1.md §3.9 `scan`; the `docs/M2.md` B.5 row needs the lead's edit |
+
+### 9.6 Regressions
+
+`body/tests`: 111 passed in `.venv-rt` (the cv2 camera test deselected; 92 before), 19 of them new. The live regression chain
+(pick + CarryLock walk with the new stance, `m1_drive_test`, `halt_test --walk 20 --arm 5`, `arm_wave_test chunk
+10/3/3`) was started at 11:38 box time (`outputs/m2b_wave2/bodyfix/reg-20260929-113846/` on the dev box) and **was
+cut off**: both Brev boxes went to STOPPED at ~11:45 (not by this owner); its results were not pulled. The halt run
+of §9.1 covers the body-wave halt suite's walk trials (10 walks, all pass) and chunk halts; the chunk-cancel and
+drive-test regressions are still owed.
+
+### 9.7 Reproduce
+
+```bash
+# dev box, stack lock held, M1 stack up (scripts/m1_up.sh --session <owner>-m1)
+.venv/bin/python -m tools.halt_test --walk 10 --arm 0 --script 20 --chunk 10 --carry 10 --free-walks 3 --out outputs/m2b_wave2/bodyfix/halt-$(date +%Y%m%d-%H%M%S)
+.venv/bin/python -m tools.arm_wave_test grasp --list --out /tmp/gl                          # candidates in the house
+.venv/bin/python -m tools.arm_wave_test grasp --objects "Fork|surface|6|3,RemoteControl|surface|2|30,Potato|surface|6|15" --trials 3 --clear --rise-gap 0.40 --out outputs/m2b_wave2/bodyfix/grasp-$(date +%Y%m%d-%H%M%S)
+.venv/bin/python -m tools.arm_wave_test pick --object "RemoteControl|surface|2|30" --clear --rise-gap 0.40 --out outputs/m2b_wave2/bodyfix/pick-$(date +%Y%m%d-%H%M%S)
+python outputs/m2b_wave2/bodyfix/gil_probe/gilprobe.py idle inline process                   # laptop: the GIL convoy
 ```
