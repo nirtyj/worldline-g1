@@ -61,3 +61,19 @@ Not copied by the runtime agent:
 
 Import commits: 1e68154 (untouched copy of the files above), then the adaptation commits on top.
 tests/system1_live_check.py now lives at tests/kept/system1_live_check.py (import tests.kept.system1_live_check).
+
+ui/ and eval/ (the ui+eval owner; imported untouched in 8009d43 from ludo-runtime@cb4ce53, then adapted):
+  ui/__init__.py, ui/interactive_user.py, ui/views/memory.js        [keep; unchanged]
+  ui/recorder.py               [adapt, small: wraps `_call` only when it is llmkit's ModelBrain._call(system, text,
+                                tools) coroutine, so a scripted planner's helper of that name is never wrapped]
+  ui/server.py, ui/index.html  [adapt, heavy: the G1 stack (profiles, robot facade, world truth, body/stack strip,
+                                executions and stepping-stone badges, kill button, System 1 feed); M2b: GR00T strip,
+                                list_locations panel, scan thumbnails, the ego pane, GT confinement]
+  ui/robot_map.py, ui/views/diagram.js, ui/views/plan.js            [adapt: G1 geometry and wording]
+  eval/suite.py                [adapt, heavy: eval/scenes.yaml bindings, humanoid time limits, executors and
+                                honesty labels, fixtures on world truth; M2b: model-call counts, --out, --trace-dir]
+  eval/evolve.py               [keep; docstring only: .venv-thor -> .venv]
+  eval/system1_routes.py       [keep; one import: tests.system1_live_check -> tests.kept.system1_live_check]
+  eval/system1_load.py         [adapt, small: G1 head frames instead of THOR screenshots; the same import move]
+New in this port (no source file): ui/cameras.py, ui/truth.py, ui/png.py, ui/groot_strip.py, eval/scenes.py,
+  eval/scenes.yaml, eval/offline_episode.py, eval/stack_suite.py, eval/live_suite.py.

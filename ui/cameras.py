@@ -291,3 +291,94 @@ class ScanThumbs:
                            "jpeg": base64.b64encode(thumbnail(frames[i][2])).decode()} for i in pick]}
         self.recent = (self.recent + [msg])[-self.KEEP:]
         return msg
+
+
+EGO_PORT = 5566              # P1's ego_view camera (docs/contracts/p1_m2b.md §1, §5.2), + the port offset
+STALE_S = 2.0                # an ego frame older than this is not shown: the camera stopped (no consumer)
+
+
+class SubCamera:
+    """One P1 camera port read directly (world.frames.CameraSub: the gear_sonic msgpack of p1_m2b.md §5.2), for a
+    pane the frame tap does not carry: GR00T's `ego_view` on 5566. The page only watches: P1 renders ego_view while
+    a consumer (the GR00T client) has it enabled (OD1, protects RTF), so the pane is empty otherwise. JPEGs are
+    cv2-encoded RGB and are R/B-fixed for the page; the GT pose fields of the metadata are dropped (GT_META)."""
+
+    def __init__(self, port: int, key: str, sub: Any = None) -> None:
+        if sub is None:
+            from world.frames import CameraSub
+            sub = CameraSub(f"tcp://127.0.0.1:{port}", key)
+            sub.start()
+        self.sub = sub
+        self._fixed: tuple[int, bytes] | None = None
+
+    def _latest(self) -> tuple[bytes, dict, int, float] | None:
+        got = self.sub.latest()
+        if got is None or time.time() - got[3] > STALE_S:
+            return None
+        return got
+
+    def rev(self) -> int:
+        got = self._latest()
+        return int(got[2]) if got else 0
+
+    def jpeg(self) -> bytes | None:
+        got = self._latest()
+        if got is None:
+            return None
+        if self._fixed is None or self._fixed[0] != got[2]:
+            try:
+                from viz.common import swap_rb_jpeg
+                self._fixed = (got[2], swap_rb_jpeg(got[0], 85))
+            except Exception:  # noqa: BLE001
+                self._fixed = (got[2], got[0])
+        return self._fixed[1]
+
+    def meta(self) -> dict[str, Any]:
+        got = self._latest()
+        if got is None:
+            return {}
+        m = {k: v for k, v in got[1].items() if k not in GT_META}
+        m.update(source="p1", age_s=round(time.time() - got[3], 2))
+        return m
+
+    def close(self) -> None:
+        stop = getattr(self.sub, "stop", None)
+        if callable(stop):
+            stop()
+
+
+class WithPanes:
+    """A camera source plus extra single-camera panes (name -> SubCamera), e.g. TapCameras + ego."""
+
+    def __init__(self, base: CameraSource, extra: dict[str, Any]) -> None:
+        self.base, self.extra = base, dict(extra)
+
+    def names(self) -> list[str]:
+        return _order([n for n in self.base.names() if n not in self.extra]
+                      + [n for n, c in self.extra.items() if c.rev()])
+
+    def rev(self, name: str) -> int:
+        return self.extra[name].rev() if name in self.extra else self.base.rev(name)
+
+    def jpeg(self, name: str) -> bytes | None:
+        return self.extra[name].jpeg() if name in self.extra else self.base.jpeg(name)
+
+    def meta(self, name: str) -> dict[str, Any]:
+        return self.extra[name].meta() if name in self.extra else self.base.meta(name)
+
+    def close(self) -> None:
+        for c in (self.base, *self.extra.values()):
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def with_ego(base: CameraSource, port_offset: int | None = None, sub: Any = None) -> CameraSource:
+    """`base` plus the ego pane from P1's ego_view (5566 + offset); `base` alone when it cannot be read."""
+    import os
+    off = int(os.environ.get("WL_PORT_OFFSET", "0") or 0) if port_offset is None else int(port_offset)
+    try:
+        return WithPanes(base, {"ego": SubCamera(EGO_PORT + off, "ego_view", sub=sub)})
+    except Exception:  # noqa: BLE001  (no zmq/msgpack: the head/chase/top panes still work)
+        return base

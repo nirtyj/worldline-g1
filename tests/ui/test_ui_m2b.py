@@ -241,3 +241,39 @@ def test_page_has_the_m2b_panels():
     for needle in ('id="gstrip"', 'id="thumbs"', "renderGroot", "renderThumbs", "renderLocations",
                    "list_locations", 'msg.type === "scan"', "experimental", "clamped", "latency p50", "policy"):
         assert needle in html, needle
+
+
+# ---------------------------------------------------------------------------------------------- the ego pane
+class FakeSub:
+    """world.frames.CameraSub's read API: (jpeg as sent, meta, rev, t_rx) or None."""
+
+    def __init__(self) -> None:
+        self.frame = None
+        self.stopped = False
+
+    def latest(self):
+        return self.frame
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_ego_pane_shows_ego_view_only_while_it_is_rendered():
+    import time as _time
+    tap = FakeTap()
+    tap.put("head", JPEG_A, {"seq": 1})
+    sub = FakeSub()
+    src = cams.with_ego(TapCameras(tap), port_offset=0, sub=sub)
+    assert src.names() == ["head"]                                     # no consumer enabled ego_view: no pane
+    sub.frame = (JPEG_B, {"camera": "ego_view", "seq": 3, "cam_pose_wl": [1, 2, 3, 4], "stationary": True,
+                          "hfov": 70.0}, 1, _time.time())
+    assert src.names() == ["head", "ego"] and src.rev("ego") == 1
+    assert src.jpeg("ego") == JPEG_B                                   # undecodable fake: passed through unswapped
+    m = src.meta("ego")
+    assert m["camera"] == "ego_view" and m["hfov"] == 70.0 and not set(m) & cams.GT_META
+    out = {x["which"]: x for x in CameraFeed(src).due(force=True)}
+    assert "GR00T" in out["ego"]["meta"]["caption"]
+    sub.frame = (JPEG_B, {}, 1, _time.time() - 10)                      # the camera stopped: stale frames vanish
+    assert src.names() == ["head"] and src.jpeg("ego") is None
+    src.close()
+    assert sub.stopped

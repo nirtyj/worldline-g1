@@ -51,8 +51,8 @@ if str(ROOT) not in sys.path:
 from websockets.asyncio.server import broadcast, serve  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402
 
-from ui.cameras import (CameraFeed, CameraSource, NoCameras, ScanThumbs, TapCameras, WorldCameras,  # noqa: E402
-                        head_caption)
+from ui.cameras import (EGO_PORT, CameraFeed, CameraSource, NoCameras, ScanThumbs, SubCamera,  # noqa: E402
+                        TapCameras, WithPanes, WorldCameras, head_caption)
 from ui.groot_strip import GrootStrip  # noqa: E402
 from ui.interactive_user import InteractiveUser  # noqa: E402
 from ui.recorder import CallRecorder  # noqa: E402
@@ -711,6 +711,7 @@ class Hub:
         self._camera_mode = cameras if isinstance(cameras, str) else "given"
         self._fixed_cameras: CameraSource | None = None if isinstance(cameras, str) else cameras
         self._tap: CameraSource | None = None
+        self._ego: Any = None                         # SubCamera on P1's ego_view (Isaac profiles), False if unavailable
         self._port_offset = port_offset
         self.feed = CameraFeed(NoCameras())
         self.persona_level = "off"                   # own goals only when you turn them on
@@ -735,7 +736,7 @@ class Hub:
             return f
         tap = getattr(f, "tap", None)                 # world.frames.IsaacFrames wraps a FrameTap: share it
         if mode in ("auto", "frames", "tap") and tap is not None and callable(getattr(tap, "streams", None)):
-            return TapCameras(tap)
+            return self._with_ego(TapCameras(tap))
         if mode == "none":
             return NoCameras()
         if mode == "world" or (mode == "auto" and s.profile == "lite"):
@@ -746,7 +747,17 @@ class Hub:
             except Exception as e:  # noqa: BLE001
                 self._notice(f"No camera feed: viz FrameTap could not start ({e}).")
                 return WorldCameras(s.world)
-        return self._tap
+        return self._with_ego(self._tap)
+
+    def _with_ego(self, base: CameraSource) -> CameraSource:
+        """The Isaac panes plus `ego` (P1's ego_view, 5566): shown while GR00T has the camera on; never enabled here."""
+        if self._ego is None:
+            try:
+                off = self._port_offset if self._port_offset is not None else int(os.environ.get("WL_PORT_OFFSET", "0") or 0)
+                self._ego = SubCamera(EGO_PORT + off, "ego_view")
+            except Exception:  # noqa: BLE001  (no zmq/msgpack: the other panes still work)
+                self._ego = False
+        return WithPanes(base, {"ego": self._ego}) if self._ego else base
 
     # ------------------------------------------------------------------ System 1
     def start_system1(self) -> None:
@@ -1063,7 +1074,7 @@ class Hub:
             await ws.send(dumps({"type": "notice", "text": str(e)}))
 
     def close(self) -> None:
-        for src in (self._tap, self._fixed_cameras):
+        for src in (self._tap, self._fixed_cameras, self._ego or None):
             if src is not None:
                 try:
                     src.close()
