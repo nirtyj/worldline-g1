@@ -2,7 +2,8 @@
 # Closed-loop eval of an Arena G1 GR00T checkpoint (Arena client in the container -> GR00T server on the host).
 #   bash run_eval.sh n16 <tag> <policy_runner length args...>   e.g. bash run_eval.sh n16 n16_ep1 --num_steps 1500
 #   bash run_eval.sh n17 <tag> --num_episodes 10
-# Extra env: DEVICE (default: runner default = cuda:0), NUM_ENVS (default 1), VIDEO=0 to disable video.
+# Extra env: DEVICE (default: runner default = cuda:0), NUM_ENVS (default 1), VIDEO=0 to disable video,
+#   POLICY_TYPE (default arena_spike_policies.TimedGr00tRemotePolicy; arena_probe_policies.BinProbeGr00tPolicy + SPIKE_BIN_POSE=x,y,z for the goal probe).
 set -euo pipefail
 which=${1:?n16|n17}; tag=${2:?tag}; shift 2
 S=/work/arena/spike
@@ -23,7 +24,7 @@ MON=$!
 trap 'kill $MON 2>/dev/null || true' EXIT
 t0=$(date +%s)
 SPIKE_TAG=$tag bash $S/arena_exec.sh "/isaac-sim/python.sh isaaclab_arena/evaluation/policy_runner.py --headless $DEV_ARGS \
-  --policy_type arena_spike_policies.TimedGr00tRemotePolicy \
+  --policy_type ${POLICY_TYPE:-arena_spike_policies.TimedGr00tRemotePolicy} \
   --policy_config_yaml_path $CFG --remote_host 127.0.0.1 --remote_port $PORT \
   --num_envs ${NUM_ENVS:-1} --enable_cameras $* $TASK"
 echo "[run_eval] $tag wall=$(( $(date +%s) - t0 ))s"

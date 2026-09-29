@@ -137,3 +137,20 @@ Performance:
 - Arena code: Apache-2.0. WBC-AGILE: Apache-2.0 (BSD-3 for the rsl_rl patch). HOMIE v2 ONNX comes from NVIDIA's
   Isaac Lab Nucleus assets.
 - Nothing needed an NGC login. No gated model had to be accepted beyond Cosmos-Reason2-2B.
+
+## Verification pass (2026-09-29): see `docs/arena_vs_sonic.md`
+
+- **Re-runs and probes:**
+  - `verify_n16`, `verify_n17`: re-runs.
+  - `probe_n16_nobin`: the bin is held under the floor, and N1.6 still walks its one trained route to the empty table.
+  - `probe_n16_wbcreset`: a control run.
+  - `probe_n16_seed1..7`, `probe_n17_seed1..4`: one episode per fresh process.
+- **Code:** `arena_probe_policies.py` (`BinProbeGr00tPolicy`), selected with `POLICY_TYPE=...` in `run_eval.sh`.
+  `arena_exec.sh` passes `SPIKE_BIN_POSE` and `SPIKE_WBC_RESET` through.
+- **Corrections to the sections above:**
+  1. N1.7 grasps with the **left** hand, not the right.
+  2. The WBC state **is** reset between episodes, by the env's `reset_wbc_policy` event. The action term's `reset()`
+     does not do it, but that is not a bug.
+  3. N1.6 succeeds **10 of 12 times from a clean start** (episode 0 of a process) but only 1 of 24 times on later
+     episodes in the same process. The per-run rates above are dominated by this. The cause is not isolated, so
+     evaluate one episode per process.
