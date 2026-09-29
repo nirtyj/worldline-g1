@@ -6,8 +6,23 @@ skills:
   # GR00T (backend groot -> executor groot_arms, services/executors/groot_arms.py). The off-the-shelf Arena N1.7 G1
   # checkpoint: arm + Dex3 joint chunks through the body `arm` op, SONIC keeps the legs (owner decision (b)). Trained
   # on ONE scene (apple to plate, left hand; 8/37 = 22 % in its own scene, docs/arena_vs_sonic.md §2.1), so every entry
-  # is label `experimental` and a house grasp is not expected zero-shot (PLAN §0.8). The trained stance is unknown,
-  # so `stance` is empty (the generic G1 workspace window). PolicyServer: scripts/groot_server.sh (docs/groot_serving.md).
+  # is label `experimental` and a house grasp is not expected zero-shot (PLAN §0.8). PolicyServer: scripts/groot_server.sh
+  # (docs/groot_serving.md).
+  # `stance` (W2.5, docs/groot_serving.md §8): Arena's frames show the apple in the lower part of the head camera, left
+  # of centre. With P1's ego_view (Arena's camera: 1.14 m, 35 deg down) a low object sits below the image's upper third
+  # on the 0.78 m table, the 0.94 m counter and the 0.97 m dresser of H40 when it is 0.30 m ahead of the pelvis and
+  # 0.10 m to the left (pinhole model: v = 381 / 215 / 173 of 480, u = 205 / 167 / 158); farther or more lateral fails
+  # on the counter or the dresser (groot/stance.py; a table grasp point at 0.30 m also stays inside the R.7 reach
+  # sphere world-cal is calibrating, 0.35 m does not). COMPUTED from the camera model;
+  # the live probe (tools/groot_stance_probe.py) has not run yet (both boxes stopped, 2026-09-29 11:47Z): INTERIM.
+  # A stance pins the object: check_reachability then needs a free spot 0.30 m from it (with stance_clearance_m to the
+  # furniture), so the object must lie within ~0.10 m of the front edge, and today a skill's stance is strict (no
+  # fallback to the next candidate's window). So only the apple skill (the checkpoint's own object, OD4) carries it;
+  # on the `any` skill it would make every deeper pickable unreachable in `full` before groot_then_script can fall back
+  # (request to world: use a GR00T stance when a free spot satisfies it, else the next healthy candidate's window).
+  # tol_deg 25: services/reachability.py in_window compares the heading with the bearing to the object, which is
+  # atan2(0.10, 0.30) = 18.4 deg off at this stance by construction (request to world: compare with bearing -
+  # atan2(lateral_m, stand_off_m) - yaw_to_object).
   - skill_id: groot.pick.apple.arena_static_experimental.v0
     action: pick
     object_types: [apple]
@@ -27,6 +42,7 @@ skills:
     action_horizon: 40
     control_hz: 50.0
     replan_hz: 2.5
+    stance: {stand_off_m: 0.30, lateral_m: 0.10, yaw_to_object: 0.0, tol: [0.05, 25.0]}   # W2.5, INTERIM (above)
     max_duration_s: 25.0
     success: {kind: gt_lifted, min_lift_m: 0.05, max_dist_m: 0.12, hold_s: 1.0}
     licence: "NVIDIA Open Model License Agreement; the model card says non-commercial use only (OD2)"

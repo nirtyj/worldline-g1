@@ -35,6 +35,7 @@ from typing import Any
 
 async def main_async(a: argparse.Namespace) -> dict:
     from api.execution import ExecutionManager
+    from groot.stance import ego_view_uv
     from robot.factory import build
     from services.executors.groot_arms import ZmqSensors
     from sim.clock import SimClock
@@ -96,15 +97,19 @@ async def main_async(a: argparse.Namespace) -> dict:
                     await asyncio.sleep(a.settle_s)
                     p = world.robot_pose()
                     bf, bl = coords.world_to_body((p.x, p.y, p.yaw), o.pos[0], o.pos[1])
+                    pz = getattr(p, "pelvis_z", None) or 0.787
+                    pred = ego_view_uv(bf, bl, o.pos[2], pz)
                     v.update(approach={"ok": h.ok, "reason": h.reason, "pos_err": (h.result or {}).get("pos_err")},
                              achieved={"forward": round(bf, 3), "left": round(bl, 3),
-                                       "yaw_deg": round(math.degrees(p.yaw), 1)},
+                                       "yaw_deg": round(math.degrees(p.yaw), 1), "pelvis_z": round(pz, 3)},
+                             predicted_uv=None if pred is None else [round(pred[0], 1), round(pred[1], 1)],
                              fallen=bool(p.fallen))
                     png = out / f"{kp_name}_{oid}_f{int(f * 100):02d}_l{int(round(l * 100)):+03d}.png"
                     v["view"] = await asyncio.to_thread(ego_view_check, world, sensors, oid, png)
                     row["views"].append(v)
                     print(json.dumps({"kp": kp_name, "f": f, "l": l, "achieved": v.get("achieved"),
                                       "px": v["view"].get("px"), "centre_uv": v["view"].get("centre_uv"),
+                                      "predicted_uv": v.get("predicted_uv"),
                                       "ok": v["view"].get("ok"), "clear": v["clearance_m"]}), flush=True)
                     (out / "stance_probe.json").write_text(json.dumps(res | {"current": row}, indent=1,
                                                                       default=str) + "\n")
