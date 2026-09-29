@@ -60,7 +60,7 @@ def _rig(gate=None, **cfg):
     body = FakeArmBody()
     world = FakeWorld("never")
     world.couple(body)
-    c = GrootArmsConfig(endpoint=ENDPOINT, max_duration_s=6.0, **cfg)
+    c = GrootArmsConfig(endpoint=ENDPOINT, **{"max_duration_s": 6.0, **cfg})
     exe = GrootArmExecutor(world, arm=body, sensors=body, cfg=c, gate=gate, events=Sink(), helpers=_groot_helpers())
     t_end = time.monotonic() + 60.0
     while not exe.health().ok and time.monotonic() < t_end:
