@@ -18,7 +18,7 @@ Tags as in `docs/groot_arms_design.md`: **[v]** read in code or files (path:line
 | Server | stock `gr00t/eval/run_gr00t_server.py` of Isaac-GR00T @ `4b1dca9d` (Arena's static_apple pin), env `/work/arena/gr00t_n17/.venv` (py 3.10.21, torch 2.7.1+cu128, transformers 4.57.3, flash-attn 2.7.4.post1), reused from the Arena spike, nothing reinstalled |
 | Where | **dev box** `ludo-g1-arena`, `127.0.0.1:5550` only, tmux `groot-server`, logs `/work/logs/groot/` (OD3). The main box reaches it in wave 2 through `scripts/groot_link.sh` |
 | Runtime client | `groot/` (py3.11, numpy + pyzmq + msgpack; never imports `gr00t`): `PolicyClient`, `build_observation`, `to_arm_chunk` / `ArmChunk`, `joint_order` |
-| Numbers (§6) | dev-box local `get_action` p50/p95 144/148 ms (640x480); first call 974 ms; VRAM 6.5-6.7 GB; open-loop MSE vs recorded demos 5-17x below a hold-state baseline, and wiring faults 2.4-11x worse; 0 of 105,280 targets outside the URDF limits; laptop via SSH tunnel p50 741 ms |
+| Numbers (§6) | dev-box local `get_action` p50/p95 144/148 ms (640x480); first call 974 ms; VRAM 6.5-6.7 GB; open-loop MSE vs recorded demos 5-17x below a hold-state baseline, and wiring faults 2.4-11x worse; 0 of 515,200 targets outside the URDF limits (3 runs); laptop via SSH tunnel p50 741 ms; the dataset's own sentence beats Arena's eval prompt on the arms open-loop |
 
 ## 1. Running it
 
@@ -31,7 +31,8 @@ python -m groot.policy_client ping --endpoint tcp://127.0.0.1:5550              
 ```
 
 - `start` refuses a busy port, checks the Isaac-GR00T commit and the checkpoint files, starts the server in tmux
-  with `HF_HUB_OFFLINE=1` (every file it needs is cached), waits for `ping`, checks that the socket is bound to
+  (online: `HF_HUB_OFFLINE=1` breaks the start, §6.1; the files themselves come from the cache in `/work/hf-cache`
+  and `HF_TOKEN` from `/etc/profile.d/ludo.sh`), waits for `ping`, checks that the socket is bound to
   `127.0.0.1:<port>` only, and writes `/work/logs/groot/server-<port>.json` (pid, ready time, VRAM, first-call
   time with `--warm`). `--embodiment-tag NEW_EMBODIMENT`, `--device cuda`, strict observation checks (the
   server's default).
@@ -157,9 +158,11 @@ ABSOLUTE joint targets in rad, at 50 Hz, 40 per chunk; row k belongs to `t_obs +
   closed-loop eval `language_instruction` (`arena_spike/g1_static_apple_gr00t_closedloop_config.yaml`) and the ONNX
   export's fixed prompt (`$CKPT/exports/g1-static-apple-b1-480x640/onnx/leapp-0.5.2/README.md:11`).
 - The released dataset's `meta/tasks.jsonl` maps the same task_index 3 to
-  `"Pick up the apple from the shelf and place it onto the plate on the same shelf next to it."` (every one of its
-  208 listed episodes). §6.2 compares both prompts open-loop.
-- `groot.obs.ARENA_PROMPT` / `DATASET_PROMPT` hold the two strings.
+  `"Pick up the apple from the shelf and place it onto the plate on the same shelf next to it."` (the only task; all
+  10 episodes the open-loop check loaded carry annotation 3), and the model card (`$CKPT/README.md`,
+  "Post-Training Dataset") names this dataset as the training data.
+- Open loop, the dataset sentence reproduces the demos' arm motion better in all three runs (§6.2.1), so
+  **`groot.obs.DEFAULT_PROMPT` = the dataset sentence**; `ARENA_PROMPT` and `DATASET_PROMPT` hold the two strings.
 
 ### 2.7 Image
 
@@ -203,14 +206,14 @@ call can wait up to one extra inference. Default timeout 1.5 s (design §5.2). O
 
 ```python
 from groot.policy_client import PolicyClient, PolicyTimeout, PolicyError
-from groot.obs import build_observation, ARENA_PROMPT
+from groot.obs import build_observation, DEFAULT_PROMPT     # the dataset sentence (§2.6, §6.2.1)
 from groot.actions import ArmChunk, to_arm_chunk, clamp_stats
 
 client = PolicyClient("tcp://127.0.0.1:5550", timeout_s=1.5)   # .ping() -> bool, .get_action(obs) -> dict, .close()
 obs = build_observation(ego_rgb_uint8_480x640x3,                 # P1 ego_view frame (OD1 camera)
                         g1_debug["body_q"],                      # 29, MuJoCo order
                         g1_debug["left_hand_q"], g1_debug["right_hand_q"],   # 7 + 7, Dex3 order
-                        ARENA_PROMPT)
+                        DEFAULT_PROMPT)
 t_obs = <time.monotonic() of that g1_debug>
 chunk = to_arm_chunk(client.get_action(obs), t0_mono=t_obs)      # ArmChunk
 chunk.upper_body        # (40, 17) SONIC wire order (interleaved) -- what the deploy consumes
@@ -242,7 +245,7 @@ Proposed skill registry entry (config/skills.yaml is owned by world/runtime; req
     embodiment_tag: NEW_EMBODIMENT
     checkpoint: nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace@7f78beb
     policy_port: 5550
-    prompt_template: "move the apple to the plate"
+    prompt_template: "Pick up the apple from the shelf and place it onto the plate on the same shelf next to it."
     hand_type: dex3
     action_horizon: 40
     control_hz: 50
@@ -330,9 +333,30 @@ MSE in rad² (nmse = in the model's normalized units, (q99 − q01)/2 = 1; the r
 - MAE (main): left arm 0.056 rad, right arm 0.018 rad, left hand 0.021 rad.
 - Prompt: see §6.2.1.
 
-### 6.2.1 Which instruction (repeat run)
+### 6.2.1 Which instruction, and how repeatable (repeat run) [m]
 
-(filled from the repeat run)
+Run `repeat-20260929T071942Z` (stack lock held): the same 10 episodes, one query every **10** rows (183 queries per
+variant), done twice (`a`, `b`) with the Arena prompt (`main`) and the tasks.jsonl sentence (`prompt_dataset`).
+
+| Run | Prompt | left_arm | right_arm | left_hand | nmse left / right arm, left hand |
+|---|---|---|---|---|---|
+| wave1 (stride 20) | Arena "move the apple to the plate" | 0.0100 | 0.0014 | 0.0170 | 0.031 / 0.016 / 0.104 |
+| wave1 (stride 20) | dataset sentence | 0.0078 | 0.0008 | 0.0215 | 0.024 / 0.008 / 0.131 |
+| a (stride 10) | Arena | 0.0096 | 0.0013 | 0.0194 | 0.031 / 0.012 / 0.118 |
+| a (stride 10) | dataset | 0.0073 | 0.0008 | 0.0191 | 0.022 / 0.008 / 0.117 |
+| b (stride 10) | Arena | 0.0099 | 0.0013 | 0.0212 | 0.032 / 0.012 / 0.130 |
+| b (stride 10) | dataset | 0.0074 | 0.0007 | 0.0166 | 0.023 / 0.008 / 0.102 |
+
+- **The dataset sentence fits the demos better on the arms in all three runs** (left arm about 23 % and right arm
+  about 40 % lower MSE); the left hand is within run-to-run noise (it goes either way). Per episode and run, the Arena
+  prompt had the lower summed MSE in 13 of 30 cases. This agrees with the model card, which names the HF dataset as
+  the training data, whose `tasks.jsonl` carries the long sentence (§2.6). `groot.obs.DEFAULT_PROMPT` is therefore
+  the dataset sentence; `ARENA_PROMPT` stays available. Neither has been compared in closed loop on our robot.
+- **Outputs are stochastic.** Identical inputs in runs `a` and `b` give different errors (left-arm MSE 0.0096 vs
+  0.0099 overall, up to 30 % apart per episode: episode 0 0.0038 vs 0.0029), as expected from the flow-matching
+  head's sampled noise (`num_inference_timesteps: 4`, `$CKPT/config.json`).
+- Latency in these runs: p50 146.0 / 145.0 ms, p95 150.0 / 149.1 ms (n = 183 each); 0 of 204,960 targets clamped in
+  each run; 0 timeouts in 734 calls.
 
 ### 6.3 Mapping to SONIC and clamping [m]
 
@@ -396,6 +420,8 @@ itself is untested (§7).
 3. **Jitter:** 9 % of chunks carry steps above the body's slew limit (§6.3); decide in G2 whether to smooth.
 4. **Stochastic chunks:** the flow-matching head samples noise (4 steps), so two calls on one observation differ;
    the runtime must not assume repeatability (§6.2.1 gives the size).
+7. **Prompt in closed loop:** `DEFAULT_PROMPT` (dataset sentence) is the open-loop winner; the closed-loop comparison
+   with Arena's string is for G2.
 5. **Licence (OD2):** card vs LICENCE file (§2.8).
 6. `pyproject.toml` `testpaths` does not list `tests/groot` (shared file; request filed); run it explicitly:
    `.venv-rt/bin/python -m pytest tests/groot` (the `box` tests need `-m box` and a server).

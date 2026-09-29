@@ -27,10 +27,12 @@ from . import joint_order as jo
 # (`$ARENA/docs/pages/example_workflows/static_apple/step_3_policy_training.rst:96`, `language_instruction`, task_index 3),
 # Arena's closed-loop eval config (arena_spike/g1_static_apple_gr00t_closedloop_config.yaml) and the checkpoint's ONNX
 # export (`exports/g1-static-apple-b1-480x640/onnx/leapp-0.5.2/README.md:11`). The released dataset's tasks.jsonl
-# carries a longer sentence for the same task_index (DATASET_PROMPT); docs/groot_serving.md §2.6 has the open-loop
-# comparison of the two.
+# carries a longer sentence for the same task_index (DATASET_PROMPT), and the model card names that dataset as the
+# training data. Open loop the dataset sentence reproduces the demos' arm motion better in 3 of 3 runs
+# (docs/groot_serving.md §6.2.1), so it is the default; the closed-loop comparison is open (G2).
 ARENA_PROMPT = "move the apple to the plate"
 DATASET_PROMPT = "Pick up the apple from the shelf and place it onto the plate on the same shelf next to it."
+DEFAULT_PROMPT = DATASET_PROMPT
 
 
 def build_observation(ego_rgb_uint8_HxWx3, body_q_mj29, left_hand_q7, right_hand_q7, prompt: str, *,

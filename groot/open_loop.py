@@ -10,7 +10,8 @@ For each episode of nvidia/Arena-G1-Static-PickNPlace-Task and each query step t
 The episodes are the checkpoint's own training demos (its model card names this dataset), so a low error proves the
 plumbing (keys, joint orders, Dex3 reorder, normalization, wire) rather than generalization. Controls:
     baseline_hold    no model: every step predicts the current state (what a dead policy would score)
-    prompt_dataset   the sentence in the released tasks.jsonl instead of Arena's eval instruction
+    prompt_dataset   the episode's own tasks.jsonl sentence (the default prompt is DEFAULT_PROMPT; the wave-1
+                     runs used --prompt "move the apple to the plate", Arena's eval string, as `main`)
     neg_swap_arms    left/right arm states swapped before build_observation (a joint-order bug)
     neg_hand_order   hands handed over in GR00T order instead of Dex3 order (a missed reorder)
 
@@ -31,7 +32,7 @@ import numpy as np
 from . import DEFAULT_ENDPOINT, joint_order as jo
 from .actions import clamp_stats, to_arm_chunk
 from .dataset import Episode, load_episode
-from .obs import ARENA_PROMPT, build_observation
+from .obs import ARENA_PROMPT, DEFAULT_PROMPT, build_observation
 from .policy_client import PolicyClient
 from .urdf import BOX_URDF, load_limits
 
@@ -254,7 +255,7 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=10.0)
     ap.add_argument("--ckpt", default="", help="checkpoint dir (statistics.json for normalized errors)")
     ap.add_argument("--urdf", default=BOX_URDF)
-    ap.add_argument("--prompt", default=ARENA_PROMPT)
+    ap.add_argument("--prompt", default=DEFAULT_PROMPT, help=f"main variant's prompt (Arena's: {ARENA_PROMPT!r})")
     ap.add_argument("--variants", default=",".join(VARIANTS))
     ap.add_argument("--plots", action="store_true")
     ap.add_argument("--out", required=True)

@@ -23,7 +23,7 @@ import numpy as np
 
 from . import DEFAULT_ENDPOINT, joint_order as jo
 from .actions import to_arm_chunk
-from .obs import ARENA_PROMPT, build_observation
+from .obs import DEFAULT_PROMPT, build_observation
 from .policy_client import PolicyClient
 
 
@@ -117,7 +117,7 @@ def main(argv=None) -> int:
     ap.add_argument("--frame", type=int, default=60)
     ap.add_argument("--obs-npz", default="")
     ap.add_argument("--save-obs", default="")
-    ap.add_argument("--prompt", default=ARENA_PROMPT)
+    ap.add_argument("--prompt", default=DEFAULT_PROMPT)
     ap.add_argument("--out", default="")
     args = ap.parse_args(argv)
     res = run(args)
