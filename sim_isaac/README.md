@@ -23,6 +23,8 @@ The interface is specified in [`docs/contracts/m1.md`](../docs/contracts/m1.md) 
 | `tools/stand_peer.py` | DDS peer standing in for the deploy: stand command at 500 Hz + checks (rates, joint map, lowstate vs GT, camera, REP ops) |
 | `tools/measure_rtf.sh`, `tools/summarize_rtf.py` | the RTF matrix (E6) |
 | `tools/record_video.py` | ego / chase / top-down (GT overlay) mp4 recorder |
+| `tools/sonic_netns_test.sh`, `tools/sonic_smoke.py` | SONIC in the loop: P1 + the unmodified deploy + a minimal planner driver in a private network namespace (stand, walk, turn; report + E4 trace + videos) |
+| `tools/final_validation.sh` | the whole stand-alone validation in one go: pure tests, DDS stand test in a house, RTF matrix, SONIC smoke (one Isaac instance at a time, ~15 min) |
 | `tools/run_app.sh`, `tools/bg_app.sh` | run in the foreground / in tmux `isaac-app-<name>` (stops the previous one, waits for ports) |
 
 ## Build and run (on the box)
@@ -42,6 +44,17 @@ Environment added to `/work/envs/isaaclab` for this component: cyclonedds 0.10.2
 `/work/opt/cyclonedds-0.10.2`, **with `-D_FORTIFY_SOURCE=0`**: Ubuntu 24.04's default fortify level aborts with
 "buffer overflow detected" in `Domain(...)` as soon as a network interface is configured), `cyclonedds==0.10.2`
 (Python), `unitree_sdk2py` (editable, from `$WBC/external_dependencies/unitree_sdk2_python`, `--no-deps`), `pyzmq`.
+
+## Status and measured numbers (contract §1.9-§1.10)
+
+Final validation (`outputs/m1/isaac/final/`, house `procthor-train-40`, quiet box): DDS stand test pass; RTF with
+G1 + head camera 30 Hz + house on CPU PhysX, paced: **0.998 total, 1.000 over 10 s**, worst 1 s window 0.88,
+~30% free-running headroom (1.29); GPU PhysX 0.22 (rejected). With the **unmodified SONIC deploy** in the loop:
+stand 60 s, walk 2.5 m, turn, no falls, leg targets at 50 Hz, RTF 0.993 / 1.000. Chosen path: the DDS bridge +
+the unmodified wall-clock deploy (the lockstep / sim-clock fallbacks are not needed for M1).
+
+P1 is controller-agnostic: it only speaks the real G1's low-level Unitree DDS (`rt/lowcmd` in, `rt/lowstate` +
+`rt/secondary_imu` + Dex3 out), so any unitree_sdk2 low-level controller can drive it without changes to P1.
 
 ## Design notes
 

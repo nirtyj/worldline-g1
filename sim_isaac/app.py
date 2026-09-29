@@ -64,8 +64,15 @@ def parse_args():
     ap.add_argument("--stats-every", type=float, default=10.0, help="log stats every N wall seconds")
     ap.add_argument("--out-dir", default="/work/worldline-g1/outputs/m1/isaac", help="default dir for artefacts")
     ap.add_argument("--warmup-renders", type=int, default=30)
+    ap.add_argument("--dl-denoiser", action=argparse.BooleanOptionalAction, default=None,
+                    help="override the RTX preset's DL denoiser setting (default: keep the preset's)")
+    ap.add_argument("--gc-freeze", action=argparse.BooleanOptionalAction, default=True,
+                    help="gc.freeze() after start-up so collections do not rescan Kit's objects")
     ap.add_argument("--no-default-lights", action="store_true")
     AppLauncher.add_app_launcher_args(ap)
+    # RTX preset: "balanced" (Isaac Lab default). "performance" renders ~1 ms faster in a house but the frames are
+    # extremely noisy (Laplacian std 310 vs 2.2, even with the DL denoiser): tools/render_ab.sh, outputs/.../render_ab
+    ap.set_defaults(rendering_mode="balanced")
     a = ap.parse_args()
     a.headless = True
     a.device = "cpu" if a.physx_device == "cpu" else "cuda:0"
@@ -115,7 +122,7 @@ class App:
                 friction_combine_mode="multiply", restitution_combine_mode="multiply",
                 static_friction=1.0, dynamic_friction=1.0),
             physx=sim_utils.PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15),  # modular_tracking_env_cfg.py:972
-            render=sim_utils.RenderCfg(antialiasing_mode="Off", enable_dl_denoiser=False),
+            render=sim_utils.RenderCfg(antialiasing_mode="Off", enable_dl_denoiser=a.dl_denoiser),
         )
         self.sim = sim_utils.SimulationContext(sim_cfg)
         import omni.usd
@@ -258,8 +265,42 @@ class App:
         self._cpu0 = os.times()
         self._wall0 = time.perf_counter()
         self.rtf_samples, self.rtf_below, self.rtf_min = 0, 0, 9.9
+        self.hitches: list[dict] = []
+        self.hitch_count = 0
+        self._setup_gc()
         self.prof = {"cmd": 0.0, "band_write": 0.0, "physx_step": 0.0, "update_read": 0.0, "dds_publish": 0.0,
                      "n": 0}
+
+    # ------------------------------------------------------------------ GC
+    def _setup_gc(self) -> None:
+        """Measure (and, with --gc-freeze, shorten) Python GC pauses: a full collection over Kit's millions of
+        Python objects can stall the physics loop for tens of ms."""
+        import gc
+
+        self.gc_ms_total = 0.0
+        self.gc_ms_max = 0.0
+        self.gc_ms_window = 0.0
+        self.gc_counts = [0, 0, 0]
+        self._gc_t0 = None
+
+        def cb(phase, info):
+            if phase == "start":
+                self._gc_t0 = time.perf_counter()
+            elif self._gc_t0 is not None:
+                ms = (time.perf_counter() - self._gc_t0) * 1e3
+                self.gc_ms_total += ms
+                self.gc_ms_window += ms
+                self.gc_ms_max = max(self.gc_ms_max, ms)
+                self.gc_counts[info.get("generation", 0)] += 1
+
+        if self.a.gc_freeze:
+            t0 = time.perf_counter()
+            gc.collect()
+            gc.freeze()  # everything allocated during start-up moves to the permanent generation
+            self.log(f"gc.freeze(): {gc.get_freeze_count()} objects frozen "
+                     f"(start-up collect {(time.perf_counter() - t0) * 1e3:.0f} ms, not counted in stats)")
+        # registered after the start-up collect: gc stats describe collections inside the physics loop only
+        gc.callbacks.append(cb)
 
     # ------------------------------------------------------------------ state
     def _setup_fast_io(self) -> None:
@@ -477,6 +518,17 @@ class App:
                 st = self._read_state()  # an op may have changed the sim (reset_robot, band)
 
             now = time.perf_counter()
+            it_ms = (now - t0) * 1e3
+            if it_ms > 25.0:
+                self.hitches.append({"t_sim": round(t_sim, 3), "iter_ms": round(it_ms, 1),
+                                     "step_ms": round((t5 - t0) * 1e3, 1),
+                                     "render_ms": round(self.render_stats.buf[-1], 1)
+                                     if (do_cam or do_tp) and self.render_stats.buf else 0.0,
+                                     "gc_ms_since": round(self.gc_ms_window, 1)})
+                self.hitch_count += 1
+                if len(self.hitches) > 50:
+                    del self.hitches[:25]
+            self.gc_ms_window = 0.0
             if now >= next_stats:
                 next_stats = now + a.stats_every
                 self.log("stats " + json.dumps(self.stats(), default=str))
@@ -512,6 +564,9 @@ class App:
             "rt_pace": self.a.rt_pace, "camera": self.a.camera, "camera_hz_target": self.a.camera_hz,
             "house": self.scene.house_id, "process_cpu_pct": round(100.0 * cpu_s / wall, 1) if wall > 0 else None,
             "gt_requests": self.gt.requests, "gt_slowest_ms": round(self.gt.slow_ms, 2),
+            "hitches_gt25ms": self.hitch_count, "hitches_last": self.hitches[-5:],
+            "gc": {"ms_total": round(self.gc_ms_total, 1), "ms_max": round(self.gc_ms_max, 1),
+                   "counts": self.gc_counts, "frozen": self.a.gc_freeze},
             "step_breakdown_ms": {k: round(1e3 * v / max(1, self.prof["n"]), 3) for k, v in self.prof.items()
                                   if k != "n"},
         }
@@ -639,10 +694,22 @@ class App:
         rec, self.recording = self.recording, None
         if rec is None:
             return {"ok": False, "error": "not recording"}
-        Path(self.record_path).parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(self.record_path, motor_names=np.array(jm.G1_MOTOR_JOINTS),
-                            **{k: np.asarray(v) for k, v in rec.items()})
-        return {"recording": False, "path": self.record_path, "samples": len(rec["t_sim"])}
+        path = self.record_path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        def _write():
+            # compressing a few thousand samples takes ~0.2 s: do it off the physics thread (it stalled the loop)
+            tmp = path + ".tmp.npz"
+            np.savez_compressed(tmp, motor_names=np.array(jm.G1_MOTOR_JOINTS),
+                                **{k: np.asarray(v) for k, v in rec.items()})
+            os.replace(tmp, path)
+
+        import threading
+        th = threading.Thread(target=_write, name="record-writer", daemon=False)
+        th.start()
+        self._record_writers = [t for t in getattr(self, "_record_writers", []) if t.is_alive()] + [th]
+        # "path" appears (atomic rename) once the write is done; "written": false until then
+        return {"recording": False, "path": path, "samples": len(rec["t_sim"]), "written": False}
 
     def _record_sample(self, st, t_sim):
         r = self.recording
@@ -666,6 +733,10 @@ class App:
 
     # ------------------------------------------------------------------ teardown
     def finish(self) -> dict:
+        if self.recording is not None:  # still recording at shutdown: write what we have
+            self.op_record({"on": False})
+        for th in getattr(self, "_record_writers", []):
+            th.join(timeout=30)
         s = self.stats()
         s["events"] = self.events[-50:]
         s["gpu_mem_mib"] = _gpu_mem_of(os.getpid())

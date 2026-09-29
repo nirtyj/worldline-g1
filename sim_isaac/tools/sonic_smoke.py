@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--stand-s", type=float, default=60.0)
     ap.add_argument("--walk-s", type=float, default=8.0)
     ap.add_argument("--speed", type=float, default=0.4)
+    ap.add_argument("--turn-s", type=float, default=6.0)
     ap.add_argument("--out", default="/work/worldline-g1/outputs/m1/isaac/sonic_smoke/report.json")
     ap.add_argument("--init-timeout", type=float, default=240.0)
     a = ap.parse_args()
@@ -168,6 +169,23 @@ def main():
         "rtf_min": min(p["rtf"] for p in wk if p["rtf"] is not None),
     }
     print("walk", report["phases"]["walk"], flush=True)
+
+    # turn in place: IDLE with a new facing (as keyboard Q/E do); planner-frame +y = 90 deg left of the heading
+    # captured at planner init
+    pt0 = poses[-1]
+    with lock:
+        state.update(mode=0, move=[0.0, 0.0, 0.0], face=[0.0, 1.0, 0.0], speed=-1.0)
+    t_t0 = time.time()
+    time.sleep(a.turn_s)
+    pt1 = poses[-1]
+    dyaw = math.degrees(math.atan2(math.sin(pt1["yaw"] - pt0["yaw"]), math.cos(pt1["yaw"] - pt0["yaw"])))
+    report["phases"]["turn"] = {
+        "seconds": a.turn_s, "facing_cmd_planner": [0.0, 1.0, 0.0], "yaw_change_deg": dyaw,
+        "yaw_start_deg": math.degrees(pt0["yaw"]), "yaw_end_deg": math.degrees(pt1["yaw"]),
+        "displacement_m": float(np.linalg.norm(np.array(pt1["base_pos"][:2]) - np.array(pt0["base_pos"][:2]))),
+        "fallen_any": any(p["fallen"] for p in window(t_t0, time.time())),
+    }
+    print("turn", report["phases"]["turn"], flush=True)
     report["record"] = rep("record", on=False)
     report["stats"] = rep("get_stats")
     report["release_wall"] = t_rel
@@ -177,6 +195,8 @@ def main():
         "walked_forward_gt_1m": w["forward_m"] > 1.0 and not w["fallen_any"],
         "alternating_feet": w["foot_alternations"] >= 4,
         "leg_targets_change_at_policy_rate": (w["lowcmd_leg_change_hz"] or 0) > 40,
+        "turned_about_90deg": 60.0 <= abs(report["phases"]["turn"]["yaw_change_deg"]) <= 120.0
+        and not report["phases"]["turn"]["fallen_any"],
     }
     report["pass"] = all(report["checks"].values())
     out.write_text(json.dumps(report, indent=2, default=str) + "\n")

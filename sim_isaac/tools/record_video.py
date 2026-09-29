@@ -74,7 +74,11 @@ def main():
         poller.register(s, zmq.POLLIN)
     writers, counts = {}, {k: 0 for k in socks}
     t0 = time.time()
-    while time.time() - t0 < a.seconds:
+    import signal
+    stop = {"now": False}
+    signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(now=True))
+    while time.time() - t0 < a.seconds and not stop["now"]:
         for s, _ in poller.poll(200):
             name = next(k for k, v in socks.items() if v is s)
             if name == "topdown":

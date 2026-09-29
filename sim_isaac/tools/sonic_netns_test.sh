@@ -5,18 +5,20 @@
 # agent owns domain 0 on the host's lo. A network namespace has its own lo, so DDS domain 0 and the contract ZMQ
 # ports (5556/5557/5600/5601/5565) inside it are invisible to everyone else on the box.
 #
-#   bash sim_isaac/tools/sonic_netns_test.sh [HOUSE] [STAND_S] [WALK_S]
-# Output: /work/worldline-g1/outputs/m1/isaac/sonic_smoke/ (report.json, trace.npz, ego.mp4, topdown.mp4, logs)
+#   [OUT=dir] bash sim_isaac/tools/sonic_netns_test.sh [HOUSE] [STAND_S] [WALK_S] [TURN_S]
+# Output: $OUT (default /work/worldline-g1/outputs/m1/isaac/sonic_smoke/): report.json, trace.npz, ego.mp4,
+# topdown.mp4, logs
 set -uo pipefail
 HOUSE=${1:-procthor-train-40}
 STAND_S=${2:-60}
 WALK_S=${3:-8}
+TURN_S=${4:-6}
 NS=wlisaac
 WL=/work/worldline-g1
-OUT=$WL/outputs/m1/isaac/sonic_smoke
+OUT=${OUT:-$WL/outputs/m1/isaac/sonic_smoke}
 LOGS=/work/logs/wl
 PY=/work/envs/isaaclab/bin/python
-DUR=$((STAND_S + WALK_S + 400))
+DUR=$((STAND_S + WALK_S + TURN_S + 400))
 mkdir -p "$OUT" "$LOGS"
 rm -f "$OUT"/*.log "$LOGS/isaac-ns-app.log" "$LOGS/isaac-ns-deploy.log" "$LOGS/isaac-ns-smoke.log"
 
@@ -43,11 +45,12 @@ echo "P1 ready"
 
 # 2. driver (binds 5556 before the deploy connects) + video recorders
 ns bash -c "source /etc/profile.d/ludo.sh; cd $WL; export PYTHONUNBUFFERED=1; exec $PY -m sim_isaac.tools.sonic_smoke \
-  --deploy-log $LOGS/isaac-ns-deploy.log --stand-s $STAND_S --walk-s $WALK_S --out $OUT/report.json" \
+  --deploy-log $LOGS/isaac-ns-deploy.log --stand-s $STAND_S --walk-s $WALK_S --turn-s $TURN_S \
+  --out $OUT/report.json" \
   > "$LOGS/isaac-ns-smoke.log" 2>&1 &
 smoke=$!
 ns bash -c "source /etc/profile.d/ludo.sh; cd $WL; exec $PY -m sim_isaac.tools.record_video --port-offset 0 \
-  --seconds $((STAND_S + WALK_S + 120)) --ego --topdown --out-dir $OUT" > "$OUT/record_video.log" 2>&1 &
+  --seconds $((STAND_S + WALK_S + TURN_S + 120)) --ego --topdown --out-dir $OUT" > "$OUT/record_video.log" 2>&1 &
 sleep 2
 
 # 3. the unmodified deploy (zmq_manager, sim, lo) via the deploy agent's launcher; stdin never delivers 'o'
