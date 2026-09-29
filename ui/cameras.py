@@ -280,7 +280,8 @@ class ScanThumbs:
         if not frames:
             return None
         n = len(frames)
-        pick = sorted({round(i * (n - 1) / max(1, self.MAX_THUMBS - 1)) for i in range(min(n, self.MAX_THUMBS))})
+        k = min(n, self.MAX_THUMBS)
+        pick = sorted({round(i * (n - 1) / max(1, k - 1)) for i in range(k)})           # k frames, evenly spread
         d = r.get("data") or {}
         import base64
         msg = {"type": "scan", "execution_id": r.get("execution_id"),

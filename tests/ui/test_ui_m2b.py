@@ -133,7 +133,7 @@ def test_scan_thumbnails_follow_a_scan_and_close_on_its_result():
     assert len(msgs) == 1
     m = msgs[0]
     assert m["type"] == "scan" and m["at"] == "bedroom_dresser_1b" and m["sees"] == ["alarm_clock_1"]
-    assert 1 <= len(m["thumbs"]) <= ScanThumbs.MAX_THUMBS and m["executor"] == "turn_in_place"
+    assert len(m["thumbs"]) == ScanThumbs.MAX_THUMBS and m["executor"] == "turn_in_place"
     assert base64.b64decode(m["thumbs"][0]["jpeg"]) in (JPEG_A, JPEG_B)    # undecodable fakes pass through
     assert th.recent == [m]
     # a glance is not a scan
@@ -277,3 +277,31 @@ def test_ego_pane_shows_ego_view_only_while_it_is_rendered():
     assert src.names() == ["head"] and src.jpeg("ego") is None
     src.close()
     assert sub.stopped
+
+
+def test_scans_get_thumbnails_while_no_page_is_open():
+    """Hub.tick with no client follows the runtime's history and trace itself; a page that connects later is sent
+    the finished scan."""
+    from ui.server import Hub
+    from ui_fakes import FakeExecution
+    built: dict = {}
+    tap = FakeTap()
+
+    async def go():
+        hub = Hub("procthor-train-40", "sonic", deps=make_deps(built), cameras=TapCameras(tap), system1="off")
+        await hub.reset("procthor-train-40", "agent", "gemini-3.8-flash", profile="sonic")
+        rt = built["runtime"]
+        e = FakeExecution("obs-000007", "observe", {"mode": "scan"}, action="scan", source="harness")
+        rt.history.append(e)
+        for i in range(4):
+            tap.put("head", JPEG_A if i % 2 else JPEG_B, {"seq": i})
+            await hub.tick()
+        e.status = "succeeded"
+        rt.tracer.rows.append({"t": 3.0, "type": "result", "tool": "observe", "action": "scan",
+                               "execution_id": "obs-000007", "status": "succeeded",
+                               "data": {"at": "bedroom_dresser_1a", "saw": ["alarm_clock_1"]}})
+        await hub.tick()
+        await hub.session.stop()
+        return hub.thumbs.recent
+    recent = asyncio.run(go())
+    assert len(recent) == 1 and recent[0]["execution_id"] == "obs-000007" and len(recent[0]["thumbs"]) == 4

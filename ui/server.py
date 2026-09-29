@@ -723,6 +723,7 @@ class Hub:
         self._s1_event = False                       # an arrival, a look or a scene change: observe now
         self.s1_gate: Any = None                     # which head-camera frames System 1 gets
         self.thumbs = ScanThumbs()                   # head-camera thumbnails of each scan
+        self._thumb_i = 0                            # the trace rows the thumbnails have seen
 
     # ------------------------------------------------------------------ cameras
     def _cameras_for(self, s: Session) -> CameraSource:
@@ -938,6 +939,7 @@ class Hub:
                 new.runtime.set_step_mode(self.step_mode)
             self.feed = CameraFeed(self._cameras_for(new), camera=new.map.get("camera"), profile=new.profile)
             self.thumbs.reset()
+            self._thumb_i = 0
             self._s1_vocabulary(new)
             broadcast(self.clients, dumps({**new.init_message(), "meta": self.meta()}))
             broadcast(self.clients, dumps(new.memory_message()))
@@ -951,7 +953,10 @@ class Hub:
 
     async def tick(self) -> None:
         s = self.session
-        if s is None or not self.clients:
+        if s is None:
+            return
+        if not self.clients:
+            self._thumbs_idle(s)                      # scans still get their thumbnails with no page open
             return
         frame = s.frame()
         frame["system1"] = {"status": self.s1_status, "detail": self.s1_detail}
@@ -966,12 +971,27 @@ class Hub:
         caption = head_caption({}, s.map.get("camera"), s.profile)
         for m in self.thumbs.update(frame, self.feed.source, caption):
             broadcast(self.clients, dumps(m))
+        self._thumb_i = len(s._trace_rows())
         if any(r.get("type") in MEMORY_ROWS for r in frame["trace"]):
             self._memory_due = True
         if self._memory_due and time.monotonic() - self._memory_sent > 1.0:
             self._memory_due, self._memory_sent = False, time.monotonic()
             broadcast(self.clients, dumps(s.memory_message()))
         self._send_cameras()
+
+    def _thumbs_idle(self, s: Session) -> None:
+        """No page is connected: follow scans from the runtime's own history and new trace rows (its own cursor;
+        the page's frame cursor is left alone), so a page that connects later gets complete thumbnails."""
+        rt = s.runtime
+        if rt is None:
+            return
+        rows = s._trace_rows()
+        new = [_row(r, i) for i, r in enumerate(rows[self._thumb_i:], self._thumb_i)]
+        self._thumb_i = len(rows)
+        active = [{"tool": _tool_of(e), "action": getattr(e, "action", None), "args": dict(getattr(e, "args", None) or {})}
+                  for e in list(getattr(rt, "history", []) or []) if not _finished(e)]
+        caption = head_caption({}, s.map.get("camera"), s.profile)
+        self.thumbs.update({"t": s.clock.now(), "runtime": {"active": active}, "trace": new}, self.feed.source, caption)
 
     async def ticker(self) -> None:
         while True:

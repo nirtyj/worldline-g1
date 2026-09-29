@@ -16,6 +16,9 @@ Two ways to run, one referee:
                       Faults the page cannot cause are injected by shell hooks (--hook name=cmd): kill_policy,
                       restore_policy, spawn_box, clear_box, push_robot, kill_deploy, throttle_rtf, restore_rtf,
                       delay_proxy_on, delay_proxy_off, place_object. A scenario whose hook is missing is SKIPPED.
+                      A hook command may use the injection's arguments as {placeholders} (push_robot {newtons},
+                      throttle_rtf {rtf}, delay_proxy_on {ms}, place_object {object} {offset_m}); write literal
+                      braces as {{ }}. Hooks run on the laptop, e.g. an ssh to the box.
 
 Scoring reads only the page's messages (frame.truth from world.truth(), trace rows, events, model calls), exactly like
 eval/suite.py; the injectors are fixtures, never a source of verdicts. Each scenario reports its criteria one by one:
@@ -991,6 +994,12 @@ def main() -> int:
     args = ap.parse_args()
     ids = [x.strip().upper() for x in args.only.split(",") if x.strip()] or [s.id for s in SPECS if s.id != "E5"]
     hooks = dict(h.split("=", 1) for h in args.hook if "=" in h)
+    if args.url is None and (args.planner != "brains.scripted:create" or "stub" not in args.system1):
+        from ui.server import load_env_files
+        load_env_files()                  # live models offline: keys from ~/.config/ludo-g1/secrets.env, never printed
+        if args.speed != 1.0:
+            print("live models answer in wall time: --speed forced to 1.0", flush=True)
+            args.speed = 1.0
     if args.url is None and not os.environ.get("WORLDLINE_RUNS"):
         os.environ["WORLDLINE_RUNS"] = tempfile.mkdtemp(prefix="wl-stack-")
         from eval.offline_episode import _isolate_runs
