@@ -226,6 +226,20 @@
   .xb { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 4px; margin-left: 6px; background: #173022; color: var(--robot); white-space: nowrap; }
   .xb.fb { background: #3a2a14; color: var(--warn); border: 1px dashed var(--warn); }
   .xb.unofficial { background: #2e1f3a; color: #d3a8ff; }
+  .xb.exp { background: #3a2a14; color: var(--warn); border: 1px solid var(--warn); }
+  /* Under the camera: the GR00T strip (while a groot_arms session runs, and 30 s after) and the last scan's thumbnails */
+  .camfoot { display: grid; gap: 4px; margin: 0 4px 4px; }
+  .gstrip { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; padding: 5px 10px; border-radius: 6px;
+            background: #1b1430; border: 1px solid #4a3d66; font: 12px var(--mono); color: var(--muted); }
+  .gstrip b { color: var(--text); font-weight: 600; }
+  .gstrip .gt { color: #c9a8ff; font-weight: 700; letter-spacing: .06em; }
+  .gstrip .xb { margin-left: 0; }
+  .thumbs { display: flex; gap: 4px; align-items: center; overflow-x: auto; font: 11.5px var(--mono); color: var(--muted); }
+  .thumbs .cap { flex: none; max-width: 38%; white-space: normal; }
+  .thumbs .cap b { color: var(--text); font-weight: 600; }
+  .thumbs img { height: 54px; flex: none; border-radius: 4px; border: 1px solid var(--line); }
+  table.locs td { font: 12px var(--mono); padding: 3px 6px; }
+  table.locs tr.asked td:first-child { border-left: 3px solid var(--brain); }
   .list .fbk { border-left-color: var(--warn); }
   .list .latex { text-decoration: line-through; opacity: .75; }
   .mode { font: 700 11px var(--mono); padding: 2px 8px; border-radius: 4px; background: #222b3d; color: var(--muted); letter-spacing: .05em; }
@@ -500,6 +514,10 @@
         <div class="subtitle off" id="subtitle"></div>
         <div class="loading" id="loading" hidden>Loading the room…</div>
       </div>
+      <div class="camfoot">
+        <div class="gstrip" id="gstrip" hidden aria-live="polite" title="GR00T in the loop: one manipulate session through groot_arms (session = execution id)"></div>
+        <div class="thumbs" id="thumbs" hidden aria-label="Head-camera frames of the last scan"></div>
+      </div>
     </section>
 
     <section class="pane toppane" data-ws="world">
@@ -590,18 +608,22 @@
               chatByUid: {}, lastRobotMsg: {}, showBelief: true, ws: null,
               calls: {}, traceAll: [], callsCleared: 0, callsLog: null, follow: false, tab: "feed", openCall: null,
               layout: null, space: "world", rtab: "now", hud: { label: null, noticed: null },
-              cam: "head", cams: {}, showOcc: true, showRender: true, showObjs: true };
+              cam: "head", cams: {}, showOcc: true, showRender: true, showObjs: true, scans: [], locs: null };
   // STEPPING STONE executors (PLAN 12.2): amber badges everywhere they appear
   const FALLBACK = () => new Set((S.config && S.config.stepping_stones) || ["kinematic_nav", "kinematic_attach", "sonic_arm_script"]);
   const isOk = (st) => ["succeeded", "SUCCEEDED"].includes(st);
   const isBad = (st) => ["cancelled", "failed", "timed_out", "rejected", "dropped", "CANCELED", "ABORTED", "REJECTED", "TIMEOUT", "FAILED"].includes(st);
   const SPEECH = new Set(["speak"]);
+  // Every GR00T skill is labelled experimental (owner decision, PLAN 0.8): an off-the-shelf checkpoint, success not expected
+  const isGroot = (executor, skill) => ["groot_arms", "groot_sonic"].includes(executor) || /^groot\./.test(skill || "");
+  const EXP_BADGE = `<span class="xb exp" title="GR00T N1.7, off-the-shelf Arena G1 Static PickNPlace checkpoint: experimental. The outcome is reported as it happened; success is not expected in a house">experimental</span>`;
   function xbadge(executor, skill) {
     if (!executor && !skill) return "";
     const fb = FALLBACK().has(executor);
     const lab = fb ? (((S.config || {}).fallback_labels || {})[executor] || executor + " (fallback)") : executor;
     const unoff = skill && /community|unofficial/.test(skill);
     return `<span class="xb${fb ? " fb" : ""}" title="${fb ? "STEPPING STONE: a labelled sim shortcut, counted as a fallback pass" : "target executor"}">${esc(lab || "")}${skill ? " · " + esc(skill) : ""}</span>` +
+      (isGroot(executor, skill) ? EXP_BADGE : "") +
       (unoff ? `<span class="xb unofficial" title="Community checkpoint: Inspire-hand data vs Dex3 deploy">UNOFFICIAL · hand mismatch</span>` : "");
   }
   const whatOf = (a) => (a || {}).location || (a || {}).object_id || (a || {}).object_type || (a || {}).target || (a || {}).to || (a || {}).object || (a || {}).query || "";
@@ -857,6 +879,12 @@
       case "camera_flushed": return ["world", `camera buffer flushed${e.camera ? " (" + e.camera + ")" : ""}`];
       case "internal_error": return ["world", `SIM ERROR ${e.error}`, "hot"];
       case "slow_sim_call": return ["world", `simulator call ${e.call} was slow: waited ${e.queued_s} s in the queue, ran ${e.ran_s} s`, "amber"];
+      // GR00T (groot_arms): the 5 Hz progress and every inference feed the strip under the camera, not the feed
+      case "arm.progress": case "groot.inference": return null;
+      case "manip.phase": return ["robot", `${e.execution_id} ${e.executor || "manipulate"}: ${e.phase}${e.label ? " (" + e.label + ")" : ""}`];
+      case "groot.stall": return ["robot", `${e.execution_id || e.session} GR00T stall: no chunk rows for ${e.stall_s} s`, "amber"];
+      case "policy.health": return ["robot", `GR00T policy ${e.state || (e.ok ? "ok" : "down")}${e.detail ? ": " + e.detail : ""}`, e.ok === false || (e.state && e.state !== "ok") ? "hot" : ""];
+      case "visual_observation": return ["robot", `${e.observation_id} ${e.mode} at ${e.at || "?"}: sees ${(e.sees || []).join(", ") || "nothing"}${e.camera ? " · " + e.camera : ""}`];
       default: return ["world", `${e.type} ${JSON.stringify(Object.fromEntries(Object.entries(e).filter(([k]) => !["t", "type", "i"].includes(k))))}`];
     }
   }
@@ -1067,6 +1095,54 @@
     </div></div>`;
   }
 
+  // The GR00T strip under the camera (PLAN 9.4, F2): session, skill, executor, inference latency, chunk index,
+  // clamped share, stall, policy health and the honest outcome. Built by the server (ui/groot_strip.py) from
+  // manip.phase / arm.progress / groot.inference events and the manipulate result; blank fields were not reported.
+  function renderGroot(g) {
+    const el = $("gstrip");
+    if (!g) { el.hidden = true; return; }
+    el.hidden = false;
+    const lat = g.latency_ms || {}, pol = g.policy || {}, out = g.outcome;
+    const n = (v, d = 0) => (v == null ? "–" : Number(v).toFixed(d));
+    const drops = Object.entries(g.dropped || {}).map(([k, v]) => `${esc(k)} ${esc(v)}`).join(", ");
+    const pstate = pol.state || (pol.ok === false ? "down" : pol.ok ? "ok" : "?");
+    setHTML(el, `<span class="gt">GR00T</span>${g.label && g.label !== "experimental" ? `<span class="xb exp">${esc(g.label)}</span>` : EXP_BADGE}
+      <span>session <b>${esc(g.session)}</b></span><span><b>${esc(g.skill || "?")}</b> · ${esc(g.executor || "?")}</span>
+      <span>${g.running ? `phase <b>${esc(g.phase || "running")}</b>` : `ended ${n(g.age_s)} s ago`}</span>
+      <span title="PolicyServer round trip: median over this session, and the latest">latency p50 <b>${n(lat.p50)}</b> · last <b>${n(lat.last)}</b> ms</span>
+      <span>inferences <b>${esc(g.inferences ?? 0)}</b></span>
+      <span title="The chunk being played and the 50 Hz step within it${g.progress_source ? " (from the " + esc(g.progress_source) + ")" : ""}">chunk <b>${esc(g.chunk_idx ?? "–")}</b>${g.k != null ? ` · k ${esc(g.k)}` : ""}${g.chunk_age_ms != null ? ` · age ${n(g.chunk_age_ms)} ms` : ""}</span>
+      <span title="Share of joint targets clamped to the URDF limits">clamped <b class="${(g.clamped_frac || 0) > 0.2 ? "bad" : ""}">${g.clamped_frac == null ? "–" : (100 * g.clamped_frac).toFixed(0) + "%"}</b></span>
+      <span title="Seconds the body held the last row waiting for a chunk">stall <b class="${g.stall ? "warn" : ""}">${g.stall_s == null ? "–" : n(g.stall_s, 1) + " s"}</b></span>
+      <span title="${esc(pol.detail || "")}">policy <b class="${pol.ok === false ? "bad" : pol.ok ? "ok" : ""}">${esc(pstate)}</b></span>
+      ${drops ? `<span>dropped <b>${drops}</b></span>` : ""}${g.errors ? `<span>policy errors <b class="bad">${esc(g.errors)}</b></span>` : ""}
+      ${out ? `<span title="${esc(out.summary || "")}">outcome <b class="${out.status === "succeeded" ? "ok" : "bad"}">${esc(out.text)}</b>${out.late ? " · late" : ""}</span>` : ""}`);
+  }
+  // The last scan's head-camera frames (PLAN 9.4: scan thumbnails after each observation).
+  function renderThumbs() {
+    const el = $("thumbs"), sc = S.scans[S.scans.length - 1];
+    if (!sc || !(sc.thumbs || []).length) { el.hidden = true; setHTML(el, ""); return; }
+    el.hidden = false;
+    const interim = /turn_in_place|INTERIM/.test(`${sc.executor || ""} ${sc.note || ""}`);
+    setHTML(el, `<span class="cap" title="${esc(sc.caption || "")}">scan at <b>${esc(sc.at || "?")}</b> · t=${n1(sc.t)}${(sc.sees || []).length ? ` · sees ${sc.sees.map(esc).join(", ")}` : " · sees nothing"}${sc.executor ? ` · <span class="${interim ? "warn" : ""}" title="${esc(sc.note || "")}">${esc(sc.executor)}${interim ? " (interim)" : ""}</span>` : ""}</span>` +
+      sc.thumbs.map((t) => `<img alt="head frame at t=${n1(t.t)}" title="t=${n1(t.t)}" src="data:image/jpeg;base64,${t.jpeg}">`).join(""));
+  }
+  const n1 = (v) => Number(v || 0).toFixed(1);
+  // The list_locations panel (PLAN 9.4): the places the planner can navigate to, nearest first, with walking
+  // distances from the robot's pose now (the same service the tool uses); rows the planner's last call returned are marked.
+  function renderLocations() {
+    const L = S.locs;
+    if (!L || !(L.items || []).length) return "";
+    const asked = new Set((L.planner && L.planner.names) || []);
+    const items = L.items.slice().sort((a, b) => (a.distance_m == null) - (b.distance_m == null) || (a.distance_m || 0) - (b.distance_m || 0));
+    const src = L.source === "live" ? `live, walking distance from here (t=${n1(L.t)})` : `from the planner's last call (t=${n1(L.t)})`;
+    const who = L.planner ? `planner called it at t=${n1(L.planner.t)}${L.planner.query ? ` for “${esc(L.planner.query)}”` : ""}` : "the planner has not called it";
+    return `<div class="block"><h3>Places · list_locations <span class="muted" style="text-transform:none;letter-spacing:0">${src} · ${who}</span></h3>
+      <table class="locs"><tr><th>Place</th><th>Walk</th><th>Type</th><th>Room</th></tr>
+      ${items.slice(0, 40).map((x) => `<tr class="${asked.has(x.name) ? "asked" : ""}"><td>${esc(x.name)}${x.too_high ? ' <span class="warn">too high</span>' : ""}${x.too_low ? ' <span class="warn">too low</span>' : ""}</td><td>${x.distance_m == null ? "–" : Number(x.distance_m).toFixed(1) + " m"}</td><td>${esc(x.type || "")}</td><td>${esc(x.room || "")}</td></tr>`).join("")}
+      </table></div>`;
+  }
+
   // ------------------------------------------------------------------ state panel
   function handLabel(h) {
     if (h === null || h === undefined) return "empty";
@@ -1221,6 +1297,8 @@
   function renderAlways(msg) {
     $("simt").textContent = msg.t.toFixed(1);
     renderStrip(msg);
+    if (msg.locations) S.locs = msg.locations;
+    renderGroot(msg.groot);
     const rt = msg.runtime;
     const per = rt && rt.persona, sel = $("sel-persona");
     if (per && document.activeElement !== sel && sel.value !== per.level) sel.value = per.level;
@@ -1284,6 +1362,13 @@
       <span class="pill">${stats.calls ?? 0} model calls${stats.latency_ms_p50 ? " · p50 " + (stats.latency_ms_p50 / 1000).toFixed(1) + " s" : ""}</span>
       <span class="ts t-${esc(rt.tool_state || "IDLE")}">${esc(rt.tool_state || "IDLE")}</span></div>`;
     h += renderBody(st);
+    const g = st.groot;
+    if (g) {
+      const lat = g.latency_ms || {}, out = g.outcome, pol = g.policy || {};
+      h += `<div class="block"><h3>GR00T ${EXP_BADGE} <span class="muted" style="text-transform:none;letter-spacing:0">session ${esc(g.session)} · ${esc(g.executor || "")}</span></h3><div class="list">
+        <div class="${g.running ? "run" : out && out.status === "succeeded" ? "" : "cxl"}">${esc(g.skill || "?")} · ${g.running ? esc(g.phase || "running") : esc((out && out.text) || g.status)}</div>
+        <div><span class="muted">inferences</span> ${esc(g.inferences ?? 0)} · <span class="muted">latency p50/last</span> ${lat.p50 ?? "–"}/${lat.last ?? "–"} ms · <span class="muted">chunk</span> ${esc(g.chunk_idx ?? "–")} · <span class="muted">clamped</span> ${g.clamped_frac == null ? "–" : (100 * g.clamped_frac).toFixed(0) + "%"} · <span class="muted">stall</span> ${g.stall_s ?? "–"} s · <span class="muted">policy</span> <span class="${pol.ok === false ? "bad" : pol.ok ? "ok" : ""}">${esc(pol.state || "?")}</span></div></div></div>`;
+    }
     const s1 = S.s1 || { status: "off" };
     const lastLabel = S.traceAll.slice().reverse().find((r) => r.type === "classified");
     const noticed = S.traceAll.filter((r) => r.type === "observation").slice(-3).reverse();
@@ -1305,6 +1390,7 @@
     h += `<div class="block"><h3>Procedure <span class="muted" style="text-transform:none;letter-spacing:0">this task, as steps</span></h3><div class="list">
       <div>${proc.steps.length ? ["start", ...proc.steps].map(esc).join(" → ") : '<span class="muted">no request in progress</span>'}</div>
       ${proc.guidance ? `<div class="run">${esc(proc.guidance).replace(/\n/g, "<br>")}</div>` : ""}</div></div>`;
+    h += renderLocations();
     setHTML($("now-main"), h);
   }
 
@@ -1391,6 +1477,7 @@
       S.calls = {}; S.traceAll = []; S.callsCleared = 0; S.callsLog = msg.calls_log; S.hud = { label: null, noticed: null }; closeDrawer();
       if (S.cams.__scene !== msg.config.scene) { S.cams = { __scene: msg.config.scene }; showCam(); }
       $("chat").innerHTML = ""; $("feed").innerHTML = ""; $("calls").innerHTML = "";
+      S.scans = []; S.locs = msg.locations || null; renderThumbs();
       $("loading").hidden = true;
       VB = { ...FULL }; S.fitted = true;
       drawStatic(); requestAnimationFrame(refit); V.plan.reset(msg.layout); V.plan.robotMap(msg.robot_map, true); V.memory.reset();
@@ -1399,6 +1486,9 @@
       if (S.layout) { V.plan.robotMap(msg.robot_map, false); ingest(msg); }
     } else if (msg.type === "camera") {
       setCamera(msg.which, msg.jpeg, msg.meta);
+    } else if (msg.type === "scan") {
+      S.scans = [...S.scans.filter((x) => x.execution_id !== msg.execution_id), msg].slice(-4);
+      renderThumbs();
     } else if (msg.type === "loading") {
       if (msg.meta) { S.meta = msg.meta; }
       $("loading").hidden = false; $("loading").textContent = `Loading ${msg.scene}${msg.profile ? " (" + msg.profile + ")" : ""}…`;

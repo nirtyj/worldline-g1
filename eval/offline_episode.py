@@ -17,10 +17,12 @@ What runs (every layer is the real M2a code; only the model, System 1 and the bo
          (procthor-train-40 = Worldline's H40), world/frames.py LiteFrames (schematic head frames)
 
 It passes when the eval's fetch scenario passes (alarm_clock_1 on the user's surface in world truth, robot idle)
-AND the trace shows the F1 shape (PLAN 2.2): navigate -> arrival scan -> check_reachability [-> reposition ->
-check again] -> manipulate(pick), labelled -> verify glance -> navigate(user) -> manipulate(place) -> goal_check
-ok -> delivered. On lite everything is a STEPPING STONE (executor "lite"): a labelled fallback pass, never a target
-pass.
+AND the trace shows the F1 shape (PLAN 2.2), in order: navigate -> arrival scan -> check_reachability [-> reposition
+-> check again] -> manipulate(pick), labelled -> verify glance -> navigate(user) -> manipulate(place) -> goal_check
+ok (after the place's result) and delivered (after navigate(user), for that same place execution) AND every result
+row carries the full envelope (PLAN 5.3: execution_id, tool, status, observation_id, generation, control_epoch,
+t_start, t_end, late), with speak, recall and rejections recorded as result rows too. On lite everything is a
+STEPPING STONE (executor "lite"): a labelled fallback pass, never a target pass.
 
 The same checks run against a live page server (M2b: the box's `sonic` profile through `00_infra/tunnel.sh 8765`):
 
@@ -51,6 +53,18 @@ if str(ROOT) not in sys.path:
 SCENARIO = "fetch_other_room"          # eval/scenes.yaml: H40, alarm_clock_1, "Bring me the alarm clock."
 SYSTEM1_STUB = "tests.kept.system1_stub:create"
 PLANNER = "brains.scripted:create"
+# The envelope every trace `result` row carries (PLAN 5.3 ToolResult; the harness logs one row per ToolResult), and
+# the row's `kind`: a tool that ran, a line of speech, recall or a rejection (api.results.RESULT_ROW_KINDS when the
+# runtime defines it; these literals are its fallback).
+ENVELOPE_KEYS = ("execution_id", "tool", "status", "observation_id", "generation", "control_epoch", "t_start",
+                 "t_end", "late")
+ENVELOPE_STATUSES = ("succeeded", "failed", "cancelled", "timed_out", "rejected")
+ROW_KINDS = ("tool", "speech", "recall", "rejection")
+try:
+    from api.results import RESULT_ROW_KINDS as ROW_KINDS  # type: ignore  # noqa: F811
+except ImportError:
+    pass
+KIND_OF = {"speak": "speech", "recall": "recall", "rejection": "rejection"}
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -104,40 +118,127 @@ def f1_steps(user_keypoint: str, user_surface: str) -> list[tuple[str, Callable[
         ("place on the user's surface (labelled)",
          lambda r: r.get("type") == "result" and _is("manipulate", status="succeeded", action="place",
                                                       executor=labelled)(r)),
+        # the goal check runs after the place's result and its verify glance (PLAN 5.12)
         ("goal check ok", lambda r: r.get("type") == "goal_check" and r.get("ok") is True
          and r.get("object") == "alarm_clock_1"),
+        # the harness logs `delivered` while it applies that place's result, just before the result row, so
+        # delivered is ordered after navigate(user) and must name the same place execution
         ("delivered", lambda r: r.get("type") == "delivered" and r.get("object") == "alarm_clock_1"
-         and r.get("surface") == user_surface),
+         and r.get("surface") == user_surface,
+         {"after": "navigate to the user", "same_execution_as": "place on the user's surface (labelled)"}),
     ]
 
 
-def check_sequence(trace: list[dict[str, Any]], steps: list[tuple[str, Callable[[dict[str, Any]], bool]]]
-                   ) -> list[dict[str, Any]]:
+Step = tuple  # (name, pred) or (name, pred, {"after": step name, "same_execution_as": step name})
+
+
+def check_sequence(trace: list[dict[str, Any]], steps: list[Step]) -> list[dict[str, Any]]:
     """Each step matched in order (a subsequence of the trace); one entry per step with the row it matched.
-    The goal check and delivery may land in either order (the verify glance can confirm the place first)."""
-    out, i = [], 0
-    for name, pred in steps:
-        j = next((k for k in range(i, len(trace)) if pred(trace[k])), None)
-        if j is None and name in ("goal check ok", "delivered"):
-            j = next((k for k in range(len(trace)) if pred(trace[k])), None)
-            if j is not None:
-                out.append({"step": name, "ok": True, "row": trace[j].get("i"), "t": trace[j].get("t")})
-                continue
+
+    A step is searched from the row after the previous matched step, or, with {"after": name}, from the row
+    after that earlier step (so it may sit before the previous step, never before its anchor). With
+    {"same_execution_as": name} the row's execution_id must be that step's. A step whose anchor is missing fails."""
+    out: list[dict[str, Any]] = []
+    rows: dict[str, int] = {}
+    cursor = 0
+    for step in steps:
+        name, pred = step[0], step[1]
+        opts = step[2] if len(step) > 2 else {}
+        start = cursor
+        if opts.get("after") is not None:
+            anchor = rows.get(opts["after"])
+            start = None if anchor is None else anchor + 1
+        eid = None
+        if opts.get("same_execution_as") is not None:
+            k = rows.get(opts["same_execution_as"])
+            eid = trace[k].get("execution_id") if k is not None else None
+            if eid is None:
+                start = None
+        j = None if start is None else next(
+            (k for k in range(start, len(trace)) if pred(trace[k]) and (eid is None or trace[k].get("execution_id") == eid)),
+            None)
         out.append({"step": name, "ok": j is not None, "row": trace[j].get("i") if j is not None else None,
                     "t": trace[j].get("t") if j is not None else None})
         if j is not None:
-            i = j + 1
+            rows[name] = j
+            cursor = max(cursor, j + 1)
+    return out
+
+
+def _int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def envelope_problems(r: dict[str, Any]) -> list[str]:
+    """What is missing or malformed in one trace `result` row's envelope (PLAN 5.3) and its `kind`, as short
+    messages."""
+    out = [f"no {k}" for k in ENVELOPE_KEYS + ("kind",) if k not in r]
+    st = r.get("status")
+    schema_reject = st == "rejected" and "schema" in (r.get("stage"), (r.get("data") or {}).get("stage"))
+    if "execution_id" in r and not (isinstance(r["execution_id"], str) and r["execution_id"]) and not schema_reject:
+        out.append("execution_id empty")
+    if "tool" in r and not (isinstance(r["tool"], str) and r["tool"]):
+        out.append("tool empty")
+    if "status" in r and st not in ENVELOPE_STATUSES:
+        out.append(f"status {st!r}")
+    if "observation_id" in r and not (isinstance(r["observation_id"], str) and r["observation_id"]):
+        out.append("observation_id empty")
+    for k in ("generation", "control_epoch"):
+        if k in r and not (_int(r[k]) and r[k] >= 0):
+            out.append(f"{k} {r[k]!r}")
+    for k in ("t_start", "t_end"):
+        if k in r and not _num(r[k]):
+            out.append(f"{k} {r[k]!r}")
+    if _num(r.get("t_start")) and _num(r.get("t_end")) and r["t_end"] < r["t_start"] - 1e-6:
+        out.append("t_end before t_start")
+    if "late" in r and not isinstance(r["late"], bool):
+        out.append(f"late {r['late']!r}")
+    if r.get("kind") is not None and r.get("kind") not in ROW_KINDS:
+        out.append(f"kind {r.get('kind')!r}")
     return out
 
 
 def contract_checks(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The envelope contract on every result row, and the rows that must exist as results (PLAN 5.3, 5.4)."""
     res = _results(trace)
-    bad_obs = [r.get("execution_id") for r in res if not r.get("observation_id")]
+    by_eid: dict[str, list[dict[str, Any]]] = {}
+    for r in res:
+        if r.get("execution_id"):
+            by_eid.setdefault(str(r["execution_id"]), []).append(r)
+    bad_env = [(r.get("execution_id") or r.get("tool"), p) for r in res if (p := envelope_problems(r))]
     upper = [r.get("execution_id") for r in res if str(r.get("status")) != str(r.get("status")).lower()]
     manip = [r for r in res if r.get("tool") == "manipulate"]
+    # speak, recall and rejections are ToolResults too: each gets a `result` row with a `kind`
+    wanted = [("speak", r.get("execution_id")) for r in trace if r.get("type") == "say_queued"]
+    wanted += [("recall", r.get("execution_id")) for r in trace if r.get("type") == "recall"]
+    wanted += [("rejection", r.get("execution_id")) for r in trace if r.get("type") == "rejected"]
+    missing_rows, no_kind = [], []
+    for what, eid in wanted:
+        rows = by_eid.get(str(eid), []) if eid else []
+        if what == "rejection":
+            rows = [x for x in rows if x.get("status") == "rejected"]
+        else:
+            rows = [x for x in rows if x.get("tool") == what]
+        if not rows:
+            missing_rows.append((what, eid))
+        elif not any(x.get("kind") == KIND_OF[what] for x in rows):
+            no_kind.append((what, eid, [x.get("kind") for x in rows]))
+    late_rows = [r.get("execution_id") for r in trace if r.get("type") == "late_result"]
+    unmarked = [e for e in late_rows if not any(x.get("late") is True for x in by_eid.get(str(e), []))]
     return [
-        {"check": "every result carries an observation_id", "ok": not bad_obs, "detail": bad_obs[:5]},
+        {"check": "every result row carries the full envelope (" + ", ".join(ENVELOPE_KEYS) + ") and a kind",
+         "ok": bool(res) and not bad_env, "detail": {"rows": len(res), "bad": bad_env[:5], "n_bad": len(bad_env)}},
+        {"check": "every result carries an observation_id", "ok": all(r.get("observation_id") for r in res),
+         "detail": [r.get("execution_id") for r in res if not r.get("observation_id")][:5]},
         {"check": "lowercase envelope statuses", "ok": not upper, "detail": upper[:5]},
+        {"check": "speak, recall and rejections are result rows (kind speech / recall / rejection)",
+         "ok": not missing_rows and not no_kind,
+         "detail": {"expected": len(wanted), "missing": missing_rows[:5], "no_kind": no_kind[:5]}},
+        {"check": "late results are marked late on their result row", "ok": not unmarked, "detail": unmarked[:5]},
         {"check": "every manipulate result names its executor and skill",
          "ok": all((r.get("data") or {}).get("skill") and r.get("executor") for r in manip),
          "detail": [(r.get("execution_id"), r.get("executor"), (r.get("data") or {}).get("skill")) for r in manip]},
