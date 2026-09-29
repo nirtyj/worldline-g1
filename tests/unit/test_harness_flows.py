@@ -122,6 +122,10 @@ async def test_stop_halts_first_acks_once_and_resume_bumps_epoch():
     assert rt.task.control_epoch > epoch and robot.resumes and robot.resumes[-1] == rt.task.control_epoch
     nav = next(e for e in rt.history if e.tool_name == "navigate")
     assert nav.status == "failed" and nav.data.get("reason") == "halted"
+    # one epoch space (M2b R.2): the halt fenced the running navigate's control_epoch, and the resume opened a
+    # newer one than the halt's
+    assert robot.halt_epochs[0] is not None and robot.halt_epochs[0] >= nav.control_epoch
+    assert robot.resumes[-1] > max(x for x in robot.halt_epochs if x is not None)
 
 
 @pytest.mark.asyncio

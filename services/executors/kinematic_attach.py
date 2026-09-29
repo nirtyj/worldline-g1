@@ -29,8 +29,10 @@ class ManipJob:
     skill_id: str
     spot: Any = None                     # place: api Pose3D of the object's centre on the target
     target: str | None = None
-    epoch: int = 0                       # the runtime halt epoch at start (HaltGate.epoch)
-    # the fence an executor that leases the body needs (groot_arms: session = execution_id, PLAN §6.6)
+    epoch: int = 0                       # the execution's control_epoch: HaltGate.halted_since(epoch) (one epoch
+                                         # space with the body, M2b R.2)
+    # the body's fence for this execution (SonicBody.fence: the body's numbers for generation / control_epoch;
+    # groot_arms: session = execution_id, PLAN §6.6). The service holds the body lease for execution_id.
     execution_id: str = ""
     generation: int = 0
     control_epoch: int = 0
@@ -46,6 +48,7 @@ class ManipOutcome:
     phase: str | None = None
     detail: str | None = None
     phases: list[dict] = field(default_factory=list)
+    data: dict = field(default_factory=dict)     # the executor's own result data (ManipulationService merges it)
 
 
 class KinematicAttachExecutor:

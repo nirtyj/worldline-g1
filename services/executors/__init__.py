@@ -2,7 +2,7 @@
 
     kinematic_attach   STEPPING STONE: timed phases + SimControl.attach/detach (LiteWorld in process; P1 in M2b)
     lite               the same executor labelled `lite` for the lite profile
-    sonic_arm_script   stub (M3: BodyServer arm_script + attach)
+    sonic_arm_script   STEPPING STONE: the body's B.7 arm_script (SONIC reaches) + a P1 fixed_joint attach (M2b R.1)
     groot_arms         owner groot_rt (services/executors/groot_arms.py `create`), experimental
     groot_sonic        stub (the retired token route)
 

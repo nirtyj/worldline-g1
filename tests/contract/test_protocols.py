@@ -192,7 +192,7 @@ def test_manipulation_executors(lite):
     _, robot, _ = lite
     ex = list(robot.executors.values())
     assert ex, "the lite profile loads the lite executor"
-    for e in ex + [SonicArmScriptExecutor(), GrootSonicExecutor()]:
+    for e in ex + [SonicArmScriptExecutor(robot.world, robot.body), GrootSonicExecutor()]:
         assert problems(e, S.ManipExecutor) == [], type(e).__name__
 
 

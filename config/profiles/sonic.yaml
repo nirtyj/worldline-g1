@@ -1,12 +1,13 @@
-# sonic: every body motion is SONIC's (walking via wl-body go_to/turn_to). The grasp is the STEPPING STONE:
-# sonic_arm_script needs the BodyServer arm_script op (M3); until then kinematic_attach (also STEPPING STONE,
-# needs P1 attach/detach, M2b) is the loaded manipulation backend.
+# sonic: every body motion is SONIC's (walking via wl-body go_to/approach, the waist scan and the scripted arm
+# through the body's arm channel). The grasp is the STEPPING STONE: sonic_arm_script = the body's B.7 arm_script
+# (SONIC reaches) + a P1 attach (fixed_joint); kinematic_attach (also STEPPING STONE, no arm motion) stays behind it
+# for a body without arm_script.
 profile: sonic
 world: isaac
 body: sonic
 perception_camera: head_sim       # P1.4 head camera on 5565 (p1_m2b.md §5.1); an M1 P1 falls back to its d435
                                   # model, labelled (IsaacGTWorldModel.camera_note)
-scan_executor: turn_in_place      # INTERIM; M2b: waist_scan via upper_body_position (body op)
+scan_executor: waist              # B.5 body `scan` op (waist yaw -35/0/+35 deg); a body without it: in-place turns
 manipulation:
   executors: [sonic_arm_script, kinematic_attach]
 nav_executor: sonic_walk

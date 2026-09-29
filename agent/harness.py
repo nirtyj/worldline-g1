@@ -61,7 +61,7 @@ from .procedures import ProceduralGraph, step_of
 from .recall import Recaller
 from .skills import SpeechItem, SpeechQueue, navigate_timeout, run_execution
 from .state import ARMS, ActionHandle, BeliefState, TaskState
-from .validate import Stage, ValidationContext, Verdict, surface_here, validate
+from .validate import Stage, ValidationContext, Verdict, surface_here, tell_user_blocked, validate
 
 BODY = BODY_TOOLS                         # ("navigate", "manipulate"): the one body resource
 SENSE = ("check_reachability",)
@@ -182,6 +182,8 @@ class Runtime:
         self._results: list[ToolResult] = []        # the latest envelopes, for BrainInput.tool_results
         self._tool_state = ToolState.IDLE
         self._body_mode: str | None = None
+        self._halt_takes_epoch: bool | None = None
+        self._body_recover: asyncio.Task | None = None
         self._emergency_ids = iter(range(1, 1 << 30))
         self._directives_by_utterance: dict[str, Directive] = {}
         self.noticed: list[dict[str, Any]] = []             # what System 1 noticed this session
@@ -322,6 +324,13 @@ class Runtime:
                 self._stop_now_id(f"safety-{what}", reason=f"safety:{what}",
                                   ack=("I've lost my balance; I'm stopping until I'm steady." if what == "fell"
                                        else "I've had to stop: my controller needs a restart."))
+            elif what == "runtime_lost" and not self.task.paused:
+                # the body halted itself (session watchdog); its running executions end failed(halted)
+                for h in list(self.actions.values()):
+                    if h.resources & {"body"} and not h.done and not h.cancel_requested:
+                        h.cancel("halted")
+                if self._body_recover is None or self._body_recover.done():
+                    self._body_recover = self._spawn(self._recover_body_halt(ev.get("body_epoch")))
             self._wake(f"safety {what}")
         elif kind == "capability_changed":
             self.tracer.log("capability_changed", **fields)
@@ -336,6 +345,8 @@ class Runtime:
                 self.state.record("body_mode", now, priority=3, **fields)
         elif kind == "stale_result":
             self.tracer.log("stale_result", **fields)
+        elif kind in ("body_fault", "body_event", "halted", "resumed", "manip.fallback"):
+            self.tracer.log(kind, **fields)                 # pushed by the body (B.3) / the robot: trace only
 
     # ------------------------------------------------------------------
     # The persona: the robot's own goals, only when nobody needs anything
@@ -682,10 +693,22 @@ class Runtime:
     def _stop_now(self, utt: Any, reason: str) -> None:
         self._stop_now_id(utt.id, reason)
 
+    def _robot_halt(self) -> Any:
+        """robot.halt at the current control_epoch (one epoch space with the body, M2b R.2): the halt fences every
+        execution of this epoch or older. A robot whose halt() takes no epoch picks its own."""
+        fn = self.robot.halt
+        if self._halt_takes_epoch is None:
+            try:
+                import inspect
+                self._halt_takes_epoch = "control_epoch" in inspect.signature(fn).parameters
+            except (TypeError, ValueError):
+                self._halt_takes_epoch = False
+        return fn(control_epoch=self.task.control_epoch) if self._halt_takes_epoch else fn()
+
     def _stop_now_id(self, event_id: str, reason: str, ack: str | None = None) -> None:
         # Priority zero: the actuator command is deliberately the first side
         # effect.  Logging, speech, reconciliation, and models come afterward.
-        receipt = self.robot.halt()
+        receipt = self._robot_halt()
         if self.task.paused:
             # Already stopped (e.g. the partial transcript stopped us and now the
             # final "stop" arrives): halting again is free, a second ack is not.
@@ -1254,9 +1277,12 @@ class Runtime:
     def _release_runtime_halt(self, e: Execution) -> None:
         """run_execution halted the body because `e` ignored its cancel (agent/skills.py). That halt is the runtime's
         own, not the user's stop: once `e` has ended, clear the latch, or every later body command fails `halted`
-        (docs/bringup.md §7 item 1: 11-13 navigates in a row). A user stop keeps it (task.paused)."""
+        (docs/bringup.md §7 item 1: 11-13 navigates in a row). A user stop keeps it (task.paused).
+        One epoch space (M2b R.2): the halt fenced this control_epoch at the body, so the epoch moves on first
+        (decisions made for the old one are dropped, like after a resume)."""
         if self.task.paused:
             return
+        self.task.control_epoch += 1
         fn = getattr(self.robot, "resume", None)
         if callable(fn):
             try:
@@ -1266,6 +1292,29 @@ class Runtime:
                 return
         self.tracer.log("runtime_halt_released", execution_id=e.execution_id, tool=e.tool_name,
                         epoch=self.task.control_epoch)
+
+    async def _recover_body_halt(self, epoch: Any) -> None:
+        """The body held the robot on its own (its runtime-session watchdog: this runtime's heartbeat lapsed, e.g. a
+        stalled event loop). The runtime is alive, so once the body executions that halt ended have finished, the
+        epoch moves on and the robot resumes above it, unless the user said stop meanwhile."""
+        t_end = self.clock.now() + 10.0
+        while self.clock.now() < t_end and any("body" in h.resources for h in self.actions.values()):
+            await self.clock.sleep(0.1)
+        if self.task.paused:
+            return
+        self.task.control_epoch += 1
+        fn = getattr(self.robot, "resume", None)
+        try:
+            if callable(fn):
+                fn(self.task.control_epoch)
+        except Exception as ex:                          # never let a resume crash the runtime
+            self.tracer.log("resume_error", error=repr(ex))
+            return
+        self.tracer.log("runtime_halt_released", source="body_watchdog", body_epoch=epoch,
+                        epoch=self.task.control_epoch)
+        self._note = ("the body held the robot for a moment (the runtime's heartbeat lapsed); it has resumed: check "
+                      "where things are and carry on")
+        self._wake("body resumed")
 
     def _finish(self, h: ActionHandle, e: Execution, res: ToolResult) -> None:
         now = self.clock.now()
@@ -1284,6 +1333,10 @@ class Runtime:
         if tool == "navigate":
             self.belief.apply_navigate(res.status, d, now)
             self._last_motion_t = now
+            if d.get("reason") == "blocked" and not late:
+                told = tell_user_blocked(self._vctx())
+                if told:
+                    self._note = told[0].upper() + told[1:]      # G6: say it before the next route
         elif tool in ("observe", "look") and res.ok:
             self.belief.apply_observation(d, now, self._surface_xy, self._surface_h)
         elif tool == "manipulate":

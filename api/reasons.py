@@ -33,6 +33,7 @@ NAVIGATION = _r("navigation", {
     "stuck": "the robot got stuck; it will replan once",
     "timeout": "the walk took too long",
     "body_busy": "another body action is running; wait for it",
+    "stale_result": "a newer stop or correction fenced this command; it did not run",
     "nav_unhealthy": "navigation is unavailable right now",
     "sim_slow": "the simulator is below real time; walking is capped",
     "no_reach_stance": "call check_reachability first; reach_stance needs one that asked for it",
@@ -70,21 +71,27 @@ MANIPULATION = _r("manipulation", {
     "policy_out_of_bounds": "the policy produced unsafe actions and was stopped",
     "policy_unavailable": "the manipulation policy is down; tell the user",
     "controller_unavailable": "the whole-body controller is not running",
+    "body_busy": "another body action is running; wait for it",
+    "stale_result": "a newer stop or correction fenced this command; it did not run",
     "timeout": "the skill took too long",
     "base_moving": "the robot moved since the reachability check; check again",
     "nothing_in_hand": "the robot holds nothing to place",
+    "ik_unreachable": "the arm can't reach the grasp point from exactly here; check reachability again",
 })
 
 OBSERVATION = _r("observation", {
     "timeout": "the look took too long; move on, or look again later",
     "halted": "the robot was stopped",
     "cancelled": "the look was cancelled",
+    "body_busy": "another body action is running; wait for it",
+    "stale_result": "a newer stop or correction fenced this command; it did not run",
 })
 
 GENERAL = _r("general", {
     "cancelled": "it was cancelled",
     "cancelled before start": "it was cancelled before it started",
     "superseded": "a newer request replaced it",
+    "stale_result": "a newer stop or correction fenced this command; it did not run",
     "internal_error": "something went wrong inside the robot; try again or tell the user",
     "shutdown": "the robot is shutting down",
 })
@@ -113,6 +120,7 @@ VALIDATION = _r("validation", {
     "paused": "the user said stop; wait until they say to continue",
     "body_busy": "wait for the running body action to finish",
     "location_failed_twice": "tell the user instead",
+    "tell_user_blocked": "tell the user the way is blocked (speak), then try another route or wait",
     "between_keypoints": "navigate to a keypoint first",
     "no_reach_stance": "call check_reachability first",
     "just_placed": "say it's done or wait",

@@ -161,6 +161,27 @@ def test_same_location_failed_twice():
     assert w.check("navigate", location="kitchen").ok
 
 
+def test_blocked_twice_on_any_route_tell_the_user_first():
+    """G6: after two `blocked` walks in this request the planner must tell the user before another route; once
+    told, one more try is allowed, and the next blocked walk asks again."""
+    w = World(at="start")
+    for loc in ("kitchen", "living_room"):
+        e = w.run("navigate", status="failed", location=loc)
+        e.data = {"reason": "blocked", "blocked_edge": ["start", loc]}
+    expect(w.check("navigate", location="bedroom_dresser_1a"), Stage.STATE, "tell_user_blocked", "tell the user")
+    v = w.check("navigate", location="bedroom_dresser_1a")
+    assert "start-kitchen" in v.message and "start-living_room" in v.message
+    assert w.check("speak", text="The way is blocked; I'll try the hallway.").ok       # speaking is allowed
+    sp = w.run("speak", text="The way is blocked; I'll try the hallway.")
+    sp.source = "brain"
+    assert w.check("navigate", location="bedroom_dresser_1a").ok                      # told: one more try
+    e = w.run("navigate", status="failed", location="bedroom_dresser_1a")
+    e.data = {"reason": "blocked", "blocked_edge": ["start", "bedroom_dresser_1a"]}
+    expect(w.check("navigate", location="kitchen_counter_1b"), Stage.STATE, "tell_user_blocked")
+    w.task.intent_version += 1                                                       # a new request: allowed
+    assert w.check("navigate", location="kitchen_counter_1b").ok
+
+
 def test_reachability_between_keypoints():
     w = World()
     w.belief.set_pose(None, ["start", "kitchen"], "odometry", 90.0)

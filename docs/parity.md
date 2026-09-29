@@ -1,6 +1,6 @@
 # Parity: where this stack differs from the Ludi robot API doc, and what every shortcut is labelled
 
-Status: M2b wave 1 (2026-09-29, owner world). Sources: PLAN.md §5.11 (deviations D1-D8), §12.2 (honesty labels),
+Status: M2b wave 2 (2026-09-29, owner robot; wave 1: world). Sources: PLAN.md §5.11 (deviations D1-D8), §12.2 (honesty labels),
 §0.7-§0.8 (owner decisions), docs/M2.md, docs/contracts/p1_m2b.md. The tests named in the last column enforce each
 row; "doc §N" is the Ludi robot API reference.
 
@@ -27,7 +27,7 @@ row; "doc §N" is the Ludi robot API reference.
 | D2 | §33: same tool interface **and system prompt** in sim and real | Same schemas and template; only the numeric slots differ per profile | The bodies really differ in speed; "how long" answers should be true | `test_parity` |
 | D3 | §2/§31: six tools | Six tools plus `recall` [WL] | Worldline's memory layer | `api/tools.py` |
 | D4 | §8/§10: type-only arguments | `object_id` [WL], optional, a plain string checked against belief (no enum) | Instance ids for belief, the goal check and the eval | `agent/validate.py` ENUM stage |
-| D5 | §9: "navigate / reposition" (unspecified) | `navigate(location="reach_stance")` [WL] | A doc-consistent reposition without a seventh tool | INTERIM executor: a tight-tolerance `go_to` until the body's `approach` op (B.6) |
+| D5 | §9: "navigate / reposition" (unspecified) | `navigate(location="reach_stance")` [WL] | A doc-consistent reposition without a seventh tool | The body's `approach` op (B.6: a strafing reposition on ground truth, 5 cm / 5 deg); a body without it (M1, lite) gets the INTERIM tight-tolerance `go_to`, labelled |
 | D6 | §45: ego + panorama cameras | A sim-added wide `head` camera (System 1, scans) plus GR00T's `ego_view` (OD1: Arena's G1 head camera exactly, rendered only while enabled). No panorama yet (M7) | PLAN §1.3 #7; OD1 | The head camera is labelled `camera: head (sim-added)` (§3). An M1 P1 has no head camera: the world then models the d435 camera it does render and says so (`IsaacGTWorldModel.camera_note`) |
 | D7 | §46: `WAITING` exits unspecified; no `OBSERVING`/`STOPPED`/`FAULT` states | States added (`api/state_machine.py`) | Doc gap | `tests/unit/test_state_machine.py` |
 | D8 | §21: harness validation | Also the Worldline rules C4-C13 and the deferrals D9/D10 (`agent/validate.py`) | Kept Worldline behaviour | `tests/unit/test_validate.py` |
@@ -38,14 +38,14 @@ row; "doc §N" is the Ludi robot API reference.
 |---|---|---|---|
 | Kinematic base motion (the `lite` body) | `executor: lite`, STEPPING STONE | Result, ACTIONS `[fallback]`, page badge, eval `executors_used` | Fallback pass (`PASS*`) |
 | Kinematic attach grasp | `skill: bringup.attach.*` / `lite.*`, `executor: kinematic_attach` / `lite`, `stepping_stone: true`; P1's attach reply carries `stepping_stone: true` too | same | Fallback pass |
-| SONIC arm script + GT attach | `skill: sonic.script.*`, `executor: sonic_arm_script` | same | Fallback pass (walking is real SONIC) |
+| SONIC arm script + GT attach | `skill: sonic.script.*` (label `stepping_stone`), `executor: sonic_arm_script`, `data.grasp: "P1 attach fixed_joint (STEPPING STONE: ...)"`; the arm really moves under SONIC (B.7), the object is held by the attach, gated on the palm being at the object (GT) | same | Fallback pass (walking and the arm are real SONIC) |
 | Off-the-shelf GR00T checkpoint | `executor: groot_arms`, skill label `experimental`, checkpoint name in the registry | Result, skill registry, page GR00T strip, eval | Target executor; success reported as it happens (not expected zero-shot, PLAN §0.8) |
 | **Ground truth as perception** | `source: isaac-gt` / `lite-gt` on every observation, perception row and result; `method: gt-geometric` (frustum + AABB occlusion) or `instance_id_segmentation_fast` (P1.6) on every detection and observation | Results, observations (`extra.method`), the page's truth panel, this document | Allowed at this stage (PLAN §13). Inside the runtime every GT read lives in `world/` (GT confinement, below) |
 | Sim-added head camera | `camera: head (sim-added)`: `lookup_keypoints()["camera"]["caption"]` when the model is `sim_added` | Page camera caption, this document | — |
-| Reposition without `approach` | `navigate(reach_stance)` result says INTERIM (a `go_to` with a 0.10 m tolerance) | Result | — |
-| Scan without the waist | `scan_executor: turn_in_place`, `scan_note: INTERIM` on every scan observation | Observation extras, page | — |
-| Halt without the latch lane | receipt `via: "body stop op (M1 body has no halt lane)"`; an unacked halt is re-sent every 100 ms (`robot/health.py`) | Halt receipt, trace (`halt_acked`, `safety_event halt_unacked`) | — |
-| A fall | P1 `robot_fell` becomes `safety_event{kind: fell, source: sim}` (the harness stops); PLAN's `sim_recovery{path}` event is the body's (B.3), not emitted yet | Trace, page, eval row | Counts toward the limit |
+| Reposition without `approach` (M1 body, lite) | `navigate(reach_stance)` result says `interim` (a `go_to` with a 0.10 m tolerance); with the op: `reposition_op: approach`, no label | Result | — |
+| Scan without the waist (M1 body, lite, a profile on `turn_in_place`) | `scan_executor: turn_in_place`, `scan_note: INTERIM ...` on every scan observation; the waist scan says `scan_executor: waist` (yaw only: one row, SONIC turns the shoulders too) and, while carrying, `scan_fallback: glance` with the reason | Observation extras, page | — |
+| Halt without the latch lane (M1 body) | receipt `via: "body stop op (INTERIM: this body has no halt lane)"`; with the lane `via: "B.1 halt lane ..."`; an unacked halt is re-sent every 100 ms (`robot/health.py`) | Halt receipt, trace (`halt_acked`, `safety_event halt_unacked`) | — |
+| A fall | P1 `robot_fell` becomes `safety_event{kind: fell, source: sim}`, the body's `body.fault{fell}` `safety_event{kind: fell, source: body}` (the harness stops); the body's soft recovery is labelled `sim_recovery` (contract §3.12) and not driven by the runtime yet | Trace, page, eval row | Counts toward the limit |
 | Scene fixtures moving objects | `fixtures_ok` row; P1 `move_object` / `push_object` are test-only and counted in `object_writes` | eval JSON | — |
 | Elastic band | `band` state | Page body panel | Never engaged during scored motion |
 | `follow` attach (object kinematic while held) | `attach_mode: follow` in `grasp_state` and results | Page hand badge, eval JSON | Part of the STEPPING STONE grasp |

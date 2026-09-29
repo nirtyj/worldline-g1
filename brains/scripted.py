@@ -36,6 +36,7 @@ class PolicyBrain:
         self.searched: list[str] = []
         self.tried: list[str] = []
         self.failures = 0
+        self.counted: set[Any] = set()
         self.absent: set[str] = set()
 
     async def classify(self, utt: Any, ctx: Any) -> str:
@@ -71,6 +72,10 @@ class PolicyBrain:
         if not self.acked:
             self.acked = True
             return self._call("speak", text="On it.")
+        if any(getattr(e, "tool", None) in ("navigate", "manipulate") for e in (getattr(ctx, "active", None) or [])):
+            # a body action is running (the harness asked for another reason, e.g. its arrival scan's result):
+            # wait for it instead of spending the search list on body_busy rejections (live F1, main box)
+            return self._call("wait_and_observe", timeout_s=0)
         hands = b["hands"]
         mine = [oid for oid, o in b["objects"].items() if o["type"] == want]
         if any(h["holding"] == "UNKNOWN" or not h["verified"] for h in hands.values()):
@@ -85,8 +90,10 @@ class PolicyBrain:
         held = next((oid for oid in mine if str(b["objects"][oid]["where"]).startswith("hand:")), None)
         at = b["robot"]["at"]
         last_manip = next((e for e in reversed(ctx.history) if e.tool == "manipulate" and e.status != "rejected"), None)
-        if last_manip is not None and last_manip.status in ("failed", "timed_out"):
-            self.failures += 1
+        if last_manip is not None and last_manip.status in ("failed", "timed_out") and \
+                getattr(last_manip, "execution_id", None) not in self.counted:
+            self.counted.add(getattr(last_manip, "execution_id", None))   # each failed manipulate counts once, however
+            self.failures += 1                                            # often the planner is asked after it
             if self.failures >= 2:
                 self.want = None                              # rule 7: tell the user, don't loop
                 return self._call("speak", text=f"The {last_manip.action} didn't work ({last_manip.data.get('reason')}).")
@@ -124,8 +131,15 @@ class PolicyBrain:
         return self._search(ctx) or self._give_up(want)
 
     def _search(self, ctx: Any) -> ToolCall | None:
-        """Surfaces not looked at yet (this session), in map order."""
+        """Surfaces not looked at yet (this session), in map order. A surface whose navigate was rejected (the
+        body was busy, a validation rule) was not searched: it stays on the list."""
         b, m = ctx.belief, ctx.map
+        last_nav: dict[str, str] = {}
+        for e in getattr(ctx, "history", None) or []:
+            if getattr(e, "tool", None) == "navigate":
+                last_nav[str((e.args or {}).get("location"))] = str(e.status)
+        self.searched = [x for x in self.searched
+                         if last_nav.get((m["surfaces"].get(x) or {}).get("keypoints", [x])[0]) != "rejected"]
         for s, info in m["surfaces"].items():
             looked = b["looked"].get(s) or b["looked"].get(info["keypoints"][0])
             fresh = looked is not None and looked.get("source") != "memory"

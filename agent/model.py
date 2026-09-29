@@ -112,6 +112,7 @@ stands; only speak, list_locations or recall may come in between.
 fit, like two mugs for "my mug"). Identical items: take either.
 - Object not where expected: search the other likely spots (FINDING THINGS); tell the user only if it isn't found.
 - Out of reach: if check_reachability suggests another location, try it once; then tell the user.
+- Blocked: if navigate fails "blocked" twice, tell the user the way is blocked before trying another route.
 - A reason too_low or too_high means the robot can't reach that height: tell the user.
 - When a result says [fallback], it still counts; don't mention it to the user.
 - Never say something is done before BELIEF shows it.

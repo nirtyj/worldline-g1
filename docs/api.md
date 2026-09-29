@@ -1,6 +1,6 @@
-# The robot API as built (M2b wave 1)
+# The robot API as built (M2b wave 2)
 
-Status: 2026-09-29, owner world. The contract lives in `api/` (stdlib only, importable from py3.11 and py3.12); this
+Status: 2026-09-29, owner robot (wave 2; wave 1: world). The contract lives in `api/` (stdlib only, importable from py3.11 and py3.12); this
 page says what each part is for and where it is implemented. PLAN.md §5-§6 is the design; docs/parity.md lists the
 deviations from the Ludi doc and the honesty labels; docs/contracts/ has the process wires (P1, P3, the arm chunk).
 
@@ -89,17 +89,52 @@ Thresholds and hold times are `config/g1.yaml sim_health`. The `object_type` enu
 | `safety_event {kind: halt_unacked}` | HaltResender gave up (10 s) | logged |
 | `halt_acked {epoch, attempts, latency_ms}` | HaltResender: a late ack | logged by the EventLog |
 | `object_fell {id, drop_m, on_floor, ...}`, `sim_event {event, ...}` | other P1 `gt.event`s | EventLog only |
-| `body_mode`, `stale_result` | the body (B.3) | logged |
+| `body_mode {mode, prev, prev_s, fault, latched, arm_mode, source: body}` | the body's `body.mode` topic (B.3), pushed: `SonicBody.attach_events` hands every `body.*` topic to `G1Robot._on_body_topic` on the runtime's loop (no polling) | logged; the tool state reads FAULT/ESTOP from it |
+| `safety_event {kind: fell \| deploy_lost, source: body}` | `body.fault` (a fell within 3 s of P1's `robot_fell` is not repeated) | stop, safety ack |
+| `safety_event {kind: runtime_lost, recoverable, body_epoch}` | `body.halted {source: watchdog}`: the body's runtime-session watchdog halted the robot (this runtime's heartbeat lapsed). The gate latches at that epoch, so running body executions end `failed(halted)` | the harness cancels the body actions, then resumes above the epoch (`_recover_body_halt`) unless the user said stop |
+| `stale_result {execution_id, op, why}` | `body.stale_command` (a fence refused a command), and the services when a refusal is a stale fence | logged |
+| `body_fault {kind: policy_lost \| ..., cleared?}`, `body_event {topic: halted \| resumed \| lease \| session, ...}` | the other `body.*` topics | trace only |
 
-## 5. Halt, cancel, estop (PLAN §5.6)
+## 5. Halt, cancel, estop (PLAN §5.6); one epoch space; fences, leases, sessions (M2b R.2)
 
-`RobotBridge.halt()` bumps the halt epoch, latches, and returns within 30 ms:
-`{accepted, stopped, at_rest, mode: "HOLD", body_epoch, source, latency_ms, resend}`. `stopped` is true only if the
-body acknowledged within the budget (`SonicBody`: a `stop` op, planner IDLE, never `command{stop}`; the M1 body has
-no halt lane). `at_rest` is judged on `WorldModel.planar_speed()` (< 0.05 m/s). When `stopped` is false,
-`HaltResender` re-sends the halt every 100 ms (`BodyPort.send_halt(epoch, wait_s)`) until the body acks it,
-`resume()` cancels it, or 10 s pass. Running body executions end `failed(halted)`. `estop()` is the operator kill
-button only (band on in sim, then `shutdown_control`; the deploy exits).
+`RobotBridge.halt(control_epoch=None)` latches and returns within 30 ms:
+`{accepted, stopped, at_rest, mode: "HOLD", epoch, body_epoch, source, via, rtt_ms, body_kind, latency_ms, resend}`.
+On the M2b body (`body.state.fences` present) `SonicBody.halt` is the **B.1 halt lane**: PUSH `{op: halt, epoch}` on
+5612, then wait for `body.halted{epoch}` on 5611 (`BodyClient.halt`); `stopped` = the body latched it in time
+(`body_kind: new | repeat`; a `stale` answer is re-sent above the body's last resume). Never `command{stop}`. An M1
+body gets the old `stop` request, labelled `via: "body stop op (INTERIM: this body has no halt lane)"`. `at_rest`
+is judged on `WorldModel.planar_speed()` (< 0.05 m/s). When `stopped` is false, `HaltResender` re-sends the halt
+every 100 ms (`BodyPort.send_halt(epoch, wait_s)`) until the body acks it, `resume()` cancels it, or 10 s pass.
+Running body executions end `failed(halted)`. `estop()` is the operator kill button only (band on in sim, then
+`shutdown_control`; the deploy exits).
+
+**One epoch space.** The halt fences the executions' own `control_epoch`: the harness passes its current one
+(`Runtime._robot_halt`), `run_execution`'s escalation passes none (the robot uses the newest control_epoch it has
+seen). `HaltGate` (services/common.py) has no counter of its own: `halt(epoch)` latches at it, `halted_since(ce)` is
+`latched and ce <= epoch`, and `ManipJob.epoch` is the execution's control_epoch. `resume(control_epoch)` names the
+epoch the next executions carry; the harness bumps it before every resume (a user resume, the release of a
+runtime-internal halt, the recovery after a body watchdog halt). On the wire `SonicBody` adds one constant per
+runtime session (`epoch_base`, `gen_base`: above every epoch and generation the body reported at `hello`), so a
+restarted runtime is never stale; `resume` sends the body its own halt epoch and moves the constant up if the next
+epoch would not be above it.
+
+**Fences and leases.** `SonicBody.fence(execution)` = `{execution_id, generation, control_epoch, session}` (body
+numbers); every body op carries it. Each body execution leases the body (`acquire`/`release`, contract §3.11):
+navigate `LOCOMOTION`, a waist scan `ARM_SCRIPT`, a pick/place `ARM_STREAM` (groot_arms), `ARM_SCRIPT`
+(sonic_arm_script) or `MANIP` (kinematic_attach) across every attempt; the lease is released at the end, and a
+lease this runtime still holds for a finished execution is released by the next acquire. Refusals keep their meaning
+(`services.common.refusal`, keyed on `data.why` for `stale_command`): `halted` -> `failed(halted)`, a stale fence
+(`why` control_epoch | generation | resume_epoch) -> `failed(stale_result)` + a `stale_result` event, `body_busy`
+-> `failed(body_busy)`. A `stale_command` without a fence `why` (a t_wall-stale stream message) is not a stale
+result.
+
+**Runtime session.** `SonicBody` sends `hello{session, watchdog_s: 1.0}` at connect and pings every 0.25 s from
+its own thread (`BodyClient.hello`), `bye` on close: a dead runtime makes the body hold the robot while it moves
+(internal halt, reason `runtime_lost`). A latch left by an earlier runtime is resumed at `hello`.
+
+**Resume and the arms.** `G1Robot.resume` also gives the halt latch's arm pose back to SONIC's own arms
+(`arm {release}`) when no hand holds anything; with something in a hand the latched pose stays until the next
+arm session (the place) takes it over.
 
 ## 6. WorldModel additions (M2b)
 
@@ -125,14 +160,18 @@ A profile lists executor names (`config/profiles/<p>.yaml manipulation.executors
 each into a `ManipExecutor` (`backend`, `name`, `async run(job, handle) -> ManipOutcome`, `async cancel()`,
 `health()`, optional `close()`). `ExecutorContext` carries `name, world, body, clock, gate, events, profile,
 manip_cfg, port_offset, extras`. `ManipJob` carries the fence an executor that leases the body needs:
-`execution_id, generation, control_epoch, epoch` (the halt epoch), `skill`, `object_type`, and for a place the
-`spot` and `target`.
+`execution_id, generation, control_epoch` (the body's fence numbers, `SonicBody.fence`), `epoch` (the execution's
+control_epoch, which `HaltGate.halted_since` compares), `skill`, `object_type`, and for a place the `spot` and
+`target`. `ManipOutcome.data` is the executor's own result data: `ManipulationService` merges its typed fields
+(`inferences`, `chunks_dropped`, `attempts`) into `ManipulationResult` and the rest flat into `result.data`; after a
+`groot_then_script` fallback the flat keys are the fallback's own, the GR00T attempt's sit under `data.groot`, and
+`data.attempts` lists both.
 
 | Name | Backend | Factory |
 |---|---|---|
 | `lite` | `lite` | KinematicAttachExecutor (in-process attach) |
 | `kinematic_attach` | `kinematic_attach` | KinematicAttachExecutor (P1 attach/detach; STEPPING STONE) |
-| `sonic_arm_script` | `sonic_arm_script` | stub until the body's arm script (B.7) |
+| `sonic_arm_script` | `sonic_arm_script` | `SonicArmScriptExecutor` (R.1, STEPPING STONE): the body's B.7 `arm_script` phases (pick: pregrasp, grasp, a GT gate on the palm, a P1 `fixed_joint` attach, lift, carry into CarryLock; place: lower, P1 detach at the free spot, release, retract) |
 | `groot_arms` | `groot` | `services.executors.groot_arms:create` (owner groot_rt; experimental) |
 | `groot_sonic` | `groot` | the retired token route, always down |
 
@@ -152,4 +191,6 @@ WL_BOX=1 WL_PORT_OFFSET=0 .venv-rt/bin/python -m pytest -m box tests/contract -k
 ```
 
 It moves the real robot (navigate to a surface, a scan, a halt within 30 ms, a cancel): run it on a standing stack
-under the dev-box stack lock.
+under the box's stack lock, with P5 stopped (two runtimes on one body share its epoch space).
+`tests/contract/test_box_runtime.py` adds the R.2 exit: 20 runtime halts mid-walk (`$WL_BOX_OUT/halts.json`), the
+waist scan, the approach reposition, a stale fence and the pushed body events.

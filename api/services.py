@@ -79,9 +79,11 @@ class RobotBridge(Protocol):
 
     # ---- execution ----
     def start(self, execution: Execution) -> ExecutionHandle: ...   # may raise Rejected("capability", ...)
-    def halt(self) -> dict[str, Any]: ...
-    # {accepted, stopped (acked within 30 ms), at_rest, mode: "HOLD", body_epoch, source}
-    def resume(self, control_epoch: int) -> None: ...          # clears the body's halt latch
+    def halt(self, control_epoch: int | None = None) -> dict[str, Any]: ...
+    # {accepted, stopped (acked within 30 ms), at_rest, mode: "HOLD", body_epoch, epoch, source}. `control_epoch`:
+    # the epoch the halt fences (the harness's current one); None: the newest the robot has seen.
+    def resume(self, control_epoch: int) -> None: ...          # clears the body's halt latch; the next executions
+    # carry `control_epoch` (above the halt's)
     def estop(self, reason: str) -> dict[str, Any]: ...        # operator kill button only
     def active_executions(self) -> list[Execution]: ...
     async def shutdown(self) -> None: ...
@@ -94,8 +96,9 @@ class RobotBridge(Protocol):
     # manipulate: skill.max_duration_s + 10; others: a service default
     def observation_id(self) -> str: ...                       # the latest glance record, "obs-g<rev>"
     def events(self) -> "asyncio.Queue[dict[str, Any]]": ...   # a new subscriber queue of robot events:
-    # {"type": "safety_event", "kind": "fell"|"deploy_lost"|..., ...}, {"type": "capability_changed", ...},
-    # {"type": "body_mode", "mode": ...}, {"type": "stale_result", "execution_id": ...}
+    # {"type": "safety_event", "kind": "fell"|"deploy_lost"|"runtime_lost"|..., ...}, {"type": "capability_changed",
+    # ...}, {"type": "body_mode", "mode": ...}, {"type": "stale_result", "execution_id": ...}, {"type": "body_fault"
+    # | "body_event", ...} (pushed by the body, docs/contracts/m1.md §3.10-§3.12)
 
 
 # ----------------------------------------------------------------------
@@ -182,13 +185,20 @@ class BodyPort(Protocol):
 
     async def go_to(self, x: float, y: float, yaw: float | None = None, *, speed: float | None = None,
                     timeout_s: float | None = None, final_pos_tol: float | None = None,
-                    final_yaw_tol_deg: float | None = None) -> BodyOpHandle: ...
-    async def turn_to(self, yaw: float, *, tol_deg: float | None = None) -> BodyOpHandle: ...
+                    final_yaw_tol_deg: float | None = None, fence: dict[str, Any] | None = None) -> BodyOpHandle: ...
+    async def turn_to(self, yaw: float, *, tol_deg: float | None = None,
+                      fence: dict[str, Any] | None = None) -> BodyOpHandle: ...
     async def stop(self) -> BodyOpHandle: ...
     def halt(self, epoch: int | None = None) -> dict[str, Any]: ...
+    # `epoch` is the runtime control_epoch the halt fences (one epoch space with the body, M2b R.2).
     # optional: send_halt(epoch, wait_s) -> bool (acked). robot/health.py re-sends an unacked halt with it every
     # 100 ms (PLAN 5.6); a body without it acks synchronously (lite).
-    def resume(self, epoch: int | None = None) -> None: ...
+    def resume(self, epoch: int | None = None) -> Any: ...
+    # optional M2b surface (robot/body_client.SonicBody; services use it when present, docs/contracts/m1.md
+    # §3.9-§3.13): fence(execution) -> {execution_id, generation, control_epoch, session}; async acquire(execution,
+    # mode) / release(execution_id) (leases); supports(op); async approach(x, y, yaw, *, v, tol, timeout_s, fence);
+    # async scan(yaw_deg, *, move_s, hold_s, fence); async arm_script(phase, arm, *, target_w, fence, ...);
+    # arm_end(stream, hold_on_end, fence); arm_state(); attach_events(fn, loop); runtime_epoch(wire)
     def estop(self, reason: str) -> dict[str, Any]: ...
     def state(self) -> dict[str, Any]: ...        # {mode, active, halt_epoch, latched, in_control, fault, deploy}
     # (no simulator truth: RTF is WorldModel.sim_health, speed is WorldModel.planar_speed; GT confinement)

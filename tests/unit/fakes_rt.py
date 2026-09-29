@@ -129,6 +129,7 @@ class FakeRobot:
         self.speech_s_per_word = speech_s_per_word
         self.halt_epoch = 0
         self.halts: list[float] = []
+        self.halt_epochs: list[int | None] = []
         self.resumes: list[int] = []
         self.estops: list[str] = []
         self.started: list[Execution] = []
@@ -227,12 +228,13 @@ class FakeRobot:
                 task.cancel()
 
     # ---------------- control ----------------
-    def halt(self) -> dict[str, Any]:
-        self.halt_epoch += 1
+    def halt(self, control_epoch: int | None = None) -> dict[str, Any]:
+        self.halt_epoch += 1                        # the fake's own counter: running motions see it change
         self.halts.append(self.clock.now())
+        self.halt_epochs.append(control_epoch)      # the control_epoch the harness fenced (one epoch space)
         self.moving = False
         return {"accepted": True, "stopped": True, "at_rest": True, "mode": "HOLD", "body_epoch": self.halt_epoch,
-                "source": "lite"}
+                "epoch": control_epoch, "source": "lite"}
 
     def resume(self, control_epoch: int) -> None:
         self.resumes.append(control_epoch)

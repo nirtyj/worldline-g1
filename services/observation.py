@@ -4,11 +4,16 @@
                       motion, no render); stamped on every ToolResult (doc §42/§51). rev bumps when what is seen
                       changes.
     observe(glance)   the current view only; LookData with views=[] (never marks anything absent).
-    observe(scan)     INTERIM executor `turn_in_place` (M2a): in-place body turn_to steps to yaw0-35, yaw0,
-                      yaw0+35 deg (then back), a settle, and a GT snapshot at each; one row (the camera's own
-                      pitch). The PLAN's executor is a two-row WAIST scan through SONIC's upper_body_position with
-                      the base still (needs a body op, M2b). Executor `virtual` (lite/tests only) computes the same
-                      views without moving. The scan executor is named in every result (`scan_executor`).
+    observe(scan)     executor `waist` (M2b B.5, the target): the body's `scan` op turns the waist YAW to -35, 0,
+                      +35 deg with the base still (one row: SONIC does not move the waist pitch under the override,
+                      so the PLAN's second row is not possible; docs/arm_tracking.md §8.5), and the live view is
+                      sampled in the middle of each hold (the head camera rides on the torso). The scan leases the
+                      body (ARM_SCRIPT) and carries the execution's fence. While carrying (CarryLock, or anything
+                      in a hand) it is a glance instead: SONIC turns the shoulders with the waist and moves the
+                      palms 6-10 cm. Executor `turn_in_place` (the M2a INTERIM, also the fallback for a body without
+                      the op): in-place body turn_to steps to yaw0-35, yaw0, yaw0+35 deg (then back), a settle and a
+                      snapshot at each. Executor `virtual` (lite/tests only) computes the same views without moving.
+                      The scan executor is named in every result (`scan_executor`).
     wait_and_observe  PLAN §5.1: observe first (scan only if no body lease is held, the robot is at a keypoint
                       and the last scan there is older than 5 s; else a glance); `changed` if the look differs
                       from the previous one there; timeout 0 -> `unchanged`; else wait for a wake (event) or a
@@ -22,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -30,17 +36,23 @@ from api.observation import LookData, RobotObservation, ViewSpec, glance_id
 from api.results import WaitResult, finish
 from world import coords
 
-from .common import EventSink, HaltGate, start_execution
+from .common import EventSink, HaltGate, body_acquire, body_fence, body_release, start_execution
 
 
 @dataclass(frozen=True)
 class ScanConfig:
-    executor: str = "turn_in_place"            # turn_in_place (interim, M2a) | virtual (lite/tests) | waist (M2b)
+    executor: str = "turn_in_place"            # waist (M2b B.5) | turn_in_place (M2a INTERIM) | virtual (lite/tests)
     yaws_deg: tuple[float, ...] = (-35.0, 0.0, 35.0)
     settle_s: float = 0.4
     turn_tol_deg: float = 6.0
     min_interval_s: float = 5.0
     glance_period_s: float = 0.1
+    waist_move_s: float = 0.8                  # the body's scan op: min-jerk move per yaw (its default)
+    waist_hold_s: float = 1.0                  # hold per yaw; the view is sampled in its middle (body default 0.8)
+    waist_grace_s: float = 3.0                 # after the last hold: the return move and the terminal event
+    waist_rest_s: float = 2.0                  # then wait (at most this) for the base to be still again: SONIC sways
+                                               # the pelvis while the waist returns, and a reachability check right
+                                               # after the scan would read it as base_moving (live, main box)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "ScanConfig":
@@ -49,7 +61,8 @@ class ScanConfig:
         for k in ("executor",):
             if k in d:
                 kw[k] = str(d[k])
-        for k in ("settle_s", "turn_tol_deg", "min_interval_s", "glance_period_s"):
+        for k in ("settle_s", "turn_tol_deg", "min_interval_s", "glance_period_s", "waist_move_s", "waist_hold_s",
+                  "waist_grace_s", "waist_rest_s"):
             if k in d:
                 kw[k] = float(d[k])
         if "yaws_deg" in d:
@@ -162,7 +175,7 @@ class ObservationService:
         extra: dict[str, Any] = {"camera": getattr(getattr(self.world, "cam", None), "name", "head"),
                                  "method": "gt-geometric", "source": self.world.source}
         if mode == "scan":
-            rows, views, info = await self._scan(handle)
+            rows, views, info = await self._scan(handle, execution)
             extra.update(info)
             if rows is None:                          # the body could not turn: a glance instead (labelled)
                 mode = "glance"
@@ -205,7 +218,27 @@ class ObservationService:
         except TypeError:                              # a world without the `method` keyword
             return self.world.detections()
 
-    async def _scan(self, handle: ResultHandle | None):
+    def _body_supports(self, what: str) -> bool:
+        fn = getattr(self.body, "supports", None)
+        try:
+            return bool(fn(what)) if callable(fn) else False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _carrying(self) -> bool:
+        """CarryLock engaged on the body, or anything in a hand (GT attach): no waist scan then."""
+        try:
+            if any(self.world.hands().values()):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        fn = getattr(self.body, "arm_state", None)
+        try:
+            return bool(((fn() if callable(fn) else {}).get("carry") or {}).get("engaged"))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _scan(self, handle: ResultHandle | None, execution: Execution | None = None):
         """Returns (rows, views, info) or (None, None, info) when the scan could not run."""
         c = self.cfg
         p0 = self.world.robot_pose()
@@ -221,9 +254,14 @@ class ObservationService:
                 views.append(self.world.view_spec(cp))
                 rows.append(self.world.detections(cam_pose=cp))
             return rows, views, {"scan_executor": "virtual (no motion; lite/tests only)"}
-        info: dict[str, Any] = {"scan_executor": "turn_in_place",
-                                "scan_note": "INTERIM: in-place turns; PLAN's two-row waist scan needs a body op (M2b)"}
-        epoch = self.gate.epoch
+        if c.executor == "waist":
+            if self._body_supports("scan"):
+                return await self._waist_scan(handle, execution)
+            interim = "INTERIM: in-place turns (the body has no waist `scan` op, B.5)"
+        else:
+            interim = "INTERIM: in-place turns (profile scan_executor turn_in_place; the target is `waist`)"
+        info: dict[str, Any] = {"scan_executor": "turn_in_place", "scan_note": interim}
+        epoch = execution.control_epoch if execution is not None else self.gate.epoch
         rows, views = [], []
         for i, dy in enumerate(c.yaws_deg):
             if (handle is not None and handle.cancel_requested) or self.gate.halted_since(epoch):
@@ -255,6 +293,85 @@ class ObservationService:
         if not rows:
             return None, None, info
         return rows, views, info
+
+    async def _waist_scan(self, handle: ResultHandle | None, execution: Execution | None):
+        """B.5 through the body's `scan` op: waist yaw to each of yaws_deg (move, hold), the live view sampled in the
+        middle of each hold, the achieved yaws from the body's `scan.hold` events. Wall time (the body is)."""
+        c = self.cfg
+        info: dict[str, Any] = {"scan_executor": "waist",
+                                "scan_note": "waist yaw only (one row); SONIC also turns the shoulders with the waist"}
+        if self._carrying():
+            info["scan_fallback"] = "glance"
+            info["scan_note"] = ("no waist scan while carrying: SONIC turns the shoulders with the waist and the palms "
+                                 "move 6-10 cm (docs/arm_tracking.md §8.5)")
+            return None, None, info
+        ce = execution.control_epoch if execution is not None else self.gate.epoch
+        if self.gate.latched:
+            info["scan_interrupted"] = "halt"
+            return None, None, info
+        lease = await body_acquire(self.body, execution, "ARM_SCRIPT") if execution is not None else {"ok": True}
+        if not lease.get("ok"):
+            info["scan_fallback"] = "glance"
+            info["scan_lease"] = {"refused": lease.get("reason"), "meaning": lease.get("meaning")}
+            return None, None, info
+        rows, views, holds = [], [], []
+        op = None
+        try:
+            fence = body_fence(self.body, execution) if execution is not None else {}
+            op = await self.body.scan(list(c.yaws_deg), move_s=c.waist_move_s, hold_s=c.waist_hold_s, fence=fence)
+            t0 = time.monotonic()
+            op.on_progress(lambda ev: holds.append(dict(ev.get("data") or {}))
+                           if (ev.get("data") or {}).get("kind") == "scan.hold" else None)
+            period = c.waist_move_s + c.waist_hold_s
+            for i, dy in enumerate(c.yaws_deg):
+                t_mid = t0 + i * period + c.waist_move_s + 0.5 * c.waist_hold_s
+                while time.monotonic() < t_mid and not op.done:
+                    if (handle is not None and handle.cancel_requested) or self.gate.halted_since(ce):
+                        break
+                    await asyncio.sleep(0.02)
+                if (handle is not None and handle.cancel_requested) or self.gate.halted_since(ce):
+                    info["scan_interrupted"] = "cancel" if handle is not None and handle.cancel_requested else "halt"
+                    if info["scan_interrupted"] == "cancel":
+                        op.cancel("cancel")                      # the scan ends where it is (arm end)
+                    break
+                if op.done:
+                    break
+                cp = self.world.camera_pose()                    # the live torso: the head camera turned with it
+                views.append(self.world.view_spec(cp))
+                rows.append(self._live_detections())
+            try:
+                res = await asyncio.wait_for(op.result(), max(0.5, (t0 + len(c.yaws_deg) * period + c.waist_grace_s)
+                                                             - time.monotonic()))
+            except asyncio.TimeoutError:
+                res = {"state": "failed", "data": {"reason": "no terminal event"}}
+        finally:
+            if execution is not None:
+                await body_release(self.body, execution)
+        info["scan_rest_s"] = await self._wait_rest(c.waist_rest_s)
+        d = res.get("data") or {}
+        info["scan_body"] = {"state": res.get("state"), "reason": d.get("reason"),
+                             **{k: d.get(k) for k in ("yaw_err_deg_max", "arm_dev_rad_max", "base_shift_m",
+                                                      "waist_roll_pitch_dev_rad_max") if k in d},
+                             "op": getattr(op, "id", None)}
+        info["scan_holds"] = [{k: h.get(k) for k in ("i", "yaw_deg", "yaw_cmd_deg", "pitch_deg", "yaw_err_deg")}
+                              for h in holds]
+        if not rows:
+            if res.get("state") == "failed" and not info.get("scan_interrupted"):
+                info["scan_fallback"] = "glance"
+            return None, None, info
+        return rows, views, info
+
+    async def _wait_rest(self, max_s: float, speed: float = 0.05, wz: float = 0.1, n: int = 3) -> float | None:
+        """Seconds until the base was still for n samples (50 ms apart), None if not within max_s (wall time)."""
+        t0 = time.monotonic()
+        run = 0
+        while time.monotonic() - t0 < max_s:
+            p = self.world.robot_pose()
+            run = run + 1 if (p.speed <= speed and abs(p.wz) <= wz) else 0
+            if run >= n:
+                return round(time.monotonic() - t0, 2)
+            await asyncio.sleep(0.05)
+        return None
 
     async def _await_turn(self, op: Any, handle: ResultHandle | None, epoch: int, grace_s: float = 1.5) -> dict:
         """A scan turn that stops at once on cancel or halt: the in-flight body op is cancelled (body stop: planner

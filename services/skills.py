@@ -10,7 +10,7 @@ body arm op present). Without an executor for a backend, the fallbacks below app
     lite               ok (pure Python)
     kinematic_attach   ok only when the world's SimControl can attach AND detach (LiteWorld: yes; P1: only when it
                        lists the M2b ops), else down "P1 has no attach/detach op (M2b)"
-    sonic_arm_script   planned: needs the BodyServer arm_script op + attach
+    sonic_arm_script   down without its executor (the executor itself checks the body's arm_script op + P1 attach)
     groot              down: no GR00T executor loaded
 """
 
@@ -68,7 +68,8 @@ def backend_health(world: Any, extra: dict[str, Callable[[], ServiceHealth]] | N
                 return ServiceHealth(True, "ok", "kinematic attach (STEPPING STONE)")
             return ServiceHealth(False, "down", "P1 has no attach/detach op (M2b)")
         if s.backend == "sonic_arm_script":
-            return ServiceHealth(False, "planned", "needs the BodyServer arm_script op and a GT attach (M3)")
+            return ServiceHealth(False, "down", "no sonic_arm_script executor loaded (needs a body with the "
+                                                "arm_script op, B.7, and P1 attach)")
         if s.backend == "groot":
             return ServiceHealth(False, "down", "GR00T executor not available (needs BodyServer vla_start and a "
                                                 "PolicyServer on %s; M4)" % (s.policy_port or 5550))

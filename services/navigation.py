@@ -3,8 +3,10 @@ mapping and timeouts scaled for humanoid walking.
 
     navigate(location)      resolve aliases (user, rooms) -> the keypoint's stand pose (x, y, yaw) -> BodyPort.go_to
                             (SONIC through wl-body, or the lite body) -> NavigateResult in a ToolResult
-    reposition(stance)      navigate(location="reach_stance"): a short go_to to the stance the last
-                            check_reachability returned (<= approach_max_m, straight-line free), tight tolerance
+    reposition(stance)      navigate(location="reach_stance"): the body's `approach` op (B.6: a strafing
+                            reposition on ground truth, tol 5 cm / 5 deg) to the stance the last check_reachability
+                            returned (<= approach_max_m, straight-line free); a body without it (M1, lite) gets a
+                            go_to with a tight tolerance, labelled INTERIM
     list_locations          services/locations.py (walking distance from the current GT pose)
     timeout_s               clamp(1.8 * path_m / v + 12, 20, 240) with v = the profile's effective walking speed
     at()                    keypoint within 0.30 m of the GT pose, else between [last keypoint, target]
@@ -13,6 +15,12 @@ Body terminal reasons (docs/contracts/m1.md §3.4) map onto the envelope's reaso
 see BODY_REASON. A cancel stops the body (planner IDLE) and waits for its settle; a halt (the bridge latched it)
 ends running navigation `failed(halted)`; a walk that got stuck after the body's own replans is `failed(blocked)`
 with `blocked_edge = [from, to]` (THOR never produced it; agent/state.apply_navigate consumes it).
+
+Body fences and leases (M2b B.2, docs/contracts/m1.md §3.11): every navigate leases the body (LOCOMOTION) for its
+execution and releases it at the end; every body op carries the execution's fence (execution_id, generation,
+control_epoch). The body's refusals keep their meaning (services.common.refusal): halted -> failed(halted), a stale
+fence (stale_command, data.why control_epoch | generation | resume_epoch) -> failed(stale_result) + a stale_result
+event, body_busy -> failed(body_busy).
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ from api.results import NamedLocation, NavigateResult, finish
 from api.types import Pose2D, ServiceHealth
 from world import coords
 
-from .common import EventSink, HaltGate, start_execution
+from .common import EventSink, HaltGate, body_acquire, body_fence, body_release, refusal, start_execution
 from .locations import LocationsService
 
 BODY_REASON = {
@@ -67,7 +75,10 @@ class NavConfig:
     reposition_mps: float = 0.20
     reposition_tol_m: float = 0.10
     reposition_tol_deg: float = 8.0
-    reposition_timeout_s: float = 12.0
+    reposition_timeout_s: float = 12.0     # the INTERIM go_to reposition (a body without `approach`)
+    approach_timeout_s: float = 35.0       # the body's approach op (B.6 live: p50 11 s, p90 20-22 s)
+    approach_tol_m: float = 0.05           # B.6 contract tolerance (p90 4.0 / 3.9 cm live)
+    approach_tol_deg: float = 5.0
     approach_max_m: float = 0.40
     timeout_k: float = 1.8
     timeout_base_s: float = 12.0
@@ -220,6 +231,27 @@ class NavigationService:
     def _obs(self) -> str | None:
         return self.observation_id() if callable(self.observation_id) else None
 
+    def uses_approach(self) -> bool:
+        """navigate(reach_stance) runs the body's approach op (B.6) rather than the INTERIM tight go_to."""
+        fn = getattr(self.body, "supports", None)
+        try:
+            return bool(fn("approach")) if callable(fn) else False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def reposition_timeout_s(self) -> float:
+        return self.cfg.approach_timeout_s if self.uses_approach() else self.cfg.reposition_timeout_s
+
+    async def _lease(self, ex: Execution) -> dict:
+        return await body_acquire(self.body, ex, "LOCOMOTION")
+
+    def _refused(self, ex: Execution, meaning: str | None, reason: Any, data: dict) -> str:
+        """The envelope reason for a body refusal; a stale fence is also a stale_result event (PLAN §5.5)."""
+        if meaning == "stale_result":
+            self.events.emit("stale_result", execution_id=ex.execution_id, tool="navigate", why=data.get("why"),
+                             body_reason=reason, source="body")
+        return meaning or map_body_reason(reason)
+
     # ------------------------------------------------------------------ the waiting loop
     async def _await_op(self, op: Any, h: ResultHandle, epoch: int, timeout_s: float) -> tuple[dict, str | None]:
         """Wait for the body op; returns (terminal, why) with why in {None, "cancel", "halt", "timeout"}."""
@@ -263,20 +295,28 @@ class NavigationService:
         timeout = self.timeout_s(p, loc)
         if ex.args.get("timeout_s"):
             timeout = min(timeout, float(ex.args["timeout_s"]))
-        epoch = self.gate.epoch
+        epoch = ex.control_epoch                          # one epoch space: the halt fences this number (R.2)
         if self.gate.latched:
             return self._finish(ex, "failed", loc, reason="halted", at=start_kp, t0=t0)
+        lease = await self._lease(ex)
+        if not lease.get("ok"):
+            r = self._refused(ex, lease.get("meaning"), lease.get("reason"), dict(lease.get("data") or {}))
+            return self._finish(ex, "failed", loc, reason=r, at=start_kp, t0=t0,
+                                extra={"body_reason": lease.get("reason"), "lease": "refused"})
         self._moving, self._target = True, loc
         self._last_at = start_kp
         self._anchor = None
         self.events.emit("base_moving", execution_id=ex.execution_id, to=loc)
+        op = None
         try:
             op = await self.body.go_to(k.x, k.y, k.yaw, speed=c.cruise_mps, timeout_s=timeout + 5.0,
-                                       final_pos_tol=c.final_pos_tol_m, final_yaw_tol_deg=c.final_yaw_tol_deg)
+                                       final_pos_tol=c.final_pos_tol_m, final_yaw_tol_deg=c.final_yaw_tol_deg,
+                                       fence=body_fence(self.body, ex))
             res, why = await self._await_op(op, h, epoch, timeout)
         finally:
             self._moving = False
             self.last_motion_t = self.clock.now()
+            await body_release(self.body, ex)
         data = res.get("data") or {}
         state = res.get("state")
         fp = self.world.robot_pose()
@@ -299,14 +339,14 @@ class NavigationService:
         if why == "cancel":
             return self._finish(ex, "cancelled", loc, reason=h.cancel_reason or "cancelled", at=here,
                                 between=between, **common)
-        if why == "halt" or (state == "canceled" and self.gate.halted_since(epoch)):
+        if why == "halt" or (state == "canceled" and (self.gate.halted_since(epoch) or data.get("reason") == "halt")):
             return self._finish(ex, "failed", loc, reason="halted", at=here, between=between, **common)
         if why == "timeout":
             return self._finish(ex, "timed_out", loc, reason="timeout", at=here, between=between, **common)
         if state == "canceled":                              # someone else pre-empted the body
             return self._finish(ex, "cancelled", loc, reason=str(data.get("reason") or "preempted"), at=here,
                                 between=between, **common)
-        reason = map_body_reason(data.get("reason"))
+        reason = self._refused(ex, refusal(data.get("reason"), data), data.get("reason"), data)
         blocked = [start_kp or "start", loc] if reason == "blocked" else None
         if reason == "fell":
             self.events.emit("safety_event", kind="fell", execution_id=ex.execution_id)
@@ -326,8 +366,14 @@ class NavigationService:
         syaw = float(st.get("yaw", self.world.robot_pose().yaw))
         p = self.world.robot_pose()
         d = math.hypot(sx - p.x, sy - p.y)
-        extra = {"stance": {"x": round(sx, 3), "y": round(sy, 3), "yaw": round(syaw, 4)},
-                 "interim": "body go_to with a tight tolerance; PLAN's strafing `approach` op is M2b"}
+        approach = self.uses_approach()
+        extra: dict[str, Any] = {"stance": {"x": round(sx, 3), "y": round(sy, 3), "yaw": round(syaw, 4)},
+                                 "reposition_op": "approach" if approach else "go_to"}
+        if approach:
+            tol_m, tol_deg, budget = c.approach_tol_m, c.approach_tol_deg, c.approach_timeout_s
+        else:
+            tol_m, tol_deg, budget = c.reposition_tol_m, c.reposition_tol_deg, c.reposition_timeout_s
+            extra["interim"] = "body go_to with a tight tolerance; the body has no `approach` op (B.6)"
         if d > c.approach_max_m + 0.05:
             return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor, t0=t0,
                                 kind="reposition", final_err_m=round(d, 3),
@@ -336,15 +382,29 @@ class NavigationService:
             return self._finish(ex, "failed", "reach_stance", reason="stance_not_reached", at=anchor, t0=t0,
                                 kind="reposition", final_err_m=round(d, 3),
                                 extra={**extra, "detail": "no straight free line to the stance"})
-        epoch = self.gate.epoch
+        epoch = ex.control_epoch
+        if self.gate.latched:
+            return self._finish(ex, "failed", "reach_stance", reason="halted", at=anchor, t0=t0, kind="reposition",
+                                final_err_m=round(d, 3), extra=extra)
+        lease = await self._lease(ex)
+        if not lease.get("ok"):
+            r = self._refused(ex, lease.get("meaning"), lease.get("reason"), dict(lease.get("data") or {}))
+            return self._finish(ex, "failed", "reach_stance", reason=r, at=anchor, t0=t0, kind="reposition",
+                                final_err_m=round(d, 3), extra={**extra, "body_reason": lease.get("reason")})
         self._moving, self._target = True, anchor
         try:
-            op = await self.body.go_to(sx, sy, syaw, speed=c.reposition_mps, timeout_s=c.reposition_timeout_s,
-                                       final_pos_tol=c.reposition_tol_m, final_yaw_tol_deg=c.reposition_tol_deg)
-            res, why = await self._await_op(op, h, epoch, c.reposition_timeout_s + 2.0)
+            if approach:
+                op = await self.body.approach(sx, sy, syaw, v=c.reposition_mps, tol=(tol_m, tol_deg),
+                                              timeout_s=budget, fence=body_fence(self.body, ex))
+            else:
+                op = await self.body.go_to(sx, sy, syaw, speed=c.reposition_mps, timeout_s=budget,
+                                           final_pos_tol=tol_m, final_yaw_tol_deg=tol_deg,
+                                           fence=body_fence(self.body, ex))
+            res, why = await self._await_op(op, h, epoch, budget + 2.0)
         finally:
             self._moving = False
             self.last_motion_t = self.clock.now()
+            await body_release(self.body, ex)
         fp = self.world.robot_pose()
         err = math.hypot(fp.x - sx, fp.y - sy)
         yaw_err = abs(math.degrees(coords.ang_diff(syaw, fp.yaw)))
@@ -352,26 +412,36 @@ class NavigationService:
             self._anchor = (anchor, fp.x, fp.y)
             self._last_at = anchor
         data = res.get("data") or {}
+        body_extra = {k: data.get(k) for k in ("pos_err", "yaw_err_deg", "attempts", "turns") if k in data}
         common = dict(kind="reposition", walked_m=round(math.hypot(fp.x - p.x, fp.y - p.y), 3),
                       final_err_m=round(err, 3), t0=t0, path_len_m=round(d, 3),
-                      extra={**extra, "yaw_err_deg": round(yaw_err, 1), "body_reason": data.get("reason")})
+                      extra={**extra, "yaw_err_deg": round(yaw_err, 1), "body_reason": data.get("reason"),
+                             "tol": [tol_m, tol_deg], **({"body": body_extra} if body_extra else {})})
         if why == "cancel":
             return self._finish(ex, "cancelled", "reach_stance", reason=h.cancel_reason or "cancelled", at=anchor,
                                 **common)
-        if why == "halt":
+        if why == "halt" or (res.get("state") == "canceled" and data.get("reason") == "halt"):
             return self._finish(ex, "failed", "reach_stance", reason="halted", at=anchor, **common)
         if why == "timeout":
             return self._finish(ex, "timed_out", "reach_stance", reason="timeout", at=anchor, **common)
-        if res.get("state") == "succeeded" and err <= c.reposition_tol_m + 1e-6 and yaw_err <= c.reposition_tol_deg:
+        # success is judged on ground truth after the body's own settle: the stance the reachability asked for,
+        # within the reposition's tolerance (the approach aims at 0.8 x its own; a go_to's tolerance is wider)
+        ok_m = c.reposition_tol_m if not approach else max(c.reposition_tol_m, tol_m)
+        ok_deg = c.reposition_tol_deg if not approach else max(c.reposition_tol_deg, tol_deg)
+        if res.get("state") == "succeeded" and err <= ok_m + 1e-6 and yaw_err <= ok_deg:
             return self._finish(ex, "succeeded", "reach_stance", at=anchor, **common)
         if res.get("state") == "canceled":
             return self._finish(ex, "cancelled", "reach_stance", reason=str(data.get("reason") or "preempted"),
                                 at=anchor, **common)
         reason = "stance_not_reached"
         if res.get("state") == "failed":
-            r = map_body_reason(data.get("reason"))
-            if r in ("fell", "nav_unhealthy", "halted"):
-                reason = r
+            meaning = refusal(data.get("reason"), data)
+            if meaning is not None:
+                reason = self._refused(ex, meaning, data.get("reason"), data)
+            else:
+                r = map_body_reason(data.get("reason"))
+                if r in ("fell", "nav_unhealthy", "halted"):
+                    reason = r
         return self._finish(ex, "failed", "reach_stance", reason=reason, at=anchor, **common)
 
     # ------------------------------------------------------------------ envelope

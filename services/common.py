@@ -68,14 +68,30 @@ class EventSink:
 
 @dataclass
 class HaltGate:
-    """The runtime-side halt latch (PLAN §5.6): halt() bumps the epoch and latches; resume() clears it. Running
-    body executions see `halted_since(epoch)` and end failed(halted)."""
-    epoch: int = 0
+    """The runtime-side halt latch (PLAN §5.6) in the executions' control_epoch space: ONE epoch space with the body
+    (M2b R.2). A halt latches at the control_epoch it fences, i.e. every running body execution's control_epoch is
+    <= `epoch`; the body's halt lane gets the same number (robot/body_client.SonicBody maps it onto the wire with a
+    per-session constant). There is no counter of its own any more.
+
+        halt(epoch)              latch at `epoch` (while latched, never below the latched epoch)
+        halted_since(ce)         latched and ce <= epoch: an execution of that control_epoch ends failed(halted)
+        resume(epoch)            clear the latch; `epoch` = the control_epoch the next executions carry
+
+    `halt()` without an epoch (tools and tests that do not track executions) latches one above the last known epoch.
+    """
+    epoch: int = 0                           # the last halt's control_epoch (0 before any)
     latched: bool = False
+    resume_epoch: int | None = None          # the control_epoch the last resume opened
     history: list[tuple[float, str, int]] = field(default_factory=list)
 
     def halt(self, epoch: int | None = None) -> int:
-        self.epoch = max(self.epoch + 1, int(epoch) if epoch is not None else 0)
+        if epoch is None:
+            e = max(self.epoch, self.resume_epoch or 0) + (0 if self.latched else 1)
+        else:
+            e = int(epoch)
+        if self.latched:
+            e = max(e, self.epoch)
+        self.epoch = e
         self.latched = True
         self.history.append((time.monotonic(), "halt", self.epoch))
         return self.epoch
@@ -83,11 +99,68 @@ class HaltGate:
     def resume(self, epoch: int | None = None) -> None:
         self.latched = False
         if epoch is not None:
-            self.epoch = max(self.epoch, int(epoch))
-        self.history.append((time.monotonic(), "resume", self.epoch))
+            self.resume_epoch = int(epoch)
+        self.history.append((time.monotonic(), "resume", self.epoch if epoch is None else int(epoch)))
 
     def halted_since(self, epoch: int) -> bool:
-        return self.latched and self.epoch > epoch
+        """True while latched for an execution of control_epoch `epoch` (it started at or before the halt)."""
+        return self.latched and int(epoch) <= self.epoch
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# The body's fences and leases, as services see them (docs/contracts/m1.md §3.10-§3.11). The BodyPort may be an M1
+# body or the lite body, which have neither: these helpers make that a no-op.
+# ---------------------------------------------------------------------------------------------------------------
+# a `stale_command` whose data.why names a fence is a stale result, not a failure; the body may give the fence case
+# its own reason (the body verifier's item: `stale_command` also means a t_wall-stale stream message)
+FENCE_WHY = ("control_epoch", "generation", "resume_epoch")
+STALE_REASONS = ("stale_command", "stale_fence", "stale_epoch", "stale_generation")
+
+
+def refusal(reason: Any, data: dict | None = None) -> str | None:
+    """What a body refusal means to the runtime: 'halted' | 'stale_result' | 'body_busy' | None (not a fence).
+    Keyed on the reason, and on data.why for `stale_command`."""
+    r = str(reason or "")
+    d = data or {}
+    if r == "halted":
+        return "halted"
+    if r == "body_busy":
+        return "body_busy"
+    if r in STALE_REASONS and (r != "stale_command" or str(d.get("why") or "") in FENCE_WHY):
+        return "stale_result"
+    return None
+
+
+def body_fence(body: Any, execution: Execution) -> dict:
+    """The body's fence fields for this execution ({} on a body without fences)."""
+    fn = getattr(body, "fence", None)
+    try:
+        return dict(fn(execution)) if callable(fn) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+async def body_acquire(body: Any, execution: Execution, mode: str) -> dict:
+    """Lease the body for a body execution (B.2): {ok, reason, meaning, lease}. A body without leases: ok."""
+    fn = getattr(body, "acquire", None)
+    if not callable(fn):
+        return {"ok": True, "reason": None, "lease": None}
+    try:
+        rep = await fn(execution, mode)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": "lease_error", "meaning": None, "detail": repr(e)[:200]}
+    if not rep.get("ok") and "meaning" not in rep:
+        rep = {**rep, "meaning": refusal(rep.get("reason"), rep.get("data"))}
+    return rep
+
+
+async def body_release(body: Any, execution: Execution) -> None:
+    fn = getattr(body, "release", None)
+    if callable(fn):
+        try:
+            await fn(execution.execution_id)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def start_execution(execution: Execution, work: Callable[[ResultHandle], Awaitable[ToolResult]], *,

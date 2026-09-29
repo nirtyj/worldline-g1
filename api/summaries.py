@@ -15,6 +15,7 @@ from typing import Any
 from .reasons import AREA_OF_TOOL, hint
 
 FALLBACK_TAG = "fallback"
+TOO_FAR_NO_SUGGESTION = "no stand the robot knows reaches it; try another stand of that surface once, or tell the user"
 
 
 def _m(v: Any) -> str:
@@ -103,6 +104,9 @@ def summarize(tool: str, status: str, data: dict[str, Any], *, action: str | Non
         vis = "visible but " if d.get("visible") else ""
         sug = f"; try {d['suggest_location']}" if d.get("suggest_location") and r == "too_far" else ""
         h = hint(r)
+        if r == "too_far" and not sug:
+            # no stand to suggest: never "navigate to the suggested location" (there is none)
+            h = TOO_FAR_NO_SUGGESTION
         return f"{o} {vis}not reachable from here: {r}{dist}{sug}" + (f" ({h})" if h and not sug else "")
 
     if tool == "manipulate":
@@ -147,4 +151,4 @@ def summarize(tool: str, status: str, data: dict[str, Any], *, action: str | Non
     return f"{tool} {status}{tail}"
 
 
-__all__ = ["summarize", "rejection_summary", "FALLBACK_TAG"]
+__all__ = ["summarize", "rejection_summary", "FALLBACK_TAG", "TOO_FAR_NO_SUGGESTION"]

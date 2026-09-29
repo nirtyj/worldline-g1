@@ -4,7 +4,8 @@ lists (`config/profiles/<p>.yaml manipulation.executors`).
     name               backend (config/skills.yaml)   built by
     lite               lite                            KinematicAttachExecutor (in-process attach, lite profile)
     kinematic_attach   kinematic_attach                KinematicAttachExecutor (P1 attach/detach; STEPPING STONE)
-    sonic_arm_script   sonic_arm_script                SonicArmScriptExecutor (stub until the body's arm script)
+    sonic_arm_script   sonic_arm_script                SonicArmScriptExecutor (B.7 arm_script + P1 attach; STEPPING
+                                                       STONE; healthy when the body lists arm_script and P1 attach)
     groot_arms         groot                           services.executors.groot_arms:create (owner groot_rt;
                                                        experimental: N1.7 arm/hand chunks through the body `arm` op)
     groot_sonic        groot                           GrootSonicExecutor (the retired token route; a stub)
@@ -83,8 +84,11 @@ def _kinematic(ctx: ExecutorContext):
 
 
 def _sonic_arm_script(ctx: ExecutorContext):
-    from .sonic_arm_script import SonicArmScriptExecutor
-    return SonicArmScriptExecutor()
+    from .sonic_arm_script import ArmScriptConfig, SonicArmScriptExecutor
+    raw = dict((getattr(getattr(ctx, "profile", None), "raw", None) or {}).get("sonic_arm_script") or {})
+    raw.update(dict((ctx.extras or {}).get("sonic_arm_script") or {}))
+    return SonicArmScriptExecutor(ctx.world, ctx.body, gate=ctx.gate, events=ctx.events,
+                                  cfg=ArmScriptConfig.from_dict(raw), name=ctx.name)
 
 
 def _groot_sonic(ctx: ExecutorContext):

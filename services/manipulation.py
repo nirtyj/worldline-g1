@@ -16,9 +16,17 @@
 Never walks (PLAN §1.3 #26): the base is where check_reachability judged it. `base_shift_m` reports any drift.
 
 Executors (services/executors/, built by name through services/executors/registry.py): lite / kinematic_attach
-(STEPPING STONE, labelled everywhere), sonic_arm_script (stub until the body's arm script), groot_arms (owner groot_rt,
-experimental) and groot_sonic (the retired token route, a stub). An unhealthy executor makes its skills unhealthy ->
-CAPABILITY rejections via `capability()`. Every result names the executor that actually ran (`executor.name`).
+(STEPPING STONE, labelled everywhere), sonic_arm_script (STEPPING STONE: the body's B.7 arm script + a P1 attach),
+groot_arms (owner groot_rt, experimental) and groot_sonic (the retired token route, a stub). An unhealthy executor
+makes its skills unhealthy -> CAPABILITY rejections via `capability()`. Every result names the executor that actually
+ran (`executor.name`); the executor's own data (ManipOutcome.data) is merged into the result: its typed fields
+(inferences, chunks_dropped, attempts) into ManipulationResult, the rest into result.data (after a fallback, the
+fallback's data is the result's and the GR00T attempt's sits under data.groot).
+
+Body lease and fence (M2b B.2): a pick or place leases the body for its execution (ARM_STREAM for groot_arms,
+ARM_SCRIPT for sonic_arm_script, MANIP for kinematic_attach) across every attempt, and hands the executor the body's
+fence for it (ManipJob.execution_id / generation / control_epoch, SonicBody.fence) and the control_epoch the halt
+gate compares (ManipJob.epoch). A refused lease keeps the body's meaning: halted, stale_result, body_busy.
 """
 
 from __future__ import annotations
@@ -34,13 +42,15 @@ from api.skills import SkillSpec
 from api.types import ServiceHealth
 from world import coords
 
-from .common import EventSink, HaltGate, start_execution
+from .common import EventSink, HaltGate, body_acquire, body_fence, body_release, start_execution
 from .executors.kinematic_attach import ManipJob
 from .reachability import ReachabilityModel
 
 STEPPING = ("kinematic_attach", "lite", "sonic_arm_script")
 POLICIES = ("first_healthy", "groot_then_script")
-NO_FALLBACK = ("halted", "fell", "cancelled")       # the user or safety ended it: never retry with another executor
+NO_FALLBACK = ("halted", "fell", "cancelled", "stale_result", "body_busy")   # the user, safety or a fence ended it:
+                                                                            # never retry with another executor
+LEASE_MODE = {"groot": "ARM_STREAM", "sonic_arm_script": "ARM_SCRIPT", "kinematic_attach": "MANIP"}   # lite: none
 # an executor outcome's `data` (GrootArmOutcome) -> ManipulationResult's typed fields; the service owns these keys
 TYPED_FROM_EXECUTOR = ("inferences", "chunks_dropped", "attempts")
 SERVICE_OWNED = ("executor", "skill", "skill_label", "stepping_stone", "base_shift_m", "generation", "control_epoch",
@@ -64,7 +74,8 @@ class ManipConfig:
 class ManipulationService:
     def __init__(self, world: Any, registry: Any, reach: ReachabilityModel, executors: dict[str, Any], clock: Any,
                  cfg: ManipConfig | None = None, *, nav: Any = None, observation: Any = None,
-                 gate: HaltGate | None = None, events: EventSink | None = None, policy: str = "first_healthy"):
+                 gate: HaltGate | None = None, events: EventSink | None = None, policy: str = "first_healthy",
+                 body: Any = None):
         if policy not in POLICIES:
             raise ValueError(f"manipulation policy {policy!r}: one of {POLICIES}")
         self.world = world
@@ -78,6 +89,7 @@ class ManipulationService:
         self.observation = observation
         self.gate = gate or HaltGate()
         self.events = events or EventSink()
+        self.body = body                              # the BodyPort: leases and fences (None: no lease)
         self._last_reach: dict[str, tuple[ReachabilityResult, float, tuple[float, float, float]]] = {}
         self._handles: dict[str, ResultHandle] = {}
         self._results: dict[str, ManipulationResult] = {}
@@ -247,37 +259,52 @@ class ManipulationService:
         if hands.get(arm):
             return self._result(ex, "failed", skill, reason="hand_full", phase="select_skill", holding=False, **kw)
         exe = self.executor_for(skill)
-        job = ManipJob("pick", oid, arm, skill.skill_id, epoch=self.gate.epoch, **self._fence(ex, skill, otype))
-        t_att = self.clock.now()
-        out = await self._run_executor(exe, job, h, skill)
-        holding = self.world.hands().get(arm) == oid
-        typed, merged = self._executor_data(out)
-        attempts = list(typed.get("attempts") or [self._attempt(skill, exe, out, t_att)])
-        phases = list(out.phases)
-        fb = None
-        if out.status != "succeeded" and not holding and not h.cancel_requested and \
-                out.reason not in NO_FALLBACK and not self.gate.halted_since(job.epoch):
-            fb = self.fallback_for(skill, "pick", otype, arm)
-        if fb is not None:
-            # groot_then_script: the labelled fallback runs from the same stance; the result is its attempt's
-            first = f"{attempts[0].get('executor')} {out.status}({out.reason})"
-            fexe = self.executor_for(fb)
-            self.events.emit("manip.fallback", execution_id=ex.execution_id, from_skill=skill.skill_id,
-                             from_executor=getattr(exe, "name", skill.executor), reason=out.reason,
-                             to_skill=fb.skill_id, to_executor=getattr(fexe, "name", fb.executor))
-            fjob = ManipJob("pick", oid, arm, fb.skill_id, epoch=self.gate.epoch, **self._fence(ex, fb, otype))
+        lease = await self._lease(ex, skill)
+        if not lease.get("ok"):
+            return self._result(ex, "failed", skill, reason=lease["why"], phase="lease", holding=False,
+                                extra={"detail": lease.get("detail"), "body_reason": lease.get("reason")}, **kw)
+        try:
+            job = ManipJob("pick", oid, arm, skill.skill_id, epoch=ex.control_epoch, **self._fence(ex, skill, otype))
             t_att = self.clock.now()
-            out = await self._run_executor(fexe, fjob, h, fb)
+            out = await self._run_executor(exe, job, h, skill)
             holding = self.world.hands().get(arm) == oid
-            attempts.append(self._attempt(fb, fexe, out, t_att))
-            phases += [dict(p, attempt=2) for p in out.phases]
-            # the GR00T attempt's own numbers (latency, clamped_frac, gt, notes ...) move under data.groot, so the
-            # flat keys describe the attempt that produced the result
-            merged = {"groot": merged,
-                      "fallback_from": {"skill": skill.skill_id, "executor": attempts[0].get("executor"),
-                                        "status": attempts[0].get("status"), "reason": attempts[0].get("reason")}}
-            out.detail = f"after {first}: {out.detail}" if out.detail else f"after {first}"
-            skill = fb
+            typed, merged = self._executor_data(out)
+            attempts = list(typed.get("attempts") or [self._attempt(skill, exe, out, t_att)])
+            phases = list(out.phases)
+            fb = None
+            if out.status != "succeeded" and not holding and not h.cancel_requested and \
+                    out.reason not in NO_FALLBACK and not self.gate.halted_since(job.epoch):
+                fb = self.fallback_for(skill, "pick", otype, arm)
+            if fb is not None:
+                # groot_then_script: the labelled fallback runs from the same stance; the result is its attempt's
+                first = f"{attempts[0].get('executor')} {out.status}({out.reason})"
+                fexe = self.executor_for(fb)
+                self.events.emit("manip.fallback", execution_id=ex.execution_id, from_skill=skill.skill_id,
+                                 from_executor=getattr(exe, "name", skill.executor), reason=out.reason,
+                                 to_skill=fb.skill_id, to_executor=getattr(fexe, "name", fb.executor))
+                lease = await self._lease(ex, fb)                 # the same owner: only the lease mode changes
+                if not lease.get("ok"):
+                    return self._result(ex, "failed", fb, reason=lease["why"], phase="lease", holding=holding,
+                                        extra={"detail": f"after {first}: {lease.get('detail')}", "groot": merged,
+                                               "body_reason": lease.get("reason")}, typed={**typed,
+                                                                                         "attempts": attempts}, **kw)
+                fjob = ManipJob("pick", oid, arm, fb.skill_id, epoch=ex.control_epoch, **self._fence(ex, fb, otype))
+                t_att = self.clock.now()
+                out = await self._run_executor(fexe, fjob, h, fb)
+                holding = self.world.hands().get(arm) == oid
+                ftyped, fmerged = self._executor_data(out)
+                attempts += list(ftyped.get("attempts") or [self._attempt(fb, fexe, out, t_att)])
+                phases += [dict(p, attempt=2) for p in out.phases]
+                # the flat keys describe the attempt that produced the result (the fallback's own data); the GR00T
+                # attempt's numbers (latency, clamped_frac, gt, notes ...) sit under data.groot
+                merged = {**fmerged, "groot": merged,
+                          "fallback_from": {"skill": skill.skill_id, "executor": attempts[0].get("executor"),
+                                            "status": attempts[0].get("status"), "reason": attempts[0].get("reason")}}
+                typed.update({k: v for k, v in ftyped.items() if k not in typed and k != "attempts"})
+                out.detail = f"after {first}: {out.detail}" if out.detail else f"after {first}"
+                skill = fb
+        finally:
+            await self._unlease(ex)
         typed["attempts"] = attempts
         extra = {**merged, "phases": phases, **({"detail": out.detail} if out.detail else {})}
         if out.status == "succeeded":
@@ -359,10 +386,17 @@ class ManipulationService:
             reason = "no_room_in_reach" if self.world.free_spot(target, oid) is not None else "no_room_on_surface"
             return self._result(ex, "failed", skill, reason=reason, phase="free_spot", holding=True, **kw)
         exe = self.executor_for(skill)
-        job = ManipJob("place", oid, arm, skill.skill_id, spot=spot, target=target, epoch=self.gate.epoch,
+        lease = await self._lease(ex, skill)
+        if not lease.get("ok"):
+            return self._result(ex, "failed", skill, reason=lease["why"], phase="lease", holding=True,
+                                extra={"detail": lease.get("detail"), "body_reason": lease.get("reason")}, **kw)
+        job = ManipJob("place", oid, arm, skill.skill_id, spot=spot, target=target, epoch=ex.control_epoch,
                        **self._fence(ex, skill, otype))
         t_att = self.clock.now()
-        out = await self._run_executor(exe, job, h, skill)
+        try:
+            out = await self._run_executor(exe, job, h, skill)
+        finally:
+            await self._unlease(ex)
         holding = self.world.hands().get(arm) == oid
         typed, merged = self._executor_data(out)
         typed["attempts"] = list(typed.get("attempts") or [self._attempt(skill, exe, out, t_att)])
@@ -382,11 +416,34 @@ class ManipulationService:
         return self._result(ex, "failed", skill, reason=out.reason, phase=out.phase, holding=holding, extra=extra,
                             typed=typed, **kw)
 
-    @staticmethod
-    def _fence(ex: Execution, skill: SkillSpec, object_type: str) -> dict:
-        """What an executor that leases the body needs to fence its commands (PLAN §6.6)."""
-        return {"execution_id": ex.execution_id, "generation": ex.generation, "control_epoch": ex.control_epoch,
-                "object_type": object_type, "skill": skill}
+    def _fence(self, ex: Execution, skill: SkillSpec, object_type: str) -> dict:
+        """What an executor needs to fence its body commands (PLAN §6.6): the body's numbers for this execution
+        (SonicBody.fence; the execution's own on a body without fences)."""
+        f = body_fence(self.body, ex) if self.body is not None else {}
+        return {"execution_id": ex.execution_id, "generation": int(f.get("generation", ex.generation)),
+                "control_epoch": int(f.get("control_epoch", ex.control_epoch)), "object_type": object_type,
+                "skill": skill}
+
+    async def _lease(self, ex: Execution, skill: SkillSpec) -> dict:
+        """Lease the body for this execution in the executor's mode: {ok} or {ok: False, why, reason, detail}."""
+        mode = LEASE_MODE.get(skill.backend)
+        if self.body is None or mode is None:
+            return {"ok": True}
+        if self.gate.halted_since(ex.control_epoch):
+            return {"ok": False, "why": "halted", "reason": "halted", "detail": "halted before the arm moved"}
+        rep = await body_acquire(self.body, ex, mode)
+        if rep.get("ok"):
+            return {"ok": True, "lease": rep.get("lease")}
+        why = rep.get("meaning") or "controller_unavailable"
+        if why == "stale_result":
+            self.events.emit("stale_result", execution_id=ex.execution_id, tool="manipulate",
+                             why=(rep.get("data") or {}).get("why"), body_reason=rep.get("reason"), source="body")
+        return {"ok": False, "why": why, "reason": rep.get("reason"),
+                "detail": f"the body refused the {mode} lease: {rep.get('reason')}"}
+
+    async def _unlease(self, ex: Execution) -> None:
+        if self.body is not None:
+            await body_release(self.body, ex)
 
     async def _run_executor(self, exe: Any, job: ManipJob, h: ResultHandle, skill: SkillSpec):
         from .executors.kinematic_attach import ManipOutcome

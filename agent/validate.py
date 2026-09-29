@@ -258,6 +258,35 @@ def _enum_stage(tool: str, a: dict[str, Any], v: ValidationContext) -> Verdict |
     return None
 
 
+BLOCKED_TELL_AFTER = 2
+
+
+def blocked_since_told(v: ValidationContext) -> list[Execution]:
+    """This request's navigate results that failed `blocked`, counted from the last time the planner spoke after
+    one (G6: after repeated blocked walks the user hears about it before the robot tries yet another route)."""
+    out: list[Execution] = []
+    for e in v.history:
+        if e.generation != v.task.intent_version:
+            continue
+        if e.tool_name == "navigate" and (e.data or {}).get("reason") == "blocked":
+            out.append(e)
+        elif e.tool_name == "speak" and e.source == "brain" and out and len(out) >= BLOCKED_TELL_AFTER and \
+                e.status not in ("rejected", "dropped"):
+            out = out[:BLOCKED_TELL_AFTER - 1]                     # told: the next blocked walk asks again
+    return out
+
+
+def tell_user_blocked(v: ValidationContext) -> str | None:
+    """C8c: the rejection message when the planner must tell the user first, else None."""
+    b = blocked_since_told(v)
+    if len(b) < BLOCKED_TELL_AFTER:
+        return None
+    edges = [(e.data or {}).get("blocked_edge") for e in b[-BLOCKED_TELL_AFTER:]]
+    where = "; ".join("-".join(x) for x in edges if x) or "twice"
+    return (f"the way was blocked {len(b)} times ({where}); tell the user what is blocking the robot (speak) "
+            f"before trying another route")
+
+
 def _state_stage(tool: str, a: dict[str, Any], v: ValidationContext) -> tuple[Verdict | None, str | None]:
     b = v.belief
     goal = v.own_goal
@@ -297,6 +326,9 @@ def _state_stage(tool: str, a: dict[str, Any], v: ValidationContext) -> tuple[Ve
         if len(blocked) >= 2:                                       # C8b
             return _reject(Stage.STATE, "location_failed_twice",
                            f"{to} couldn't be reached twice; tell the user instead", a), "keypoint"
+        told = tell_user_blocked(v)                                 # C8c (G6)
+        if told is not None:
+            return _reject(Stage.STATE, "tell_user_blocked", told, a), "keypoint"
         return None, "keypoint"
 
     if tool == "check_reachability":

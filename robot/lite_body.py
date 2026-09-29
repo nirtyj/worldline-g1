@@ -1,6 +1,7 @@
 """LiteBody: a kinematic stand-in for wl-body, in process, for offline runs and the `lite` profile (PLAN §6.6).
 
-It speaks the same BodyPort as SonicBody (go_to / turn_to / stop / halt / resume / estop / state / health) and
+It speaks the same BodyPort as SonicBody (go_to / turn_to / stop / halt / resume / estop / state / health; no fences,
+leases, approach or arm ops: services treat their absence as a no-op, and the lite scan is `virtual`) and
 moves LiteWorld's robot pose along the body's own planner path (body.nav_grid via world.grid) at humanoid speed:
 turn in place first when the heading is far off, walk the path with the facing on its tangent, glide to a stop over
 `lite_stop_s` when stopped, turn to the goal yaw, settle. Terminal results mirror the body's contract (m1.md §3.4):
@@ -121,11 +122,11 @@ class LiteBody:
 
     async def go_to(self, x: float, y: float, yaw: float | None = None, *, speed: float | None = None,
                     timeout_s: float | None = None, final_pos_tol: float | None = None,
-                    final_yaw_tol_deg: float | None = None) -> BodyOp:
+                    final_yaw_tol_deg: float | None = None, fence: dict | None = None) -> BodyOp:
         args = {"x": x, "y": y, "yaw": yaw, "speed": speed, "timeout_s": timeout_s, "final_pos_tol": final_pos_tol}
         return self._start("go_to", self._go_to, args)
 
-    async def turn_to(self, yaw: float, *, tol_deg: float | None = None) -> BodyOp:
+    async def turn_to(self, yaw: float, *, tol_deg: float | None = None, fence: dict | None = None) -> BodyOp:
         return self._start("turn_to", self._turn_to, {"yaw": yaw, "tol_deg": tol_deg})
 
     async def stop(self) -> BodyOp:
@@ -303,7 +304,7 @@ class LiteBody:
         return {"accepted": True, "stopped": True, "at_rest": p.speed < 0.05, "mode": "HOLD",
                 "body_epoch": self.halt_epoch, "source": "lite"}
 
-    def resume(self, epoch: int | None = None) -> None:
+    def resume(self, epoch: int | None = None, **_: Any) -> None:
         self.latched = False
         if epoch is not None:
             self.halt_epoch = max(self.halt_epoch, int(epoch))

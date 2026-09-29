@@ -70,14 +70,20 @@ def test_halt_is_fast_and_resume_clears():
     s = Stack()
 
     async def main():
-        h = s.robot.start(s.ex("navigate", {"location": "kitchen"}))
+        ex = s.ex("navigate", {"location": "kitchen"})
+        h = s.robot.start(ex)
         await s.clock.sleep(2.0)
+        # one epoch space (M2b R.2): the halt fences the executions' own control_epoch, no counter of its own
         rec = s.robot.halt()
-        assert rec["accepted"] and rec["stopped"] and rec["latency_ms"] < 30 and rec["body_epoch"] == 1
+        assert rec["accepted"] and rec["stopped"] and rec["latency_ms"] < 30
+        assert rec["epoch"] == ex.control_epoch and rec["body_epoch"] == ex.control_epoch
         assert (await h.result()).data["reason"] == "halted"
         assert s.robot.telemetry()["body"]["latched"] is True
-        s.robot.resume(3)
+        assert s.robot.gate.halted_since(ex.control_epoch)
+        assert s.robot.halt(control_epoch=ex.control_epoch + 2)["epoch"] == ex.control_epoch + 2   # the harness's
+        s.robot.resume(ex.control_epoch + 3)
         assert s.robot.telemetry()["body"]["latched"] is False
+        assert not s.robot.gate.halted_since(ex.control_epoch + 3)
         assert s.robot.active_executions() == []
     run(main())
 

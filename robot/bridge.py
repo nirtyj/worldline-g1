@@ -19,6 +19,7 @@ Dispatch (`start`) per tool (api/services.py docstring):
 from __future__ import annotations
 
 import asyncio
+import collections
 import copy
 import math
 import time
@@ -76,7 +77,7 @@ class G1Robot:
                                        observation=self.obs, nav=self.nav, body=body)
         self.manip = ManipulationService(world, self.skill_registry, self.reach, self.executors, clock,
                                          ManipConfig.from_dict(manip_cfg), nav=self.nav, observation=self.obs,
-                                         gate=self.gate, events=self.sink, policy=profile.manip_policy)
+                                         gate=self.gate, events=self.sink, policy=profile.manip_policy, body=body)
         self.speech = SpeechService(clock, self.sink, observation_id=self.observation_id)
         self.policy = CapabilityPolicy(world, nav=self.nav, manip=self.manip, body=body,
                                        observation_detail=lambda: f"{self.world.source} "
@@ -87,6 +88,11 @@ class G1Robot:
         self._active: dict[str, Execution] = {}
         self._handles: dict[str, Any] = {}
         self._map: dict | None = None
+        self._epoch_seen = 0                             # the newest control_epoch seen (one epoch space, R.2)
+        self._own_halts: collections.deque = collections.deque(maxlen=50)
+        self._last_fell = -1e9
+        self._body_events_attached = False
+        self.body_events: collections.Counter = collections.Counter()
 
     def _executors(self, manip_cfg: dict) -> dict[str, Any]:
         """Profile executor names -> executors by registry backend (services/executors/registry.py). The first
@@ -168,9 +174,11 @@ class G1Robot:
             "grippers": {a: self.gripper(a) for a in ARMS},
             "active_skills": active,
             "health": {"ok": bh.ok, "source": self.world.source, "state": bh.state, "detail": bh.detail},
-            "body": {"mode": st.get("mode", "HOLD"), "lease": None, "upright": not p.fallen,
+            "body": {"mode": st.get("mode", "HOLD"), "lease": (st.get("lease") or {}).get("owner")
+                     if isinstance(st.get("lease"), dict) else st.get("lease"), "upright": not p.fallen,
                      "rtf": rtf, "carry": any(hands.values()), "halt_epoch": self.gate.epoch,
                      "latched": self.gate.latched, "executor": self.nav.executor,
+                     "carry_lock": bool((st.get("carry") or {}).get("engaged")),
                      "pelvis_z": round(p.pelvis_z, 3), "sim": sim.to_dict() if sim is not None else None,
                      "halt_resend": self.halt_resender.active},
         }
@@ -182,6 +190,7 @@ class G1Robot:
     def start(self, execution: Execution):
         tool = execution.tool_name
         a = execution.args
+        self._epoch_seen = max(self._epoch_seen, int(execution.control_epoch))
         g = self.policy.gate(tool, a)                      # R.6: sim DEGRADED / UNSAFE (world's RTF verdict)
         if g is not None:
             raise Rejected("capability", g.code, g.message)
@@ -234,33 +243,111 @@ class G1Robot:
                           observation_id=self.observation_id())
         return start_execution(execution, work, clock=self.clock, observation_id=self.observation_id)
 
-    def halt(self) -> dict:
-        """Latch HOLD within 30 ms (PLAN §5.6). Running body executions end failed(halted). If the body did not ack
-        within the budget, robot/health.py re-sends the halt every 100 ms until it does."""
+    def halt(self, control_epoch: int | None = None) -> dict:
+        """Latch HOLD within 30 ms (PLAN §5.6). One epoch space (M2b R.2): the halt fences `control_epoch` (the
+        harness passes its current one; without it, the newest control_epoch any execution started with), the
+        runtime gate latches at it and the body's halt lane gets the same number. Running body executions end
+        failed(halted). If the body did not ack within the budget, robot/health.py re-sends it every 100 ms."""
         t0 = time.perf_counter()
-        epoch = self.gate.halt()
+        epoch = self.gate.halt(self._epoch_now() if control_epoch is None else int(control_epoch))
         receipt = dict(self.body.halt(epoch))
         receipt.setdefault("accepted", True)
         if receipt.get("at_rest") is None:
             v = self.world.planar_speed() if hasattr(self.world, "planar_speed") else None
             receipt["at_rest"] = None if v is None else bool(v < 0.05)
+        receipt["epoch"] = epoch
         receipt["latency_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         receipt["resend"] = bool(not receipt.get("stopped") and self.halt_resender.start(epoch))
-        self.sink.emit("halted", epoch=epoch, stopped=receipt.get("stopped"))
+        self._own_halts.append(epoch)
+        self.sink.emit("halted", epoch=epoch, stopped=receipt.get("stopped"), via=receipt.get("via"),
+                       latency_ms=receipt["latency_ms"], rtt_ms=receipt.get("rtt_ms"))
         return receipt
 
+    def _epoch_now(self) -> int:
+        """The newest control_epoch this robot has seen (executions started, resumes, the running body ones)."""
+        act = [int(e.control_epoch) for e in self._active.values() if "body" in e.resources]
+        return max([self._epoch_seen, *act])
+
     def resume(self, control_epoch: int | None = None) -> None:
+        """Clear the latch. `control_epoch` is the epoch the next executions carry (above the halt's). The halt
+        latch's arm pose goes back to SONIC's own arms unless a hand holds something (then the next place takes it
+        over)."""
         self.halt_resender.cancel()
         self.gate.resume(control_epoch)
-        self.body.resume(self.gate.epoch)
+        if control_epoch is not None:
+            self._epoch_seen = max(self._epoch_seen, int(control_epoch))
+        hands = {}
+        try:
+            hands = self.world.hands()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            rep = self.body.resume(control_epoch, release_arms=not any(hands.values()))
+        except TypeError:                                   # a body without release_arms (older fakes)
+            rep = self.body.resume(control_epoch)
+        self.sink.emit("resumed", epoch=control_epoch, body=rep if isinstance(rep, dict) else None)
 
     def estop(self, reason: str) -> dict:
         """Operator kill button only (any profile). The deploy exits on a real stack; P2 restart required."""
-        epoch = self.gate.halt()
+        epoch = self.gate.halt(self._epoch_now())
         res = dict(self.body.estop(reason))
         res["body_epoch"] = epoch
         self.sink.emit("safety_event", kind="estop", reason=reason)
         return res
+
+    # ================================================================== body events (B.3), pushed by the body
+    def _on_body_topic(self, topic: str, msg: dict) -> None:
+        """A body.* topic (on the runtime's loop, SonicBody.attach_events) -> robot events, no polling:
+            body.mode            -> body_mode {mode, prev, ...}
+            body.fault           -> safety_event {kind: fell | deploy_lost, source: body}; policy_lost -> body_fault
+                                    (the GR00T session's own hold applies; not a stop); cleared -> body_fault
+            body.halted          -> a halt this runtime did not send (the body's runtime-session watchdog): the gate
+                                    latches at that epoch, running body executions end failed(halted), and
+                                    safety_event {kind: runtime_lost} lets the harness resume above it
+            body.stale_command   -> stale_result {execution_id, why}
+            body.resumed / lease / session -> body_event (trace)"""
+        self.body_events[topic] += 1
+        t = topic.split(".", 1)[-1]
+        now = time.monotonic()
+        if t == "mode":
+            self.sink.emit("body_mode", mode=msg.get("mode"), prev=msg.get("prev"), prev_s=msg.get("prev_s"),
+                           fault=msg.get("fault"), latched=msg.get("latched"), arm_mode=msg.get("arm_mode"),
+                           source="body")
+        elif t == "fault":
+            kind = str(msg.get("kind") or "")
+            if msg.get("cleared"):
+                self.sink.emit("body_fault", kind=kind or msg.get("fault"), cleared=True, by=msg.get("by"))
+            elif kind in ("fell", "deploy_lost"):
+                if kind == "fell" and now - self._last_fell < 3.0:
+                    return                                      # P1's robot_fell already raised it
+                if kind == "fell":
+                    self._last_fell = now
+                self.sink.emit("safety_event", kind=kind, source="body", fault=msg.get("fault"))
+            else:
+                self.sink.emit("body_fault", kind=kind, session_id=msg.get("session_id"), hold=msg.get("hold"))
+        elif t == "halted":
+            src = str(msg.get("source") or "")
+            ep = msg.get("epoch")
+            if src == "watchdog" and isinstance(ep, int) and msg.get("kind") == "new":
+                wire = int(ep)
+                rt = self.body.runtime_epoch(wire) if hasattr(self.body, "runtime_epoch") else wire
+                self.gate.halt(max(rt, self._epoch_now()))
+                self.sink.emit("safety_event", kind="runtime_lost", source="body", reason=msg.get("reason"),
+                               body_epoch=wire, epoch=self.gate.epoch, recoverable=True)
+            else:
+                self.sink.emit("body_event", topic="halted", epoch=ep, kind=msg.get("kind"), source=src,
+                               handle_ms=msg.get("handle_ms"), arms_latched=msg.get("arms_latched"))
+        elif t == "stale_command":
+            self.sink.emit("stale_result", execution_id=msg.get("execution_id"), op=msg.get("op"),
+                           why=msg.get("why"), reason=msg.get("reason"), source="body")
+        else:
+            brief = {k: msg.get(k) for k in ("event", "reason", "epoch", "was_latched", "session", "source")
+                     if msg.get(k) is not None}
+            lease = msg.get("lease")
+            if isinstance(lease, dict):
+                brief["owner"] = lease.get("owner")
+                brief["mode"] = lease.get("mode")
+            self.sink.emit("body_event", topic=t, **brief)
 
     def active_executions(self) -> list[Execution]:
         return list(self._active.values())
@@ -299,7 +386,7 @@ class G1Robot:
     def timeout_s(self, tool: str, args: dict) -> float:
         if tool == "navigate":
             if args.get("location") == "reach_stance" or args.get("stance"):
-                return self.nav.cfg.reposition_timeout_s + 5.0
+                return self.nav.reposition_timeout_s() + 5.0
             t = self.nav.timeout_s(self.world.robot_pose(), self.nav.resolve(str(args.get("location", ""))))
             if args.get("timeout_s"):
                 t = min(t, float(args["timeout_s"]))
@@ -330,8 +417,12 @@ class G1Robot:
         capability monitor, the capability_changed producer (robot/health.py)."""
         q = self.sink.subscribe()
         try:
-            asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
             self.monitor.start()
+            attach = getattr(self.body, "attach_events", None)
+            if callable(attach) and not self._body_events_attached:
+                attach(self._on_body_topic, loop)
+                self._body_events_attached = True
         except RuntimeError:
             pass
         return q
