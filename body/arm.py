@@ -411,11 +411,12 @@ class ArmChannel:
         self.sv = {"ki": self._cfg("arm_servo_ki", 2.0), "model": str(getattr(self.cfg, "arm_servo_model", "gated")),
                    "delay_s": self._cfg("arm_servo_delay_s", 0.15), "dead_s": self._cfg("arm_servo_dead_s", 0.09),
                    "tau_s": self._cfg("arm_servo_tau_s", 0.085), "v0": self._cfg("arm_servo_v0", 0.3),
-                   "max": self._cfg("arm_servo_max", 0.4)}
+                   "max": self._cfg("arm_servo_max", 0.4), "ki_waist": self._cfg("arm_servo_ki_waist", 5.0)}
         self.blend_s_default = self._cfg("arm_blend_s", 1.5)
         self.max_vel_default = self._cfg("arm_max_vel", 6.0)
 
     def _reset_servo(self) -> None:
+        self.ref_last: list[float] | None = None            # mj17 servo reference of the last tick (pre-correction)
         self.corr = [0.0] * N
         self._ym: list[float] | None = None
         self._hist: collections.deque = collections.deque(maxlen=120)     # (t, servo reference mj17), ~2.4 s
@@ -466,7 +467,11 @@ class ArmChannel:
         return p
 
     def continuity_pose(self) -> list[float]:
-        """What a new session starts from: the pose being sent, else SONIC's own reference (never zeros)."""
+        """What a new session starts from (its servo reference): the reference being played before the servo
+        correction (the correction carries over a take-over, so starting from the corrected `sent` would count it
+        twice), else the pose being sent (a blend: no correction), else SONIC's own reference (never zeros)."""
+        if self.ref_last is not None and self.phase in ("active", "hold"):
+            return list(self.ref_last)
         return list(self.sent) if self.sent is not None else self.reference_mj17()
 
     # -- events (queued; flushed on the service thread) ----------------------------------------------------------
@@ -635,7 +640,8 @@ class ArmChannel:
             return False
 
     def _servo_args(self, args: dict, out: dict) -> None:
-        for k, lo, hi in (("servo_ki", 0.0, 10.0), ("servo_delay_s", 0.0, 0.5), ("servo_max", 0.0, 0.8),
+        for k, lo, hi in (("servo_ki", 0.0, 10.0), ("servo_ki_waist", 0.0, 10.0), ("servo_delay_s", 0.0, 0.5),
+                          ("servo_max", 0.0, 0.8),
                           ("servo_dead_s", 0.0, 0.5), ("servo_tau_s", 0.01, 1.0), ("servo_v0", 0.01, 10.0)):
             if args.get(k) is not None:
                 out[k] = _num(args, k, lo, hi, 0.0)
@@ -646,7 +652,8 @@ class ArmChannel:
             out["servo_model"] = m
 
     def _apply_servo_args(self, p: dict) -> None:
-        for k, sk in (("servo_ki", "ki"), ("servo_delay_s", "delay_s"), ("servo_max", "max"), ("servo_dead_s", "dead_s"),
+        for k, sk in (("servo_ki", "ki"), ("servo_ki_waist", "ki_waist"), ("servo_delay_s", "delay_s"),
+                      ("servo_max", "max"), ("servo_dead_s", "dead_s"),
                       ("servo_tau_s", "tau_s"), ("servo_v0", "v0"), ("servo_model", "model")):
             if k in p:
                 self.sv[sk] = p[k]
@@ -886,9 +893,12 @@ class ArmChannel:
             self.corr[YAW_IDX] = 0.0                    # a scan's waist-yaw correction never outlives it
 
     def _start_blend(self, now: float, why: str, op_sess: _Session | None = None, blend_s: float | None = None) -> None:
+        # from the pose on the wire (the correction is baked in there and the servo stops for the blend)
+        frm = list(self.sent) if self.sent is not None else self.reference_mj17()
+        self._reset_servo()
         self.phase = "blend"
         self.hold = None
-        self.blend = {"from": self.continuity_pose(), "hands": dict(self.hands_sent), "t0": now, "why": why,
+        self.blend = {"from": frm, "hands": dict(self.hands_sent), "t0": now, "why": why,
                       "dur": float(blend_s if blend_s is not None else
                                    (op_sess.blend_s if op_sess is not None else self.blend_s_default)),
                       "sess": op_sess}
@@ -999,7 +1009,7 @@ class ArmChannel:
             if fresh:
                 src = "g1_debug.body_q"
             elif self.sent is not None:
-                qm, src = list(self.sent), "sent"
+                qm, src = self.continuity_pose(), "sent"
             else:
                 qm, src = self.reference_mj17(), "reference"
             mh = self.measured_hands() if fresh else {"left": None, "right": None}
@@ -1195,6 +1205,7 @@ class ArmChannel:
                 s.last_ref, s.last_hands, s.last_waist = list(des), dict(hands), \
                     ("cmd" if waist_mode == "cmd" else "ref")
             self._hist.append((now, list(des)))
+            self.ref_last = list(des)
             self._servo(now, dt, des, servo_idx)
             for k in servo_idx:
                 lo, hi = _LIM[k]
@@ -1358,7 +1369,8 @@ class ArmChannel:
         mx = float(sv["max"])
         for k in idx:
             e = r[k] - qm[k]
-            c = self.corr[k] + (1.0 if w is None else w[k]) * ki * dt * e
+            g = float(sv["ki_waist"]) if k == YAW_IDX else ki
+            c = self.corr[k] + (1.0 if w is None else w[k]) * g * dt * e
             c = min(max(c, -mx), mx)
             lo, hi = _LIM[k]
             if (des_ref[k] + c > hi and c > self.corr[k]) or (des_ref[k] + c < lo and c < self.corr[k]):

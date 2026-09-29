@@ -5,8 +5,9 @@ main.urdf (sim_isaac/g1_asset.py:29); body/tests/test_g1_kin.py re-parses the UR
 Frames: pelvis (x forward, y left, z up). Points: `wrist` = the wrist_yaw_link origin, `palm` =
 left/right_hand_palm_link (fixed joint, 4.15 cm beyond the wrist yaw axis).
 
-Used by tools/arm_track_test.py (wrist/palm tracking error, keyframes for the reach-grasp-lift script) and meant
-for the ArmScript / CarryLock presets (PLAN §6.6). Not used on the 50 Hz path.
+Used by tools/arm_track_test.py (wrist/palm tracking error, keyframes for the reach-grasp-lift script), by
+body/arm_script.py (one IK solve per phase at the op start, then FK of the measured arm for the palm error) and by
+body/carry.py (CarryLock palm error in body.state). The 50 Hz path itself never solves IK.
 """
 
 from __future__ import annotations
