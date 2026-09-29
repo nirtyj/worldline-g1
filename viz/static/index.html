@@ -117,7 +117,7 @@
           <label>vy <input type="range" id="sp-vy" min="0.1" max="0.4" step="0.05" value="0.25"><output id="o-vy"></output></label>
           <label>yaw <input type="range" id="sp-w" min="0.1" max="1.2" step="0.05" value="0.5"><output id="o-w"></output></label>
           <div class="hint">Hold <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>Q</kbd><kbd>E</kbd> to walk,
-            <kbd>Space</kbd> stop. Click the map: <b>go_to</b>; shift-click: <b>turn_to</b>.</div>
+            <kbd>Space</kbd> stop (works while any control has focus). Click the map: <b>go_to</b>; shift-click: <b>turn_to</b>.</div>
           <div class="recinfo" id="recinfo"></div>
         </div>
       </div>
@@ -150,7 +150,8 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const S = {
-    ws: null, hello: null, tel: null, traj: [], target: null, keys: new Set(), lastWalk: null, walkTimer: null,
+    ws: null, hello: null, tel: null, traj: [], target: null, keys: new Set(), lastDrive: null, driveTimer: null,
+    hbTimer: null, drive: { mode: null, sent: 0 },
     top: { img: null, extent: null, w: 0, h: 0 }, topdown: null, occ: null,
     show: { occ: true, traj: true, rooms: true }, fps: {}, counts: {}, recording: false, reqN: 0,
   };
@@ -358,47 +359,81 @@
     el.prepend(line); while (el.childNodes.length > 60) el.removeChild(el.lastChild);
   }
   function send(o) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(o)); }
-  function cmd(op, args = {}) { send({ type: "cmd", op, args, req: ++S.reqN }); if (op !== "walk") log(`→ ${op} ${JSON.stringify(args)}`, "e-info"); }
+  function cmd(op, args = {}) {
+    // any command supersedes held-key driving (the server drops the drive session without an extra message)
+    if (op !== "status" && S.keys.size) { S.keys.clear(); S.lastDrive = null; stopDriveTimers(); paintPad(); }
+    send({ type: "cmd", op, args, req: ++S.reqN }); log(`→ ${op} ${JSON.stringify(args)}`, "e-info");
+  }
 
+  // ---- held-key driving: the page sends the wanted body velocity; the server owns the body op (one per key
+  // press: streaming 'velocity', or one 'walk' per change on older bodies), a 5 Hz heartbeat keeps it alive and
+  // the server ends it 0.6 s after the heartbeats stop (see viz/server.py docstring)
   const KEYMAP = { w: [1, 0, 0], s: [-1, 0, 0], a: [0, 1, 0], d: [0, -1, 0], q: [0, 0, 1], e: [0, 0, -1] };
-  function walkVec() {
+  const DRIVE_DEBOUNCE_MS = 40, DRIVE_HB_MS = 200;
+  function driveVec() {
     let vx = 0, vy = 0, wz = 0;
     for (const k of S.keys) { const m = KEYMAP[k]; if (m) { vx += m[0]; vy += m[1]; wz += m[2]; } }
-    return { vx: +(vx * +$("sp-v").value).toFixed(2), vy: +(vy * +$("sp-vy").value).toFixed(2), yaw_rate: +(wz * +$("sp-w").value).toFixed(2) };
+    return { vx: +(vx * +$("sp-v").value).toFixed(2), vy: +(vy * +$("sp-vy").value).toFixed(2), wz: +(wz * +$("sp-w").value).toFixed(2) };
   }
-  function updateWalk(force = false) {
-    document.querySelectorAll("#pad button").forEach((b) => b.classList.toggle("held", S.keys.has(b.dataset.k)));
+  function paintPad() { document.querySelectorAll("#pad button").forEach((b) => b.classList.toggle("held", S.keys.has(b.dataset.k))); }
+  function stopDriveTimers() { clearTimeout(S.driveTimer); S.driveTimer = null; clearInterval(S.hbTimer); S.hbTimer = null; }
+  function sendDrive() {
+    S.driveTimer = null;
     if (!S.keys.size) {
-      if (S.lastWalk) { cmd("stop"); S.lastWalk = null; }
-      clearInterval(S.walkTimer); S.walkTimer = null; return;
+      if (S.lastDrive) { send({ type: "drive", stop: true }); S.drive.sent++; }
+      S.lastDrive = null; stopDriveTimers(); return;
     }
-    const v = walkVec(), key = JSON.stringify(v);
-    if (force || key !== S.lastWalk) { cmd("walk", { ...v, duration_s: 3.0 }); S.lastWalk = key; }
-    if (!S.walkTimer) S.walkTimer = setInterval(() => updateWalk(true), 2000);  // keepalive while held
+    const v = driveVec(); S.lastDrive = JSON.stringify(v);
+    send({ type: "drive", ...v }); S.drive.sent++;
+    if (!S.hbTimer) S.hbTimer = setInterval(() => { if (S.keys.size) { send({ type: "drive", ...driveVec() }); S.drive.sent++; } }, DRIVE_HB_MS);
   }
-  const typing = (ev) => ["INPUT", "SELECT", "TEXTAREA"].includes(ev.target.tagName) && ev.target.type !== "range";
+  function updateDrive() {   // key set changed: debounce so a chord (S+D+E within 40 ms) is one change
+    paintPad();
+    if (!S.driveTimer) S.driveTimer = setTimeout(sendDrive, DRIVE_DEBOUNCE_MS);
+  }
+  function releaseAll() { if (S.keys.size) { S.keys.clear(); updateDrive(); } }
+  function stopNow() { S.keys.clear(); S.lastDrive = null; stopDriveTimers(); paintPad(); cmd("stop"); }
+  // Keys work wherever focus is, except in text fields: the level <select>, buttons and sliders do not swallow them
+  // (the select keeps focus after a mouse pick; Space there would otherwise open it instead of stopping).
+  const TEXT_TYPES = new Set(["text", "search", "email", "number", "password", "url", "tel"]);
+  const typing = (ev) => { const t = ev.target; return t.tagName === "TEXTAREA" || t.isContentEditable || (t.tagName === "INPUT" && TEXT_TYPES.has(t.type)); };
   window.addEventListener("keydown", (ev) => {
-    if (typing(ev) || ev.metaKey || ev.ctrlKey) return;
+    if (typing(ev) || ev.metaKey || ev.ctrlKey || ev.altKey) return;
     const k = ev.key.toLowerCase();
-    if (k === " ") { ev.preventDefault(); S.keys.clear(); S.lastWalk = null; updateWalk(); cmd("stop"); return; }
-    if (KEYMAP[k] && !S.keys.has(k)) { S.keys.add(k); updateWalk(); }
+    if (k === " ") { ev.preventDefault(); if (!ev.repeat) stopNow(); return; }
+    if (KEYMAP[k]) { ev.preventDefault(); if (!S.keys.has(k)) { S.keys.add(k); updateDrive(); } }
   });
-  window.addEventListener("keyup", (ev) => { const k = ev.key.toLowerCase(); if (S.keys.delete(k)) updateWalk(); });
-  window.addEventListener("blur", () => { if (S.keys.size) { S.keys.clear(); updateWalk(); } });
+  window.addEventListener("keyup", (ev) => {
+    const k = ev.key.toLowerCase();
+    if (k === " ") ev.preventDefault();   // no button activation on Space release either
+    if (S.keys.delete(k)) updateDrive();
+  });
+  window.addEventListener("blur", releaseAll);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
   document.querySelectorAll("#pad button").forEach((b) => {
     const k = b.dataset.k;
-    b.addEventListener("pointerdown", (ev) => { ev.preventDefault(); b.setPointerCapture(ev.pointerId); S.keys.add(k); updateWalk(); });
-    const up = () => { if (S.keys.delete(k)) updateWalk(); };
+    b.addEventListener("pointerdown", (ev) => { ev.preventDefault(); b.setPointerCapture(ev.pointerId); S.keys.add(k); updateDrive(); });
+    const up = () => { if (S.keys.delete(k)) updateDrive(); };
     b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up);
   });
   for (const [id, out] of [["sp-v", "o-v"], ["sp-vy", "o-vy"], ["sp-w", "o-w"]]) {
     const f = () => { $(out).textContent = $(id).value + (id === "sp-w" ? " r/s" : " m/s"); }; $(id).oninput = f; f();
   }
   $("b-stand").onclick = () => cmd("stand", {});
-  $("b-stop").onclick = () => { S.keys.clear(); S.lastWalk = null; updateWalk(); cmd("stop"); };
+  $("b-stop").onclick = () => stopNow();
   $("b-status").onclick = () => cmd("status");
   $("rec").onclick = () => { send({ type: "record", action: S.recording ? "stop" : "start" }); log(S.recording ? "stopping recording…" : "starting recording…", "e-info"); };
-  $("level").onchange = (ev) => { if (ev.target.value) send({ type: "viz_level", level: ev.target.value }); };
+  $("level").onchange = (ev) => {
+    const lvl = ev.target.value; ev.target.blur();   // give the keys back to the page at once
+    if (!lvl) return;
+    const b = S.tel && S.tel.body;
+    if (b && b.op && !confirm(`The robot is running '${b.op}'. Switching the viz level recreates P1's viz render ` +
+        `products and stalls the sim loop once (about 0.1-0.35 s measured). Switch to '${lvl}' anyway?`)) {
+      ev.target.value = ""; return;
+    }
+    send({ type: "viz_level", level: lvl });
+    log(`viz level → ${lvl} (P1 recreates its viz render products: one short stall of the sim loop)`, "e-info");
+  };
 
   function onJson(m) {
     switch (m.type) {
@@ -414,7 +449,7 @@
         log(`← ${m.op}: ${m.ok ? "ok" : "FAILED"} ${m.state || ""} ${m.error || ""}${m.op === "status" && m.data ? " " + JSON.stringify(m.data).slice(0, 300) : ""}`, m.ok ? "e-ok" : "e-bad");
         break;
       case "body_event":
-        if (m.op === "walk" && (m.state === "progress" || m.state === "accepted" || (m.state === "canceled"))) break;
+        if ((m.op === "walk" || m.op === "velocity") && ["progress", "accepted", "canceled"].includes(m.state)) break;
         log(`body.event ${m.op || ""} ${m.state || ""} ${m.data && Object.keys(m.data).length ? JSON.stringify(m.data).slice(0, 160) : ""}`,
           m.state === "succeeded" ? "e-ok" : m.state === "failed" ? "e-bad" : "");
         if (m.op === "go_to" && ["succeeded", "failed", "canceled"].includes(m.state)) { S.target = null; drawMap(); }
@@ -432,7 +467,13 @@
           log(m.ok ? `recording → ${m.dir}` : `record failed: ${m.error}`, m.ok ? "e-ok" : "e-bad");
         }
         break;
-      case "viz_level": log(`viz level: ${m.ok ? m.level : "failed: " + m.error}`, m.ok ? "e-ok" : "e-bad"); break;
+      case "viz_level": log(`viz level: ${m.ok ? m.level + (m.set_level_ms ? ` (sim loop stalled ${Math.round(m.set_level_ms)} ms)` : "") : "failed: " + m.error}`, m.ok ? "e-ok" : "e-bad"); break;
+      case "drive":
+        S.drive.mode = m.mode || S.drive.mode;
+        if (m.state === "started") log(`drive ${m.mode}: ${JSON.stringify(m.v)}`, "e-info");
+        else if (m.state === "failed") log(`drive ${m.mode} failed: ${m.error}`, "e-bad");
+        else if (m.state === "deadman" || m.state === "mode") log(`drive: ${m.info}`, "e-bad");
+        break;
     }
   }
 

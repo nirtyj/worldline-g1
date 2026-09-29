@@ -154,6 +154,15 @@ def frame_from_msg(topic: str, msg: Any) -> tuple[str, bytes, dict, bool] | None
     return FRAME_ALIASES.get(src, src), jpeg, msg, src in SWAPPED_RB_FRAMES
 
 
+def same_frame(held: dict | None, new: dict | None) -> bool:
+    """True when `new` is a re-send of the frame whose meta is `held` (VizCams re-sends the last top snapshot every
+    2 s for late subscribers, with the same seq and t_wall)."""
+    if not held or not new:
+        return False
+    return (new.get("seq") is not None and new.get("seq") == held.get("seq")
+            and new.get("t_wall") == held.get("t_wall") and new.get("source") == held.get("source"))
+
+
 # ------------------------------------------------------------------------------------------------- images
 def swap_rb_jpeg(jpeg: bytes, quality: int = 80) -> bytes:
     from PIL import Image

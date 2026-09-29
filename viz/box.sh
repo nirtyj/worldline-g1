@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Box-side launcher for the viz stack (run ON the box, from anywhere). tmux sessions are named viz-*.
 #
-#   viz/box.sh setup                         # create viz/.venv (uv): pyzmq msgpack numpy pillow imageio[ffmpeg] aiohttp
+#   viz/box.sh setup                         # create viz/.venv (uv): pyzmq msgpack numpy pillow imageio[ffmpeg] aiohttp pytest
 #   viz/box.sh sim   [test_stack args...]    # VIZ TEST stand-in P1 (kinematic G1) in tmux viz-sim, offset 100
 #   viz/box.sh server [OFFSET]               # web UI on 127.0.0.1:(8765+OFFSET) in tmux viz-server (default 0)
 #   viz/box.sh record SECONDS [OFFSET] [LABEL]   # one recording, foreground, prints the run dir
@@ -19,8 +19,8 @@ cmd=${1:-status}; shift || true
 case "$cmd" in
   setup)
     cd "$VIZ" && [[ -x .venv/bin/python ]] || uv venv --python 3.11 .venv
-    uv pip install --python "$PY" -q pyzmq msgpack numpy pillow "imageio[ffmpeg]" aiohttp
-    "$PY" -c "import zmq, msgpack, numpy, PIL, imageio_ffmpeg, aiohttp; print('viz venv ok')";;
+    uv pip install --python "$PY" -q pyzmq msgpack numpy pillow "imageio[ffmpeg]" aiohttp pytest
+    "$PY" -c "import zmq, msgpack, numpy, PIL, imageio_ffmpeg, aiohttp, pytest; print('viz venv ok')";;
   sim)
     tmux kill-session -t viz-sim 2>/dev/null || true
     tmux new-session -d -s viz-sim -c "$WL" \

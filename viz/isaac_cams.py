@@ -1,11 +1,19 @@
 """VizCams: extra sim cameras for humans (chase, top-down, overview) -> JPEG -> ZMQ PUB 5602.
 
-Runs INSIDE the Isaac process (P1, /work/envs/isaaclab). Attach it with two lines:
+Runs INSIDE the Isaac process (P1, /work/envs/isaaclab). In sim_isaac/app.py the hook is 7 lines at 5 places
+(docs/viz.md 9.1; one of them changes an existing line, the finish() one is optional):
 
-    from viz.isaac_cams import VizCams
+    from viz.isaac_cams import add_p1_args, viz_enabled, attach_p1
+    add_p1_args(ap)                                           # parse_args(): --viz off|min|low|high, --viz-hz
+    if a.camera != "none" or a.tp_camera or viz_enabled(a):  # (changed line) exits if --viz AND --tp-camera
+    self.viz = attach_p1(self)                                # end of setup(): VizCams + REP ops + warm-up renders
+    if self.viz: self.viz.step(t_sim, st["base_pos"], st["base_quat"])   # run(), after the camera block
+    if self.viz: self.viz.close()                             # finish() (optional: os._exit follows anyway)
+
+Generic use, any Isaac Lab loop:
+
     cams = VizCams(sim, "/World/Robot", house_bounds, pub="tcp://127.0.0.1:5602", hz=10, level="low")
-    ...
-    cams.step(t_sim, base_pos, base_quat_wxyz)     # every physics step (cheap when nothing is due)
+    cams.step(t_sim, base_pos, base_quat_wxyz)     # every physics step (returns at once when nothing is due)
 
 What it renders (all prims live under /World/VizCams, nothing else on the stage is touched):
   chase     perspective, ~2.5 m behind / 1.6 m above the pelvis, looks at the pelvis, smoothed. When walls or
@@ -48,9 +56,28 @@ experiments are in docs/viz.md "Render-product findings"):
                 speckled image under the "balanced" preset (docs/viz.md: settle sweep). Rate: every `every_s`
                 (low 10 s, high 3 s). Between snapshots the UI/recorder draw the live robot pose from gt.pose over
                 the last snapshot.
-  * JPEG encoding and the ZMQ send run on a worker thread (cv2.imencode releases the GIL); the physics thread only
-    copies the annotator buffer (~0.3 ms for 640x360).
+  * What VizCams itself adds to the sim thread (the thread that calls step() and handle_op(); P1 serves REP ops on
+    it between physics steps). Measured with viz_stats in procthor-train-40 at level low (docs/viz.md 7.2):
+      - per chase frame (hz, 10 Hz): the synchronous annotator read `annot.get_data()` (a view on Replicator's
+        host buffer, not a copy: omni.replicator.core scripts/annotators.py get_data(do_array_copy=False)),
+        0.55-0.60 ms mean / 0.9 ms p99, plus a contiguous copy of the RGBA buffer before the next render
+        overwrites it, 0.11 ms mean / 0.24 ms p99 (the earlier strided RGB copy took 1.7 / 3.0 ms; alpha is now
+        dropped on the worker). Total ~1.0 ms mean per frame, was ~2.4-2.6 ms;
+      - per chase frame: the camera placement with its PhysX raycasts, 0.86-0.92 ms mean / 1.8-2.0 ms p99;
+      - per top snapshot (every 10 s at low, 3 s at high): the re-arm (annotator detach/enable/attach), 15-17 ms;
+      - per set_level() (REP op viz_level): render products destroyed and created synchronously: the call takes
+        25-39 ms (min/low) and 89 ms (high), and the first renders of the new products are slow too, so the loop
+        stalls once by 120-160 ms (to min/low) and ~340 ms (to high), measured as gt.pose wall gaps.
+    At low that is ~20 ms of sim-thread work per sim-second (~2 % of real time) plus the one-off switch stall. The
+    dominant cost is not VizCams code but the RTX render of every live render product on EVERY host render
+    (~3 ms per P1 render at 640x360: ~90 ms per sim-second at P1's 30 Hz head camera, see above).
+  * JPEG encoding, the ZMQ send and the snapshot re-send run on a worker thread (cv2.imencode releases the GIL).
+    The hand-off is a bounded queue with put_nowait and the PUB send is NOBLOCK, so a slow, absent or crashed
+    consumer (browser, recorder) never blocks the sim thread; frames are dropped instead (viz_stats dropped).
   * The PUB socket is bound in the constructor (fails fast on a busy port) and then used only by the worker thread.
+  * Late subscribers: ZMQ PUB drops messages sent before a SUB connects, and a top snapshot comes only every
+    3-10 s, so the worker re-sends the last snapshot of each snapshot camera every `resend_s` (2 s) with the same
+    seq / t_wall. Consumers treat a message with the same (seq, t_wall) as the one they hold as a re-send.
 
 Wire format on the PUB socket (one message per frame), multipart:
     [b"frame.<cam>", msgpack({
@@ -66,6 +93,7 @@ Wire format on the PUB socket (one message per frame), multipart:
 
 Viz levels: "off" (no render products at all, zero cost), "min", "low", "high" (see LEVELS). Switch at runtime with
 `cams.set_level(...)` from the sim thread, or route the REP op through `cams.handle_op({"op": "viz_level", ...})`.
+A switch recreates the render products synchronously and stalls the sim loop once (reply field set_level_ms).
 """
 
 from __future__ import annotations
@@ -231,6 +259,7 @@ class VizCams:
         pose_fn: Callable[[], tuple[Sequence[float], Sequence[float]]] | None = None,
         root: str = "/World/VizCams",
         cams: dict[str, dict] | None = None,
+        resend_s: float = 2.0,
         verbose: bool = True,
     ) -> None:
         if level not in LEVELS:
@@ -256,7 +285,10 @@ class VizCams:
         self.pose_fn = pose_fn
         self.root = root.rstrip("/")
         self.cam_overrides = cams or {}
+        self.resend_s = float(resend_s)
         self.verbose = verbose
+        self._gen = 0           # bumped by set_level(): the worker drops cached snapshots of older generations
+        self._last_set_level_ms = 0.0
 
         self._cams: dict[str, _Cam] = {}
         self._updates = 0
@@ -265,7 +297,8 @@ class VizCams:
         self._chase_state: dict[str, Any] | None = None
         self._pose: tuple[np.ndarray, float] | None = None  # (pos, yaw) of the latest step
         self._stats = {"capture_ms": [], "forced_renders": 0, "dropped": 0, "encode_ms": [], "sent": 0,
-                       "piggyback": 0, "step_calls": 0, "chase_ms": [], "chase_free": [], "rays": 0, "ray_hits": 0}
+                       "piggyback": 0, "step_calls": 0, "chase_ms": [], "chase_free": [], "rays": 0, "ray_hits": 0,
+                       "readback_ms": [], "copy_ms": [], "set_level_ms": [], "resent": 0}
         self._lock = threading.Lock()
 
         import omni.kit.app  # noqa: WPS433  (Isaac-only import)
@@ -378,7 +411,9 @@ class VizCams:
             raise ValueError(f"level must be one of {list(LEVELS)}")
         if level == self.level and self._cams:
             return
+        t0 = time.perf_counter()
         self._destroy_cams()
+        self._gen += 1
         self.level = level
         spec = LEVELS[level]
         for name, cfg in spec.items():
@@ -388,19 +423,27 @@ class VizCams:
             self._create_cam(name, cfg)
         if level == "low" and self.overview_cfg:  # explicit overview request on low
             self._create_cam("overview", {**LEVELS["high"]["overview"], **self.overview_cfg})
+        ms = (time.perf_counter() - t0) * 1000.0
+        self._last_set_level_ms = round(ms, 1)
+        with self._lock:
+            self._stats["set_level_ms"].append(round(ms, 1))
+            del self._stats["set_level_ms"][:-20]
         if self.verbose:
             desc = ", ".join(f"{c.name} {c.w}x{c.h} " + (f"snapshot every {1 / c.hz:g}s (settle {c.settle})"
                                                           if c.snapshot else f"@{c.hz:g}Hz")
                              for c in self._cams.values()) or "none"
-            print(f"[viz_cams] level={level}: {desc} -> {self._pub_addr} (render={self.render_mode})", flush=True)
+            print(f"[viz_cams] level={level}: {desc} -> {self._pub_addr} (render={self.render_mode}; "
+                  f"set_level {ms:.0f} ms on the sim thread)", flush=True)
 
     def handle_op(self, req: dict) -> dict:
         """For P1's REP: {"op": "viz_level", "level": ...} | {"op": "viz_stats"}."""
         op = req.get("op")
         args = {**req.get("args", {}), **{k: v for k, v in req.items() if k not in ("op", "args")}}
         if op == "viz_level":
+            gen0 = self._gen
             self.set_level(str(args.get("level", "low")))
-            return {"ok": True, "level": self.level}
+            return {"ok": True, "level": self.level,
+                    "set_level_ms": self._last_set_level_ms if self._gen != gen0 else 0.0}
         if op == "viz_stats":
             return {"ok": True, **self.stats()}
         return {"ok": False, "error": f"unknown viz op {op!r}"}
@@ -411,6 +454,15 @@ class VizCams:
             enc = list(self._stats["encode_ms"][-500:])
             chm = list(self._stats["chase_ms"][-500:])
             chf = list(self._stats["chase_free"][-500:])
+            rb = list(self._stats["readback_ms"][-500:])
+            cp = list(self._stats["copy_ms"][-500:])
+            slm = list(self._stats["set_level_ms"])
+
+        def _m(v, p=None):
+            if not v:
+                return None
+            return round(float(np.mean(v) if p is None else np.percentile(v, p)), 3)
+
         out = {
             "level": self.level, "render_mode": self.render_mode,
             "forced_renders": self._stats["forced_renders"], "piggyback_captures": self._stats["piggyback"],
@@ -418,6 +470,10 @@ class VizCams:
             "capture_ms_mean": round(float(np.mean(cap)), 3) if cap else None,
             "capture_ms_p99": round(float(np.percentile(cap, 99)), 3) if cap else None,
             "encode_ms_mean": round(float(np.mean(enc)), 3) if enc else None,
+            # capture_ms = readback + copy (+ re-arm for snapshots, + render for forced frames); split for live cams
+            "readback_ms_mean": _m(rb), "readback_ms_p99": _m(rb, 99),
+            "copy_ms_mean": _m(cp), "copy_ms_p99": _m(cp, 99),
+            "set_level_ms": slm, "resent": self._stats["resent"],
             # chase placement (raycasts included) and how often the chosen view was not fully free
             "chase_place_ms_mean": round(float(np.mean(chm)), 3) if chm else None,
             "chase_place_ms_p99": round(float(np.percentile(chm, 99)), 3) if chm else None,
@@ -435,6 +491,39 @@ class VizCams:
                                    "forced": c.n_forced, "empty": c.n_empty,
                                    "hz_sim": round(rate, 2) if rate else None}
         return out
+
+    def warmup(self, renders: int = 10, base_pos: Sequence[float] | None = None,
+               base_quat_wxyz: Sequence[float] | None = None) -> dict:
+        """Build the RTX pipeline of the new render products at start-up instead of inside the paced loop: place
+        the chase camera at the robot, render `renders` times, and take (and publish) the first top snapshot.
+        Call once from the sim thread after construction. Returns timings."""
+        t0 = time.perf_counter()
+        if base_pos is not None:
+            pos = np.asarray(base_pos, dtype=float)[:3]
+            yaw = yaw_from_quat_wxyz(base_quat_wxyz) if base_quat_wxyz is not None else 0.0
+            self._pose, self._chase_state = (pos, yaw), None
+            if "chase" in self._cams:
+                self._update_chase_state(pos, yaw, 0.0)
+                avoid, self.chase_avoid_walls = self.chase_avoid_walls, False   # no scene queries before stepping
+                try:
+                    self._apply_chase_pose(self._cams["chase"])
+                finally:
+                    self.chase_avoid_walls = avoid
+        snaps = [c for c in self._cams.values() if c.snapshot]
+        for c in snaps:
+            self._request(c, 0.0)
+        n = max(int(renders), max((c.settle for c in snaps), default=1))
+        for _ in range(n):
+            self._render_now()
+        for c in snaps:
+            self._harvest(c, forced=True, t_render=0.0)
+            c.next_due = -1.0     # the first step() captures a fresh one at the loop's own t_sim
+        for c in self._cams.values():
+            c.pending = False
+        ms = (time.perf_counter() - t0) * 1000.0
+        if self.verbose:
+            print(f"[viz_cams] warm-up: {n} renders in {ms:.0f} ms", flush=True)
+        return {"renders": n, "ms": round(ms, 1)}
 
     def close(self) -> None:
         self._destroy_cams()
@@ -627,14 +716,18 @@ class VizCams:
 
     def _harvest(self, c: _Cam, forced: bool, t_render: float, render_ms: float = 0.0) -> None:
         t0 = time.perf_counter()
-        data = c.annot.get_data()
+        data = c.annot.get_data()   # a view on Replicator's buffer (do_array_copy=False): copy before the next render
+        t1 = time.perf_counter()
         if c.snapshot:
             c.rp.hydra_texture.set_updates_enabled(False)
         c.pending = False
         if data is None or getattr(data, "size", 0) == 0 or data.ndim != 3:
             c.n_empty += 1
             return
-        rgb = np.ascontiguousarray(data[:, :, :3])
+        # a plain contiguous copy of the RGBA buffer (memcpy); dropping alpha is left to the worker thread
+        # (cv2 RGBA2BGR): the strided RGB copy np.ascontiguousarray(data[..., :3]) cost 1.7 ms mean at 640x360
+        rgb = np.array(data, copy=True, order="C")
+        t2 = time.perf_counter()
         c.seq += 1
         c.n_captured += 1
         c.n_forced += int(forced)
@@ -664,8 +757,13 @@ class VizCams:
         with self._lock:
             self._stats["capture_ms"].append((time.perf_counter() - t0) * 1000.0 + render_ms
                                              + (c.rearm_ms if c.snapshot else 0.0))
-            if len(self._stats["capture_ms"]) > 2000:
-                del self._stats["capture_ms"][:1000]
+            if not c.snapshot:
+                self._stats["readback_ms"].append((t1 - t0) * 1000.0)
+                self._stats["copy_ms"].append((t2 - t1) * 1000.0)
+            for k in ("capture_ms", "readback_ms", "copy_ms"):
+                if len(self._stats[k]) > 2000:
+                    del self._stats[k][:1000]
+        meta["gen"] = self._gen
         try:
             self._q.put_nowait((rgb, meta, c.q))
         except queue.Full:
@@ -816,21 +914,36 @@ class VizCams:
         except Exception:  # noqa: BLE001
             enc = "pil"
         sock, own = self._sock, self._own_sock
+        last_snap: dict[str, tuple[list[bytes], int, float]] = {}   # cam -> (message, generation, last send)
         while not self._stop.is_set():
             try:
                 item = self._q.get(timeout=0.2)
             except queue.Empty:
-                continue
+                item = False
             if item is None:
                 break
+            if self.resend_s > 0 and last_snap:   # re-send the last snapshot for subscribers that joined late
+                now = time.time()
+                for cam, (msg, gen, t_last) in list(last_snap.items()):
+                    if gen != self._gen:
+                        del last_snap[cam]
+                    elif now - t_last >= self.resend_s:
+                        try:
+                            sock.send_multipart(msg, flags=zmq.NOBLOCK)
+                            self._stats["resent"] += 1
+                        except zmq.Again:
+                            pass
+                        last_snap[cam] = (msg, gen, now)
+            if item is False:
+                continue
             rgb, meta, q = item
             t0 = time.perf_counter()
             try:
                 if enc == "cv2":
                     import cv2
 
-                    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
-                                           [int(cv2.IMWRITE_JPEG_QUALITY), int(q)])
+                    code = cv2.COLOR_RGBA2BGR if rgb.shape[2] == 4 else cv2.COLOR_RGB2BGR
+                    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, code), [int(cv2.IMWRITE_JPEG_QUALITY), int(q)])
                     jpeg = buf.tobytes()
                 else:
                     import io
@@ -838,12 +951,14 @@ class VizCams:
                     from PIL import Image
 
                     b = io.BytesIO()
-                    Image.fromarray(rgb).save(b, format="JPEG", quality=int(q))
+                    Image.fromarray(np.ascontiguousarray(rgb[:, :, :3])).save(b, format="JPEG", quality=int(q))
                     jpeg = b.getvalue()
                 meta["jpeg"] = jpeg
                 meta["encode_ms"] = round((time.perf_counter() - t0) * 1000.0, 3)
-                sock.send_multipart([meta["topic"].encode(), msgpack.packb(meta, use_bin_type=True)],
-                                    flags=zmq.NOBLOCK)
+                msg = [meta["topic"].encode(), msgpack.packb(meta, use_bin_type=True)]
+                if meta.get("snapshot"):
+                    last_snap[meta["topic"]] = (msg, meta.get("gen", 0), time.time())
+                sock.send_multipart(msg, flags=zmq.NOBLOCK)
                 with self._lock:
                     self._stats["encode_ms"].append(meta["encode_ms"])
                     if len(self._stats["encode_ms"]) > 2000:
@@ -855,3 +970,52 @@ class VizCams:
                 print(f"[viz_cams] encode/send failed: {e}", flush=True)
         if own:
             sock.close(0)
+
+
+# ------------------------------------------------------------------------------------------------ P1 hook helpers
+def add_p1_args(ap: Any) -> None:
+    """sim_isaac/app.py parse_args(): --viz LEVEL and --viz-hz (argparse parser)."""
+    ap.add_argument("--viz", choices=list(LEVELS), default="off",
+                    help="VizCams (viz/isaac_cams.py): chase/top cameras as JPEG on PUB frames_pub (5602), "
+                         "off|min|low|high (docs/viz.md). Not together with --tp-camera: both bind 5602")
+    ap.add_argument("--viz-hz", type=float, default=10.0, help="VizCams chase camera rate (sim time)")
+
+
+def viz_enabled(a: Any) -> bool:
+    """True when --viz is not off. Exits with an argparse-style error, before Kit starts, when --viz and --tp-camera
+    are both given (both bind the frames PUB 5602; P1's FramePublisher would fail at bind after the warm-up)."""
+    level = getattr(a, "viz", "off") or "off"
+    if level != "off" and getattr(a, "tp_camera", False):
+        raise SystemExit(f"error: --viz {level} and --tp-camera both publish on the frames port 5602; use one of them")
+    return level != "off"
+
+
+def attach_p1(app: Any, warmup: int | None = None, robot_prim_path: str = "/World/G1") -> VizCams | None:
+    """Create VizCams for sim_isaac/app.py's App. Call at the end of App.setup() (after the gt.register loop).
+
+    Returns None when --viz is off. Otherwise: VizCams on "/World/G1" with the house bounds, floor_z and the frames
+    PUB port of P1, registers the REP ops viz_level / viz_stats on app.gt, and runs warm-up renders (default
+    min(--warmup-renders, 10)) so the first render of the new products happens at start-up, not in the paced loop.
+    Everything it needs from App: a (args), sim, scene.bounds, floor_z, ports["frames_pub"], gt.register, log,
+    _read_state() (optional, for the initial chase pose)."""
+    a = app.a
+    if not viz_enabled(a):
+        return None
+    if getattr(a, "enable_cameras", True) is False:
+        raise RuntimeError("--viz needs cameras enabled (parse_args: `... or viz_enabled(a)` sets enable_cameras)")
+    log = getattr(app, "log", print)
+    cams = VizCams(app.sim, robot_prim_path, app.scene.bounds, pub=f"tcp://127.0.0.1:{app.ports['frames_pub']}",
+                   hz=float(getattr(a, "viz_hz", 10.0)), level=a.viz, floor_z=float(app.floor_z))
+    app.gt.register("viz_level", cams.handle_op)
+    app.gt.register("viz_stats", cams.handle_op)
+    pos = quat = None
+    try:
+        st = app._read_state()
+        pos, quat = [float(v) for v in st["base_pos"]], [float(v) for v in st["base_quat"]]
+    except Exception as e:  # noqa: BLE001
+        log(f"[viz] no initial pose for the chase warm-up: {e}")
+    n = warmup if warmup is not None else min(int(getattr(a, "warmup_renders", 10) or 10), 10)
+    w = cams.warmup(n, pos, quat)
+    log(f"[viz] VizCams level={a.viz} on :{app.ports['frames_pub']} (REP ops viz_level, viz_stats); "
+        f"warm-up {w['renders']} renders {w['ms']:.0f} ms")
+    return cams

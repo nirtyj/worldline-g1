@@ -69,6 +69,8 @@ ap.add_argument("--selftest", action="store_true", help="check top-view mapping 
 ap.add_argument("--top-settle", type=int, default=None, help="renders before a top snapshot is read (VizCams default 4)")
 ap.add_argument("--settle-sweep", action="store_true", help="top snapshot noise vs settle renders, then exit")
 ap.add_argument("--out", default=str(REPO / "outputs" / "viz_test"))
+ap.add_argument("--hook", action="store_true",
+                help="create VizCams through viz.isaac_cams.attach_p1 on a P1-shaped shim (the sim_isaac/app.py path)")
 AppLauncher.add_app_launcher_args(ap)
 ap.set_defaults(rendering_mode="balanced")  # = sim_isaac/app.py; unset gives noisy frames (see docstring)
 args = ap.parse_args()
@@ -603,9 +605,26 @@ bounds = scene["bounds"]
 _top_over = {"every_s": 0.5, "long": 768} if args.selftest else {}
 if args.top_settle is not None:
     _top_over["settle"] = args.top_settle
-cams = VizCams(sim, "/World/Robot", bounds, pub=f"tcp://127.0.0.1:{P['frames']}", hz=args.viz_hz,
-               level=args.level, floor_z=FLOOR, render=args.viz_render,
-               cams={"top": _top_over} if _top_over else None)
+HOOK_OPS: dict = {}
+if args.hook:
+    # exactly what sim_isaac/app.py does (docs/viz.md 9.1), on a shim with the App attributes attach_p1 reads
+    from types import SimpleNamespace
+
+    from viz.isaac_cams import attach_p1, viz_enabled
+
+    _a = SimpleNamespace(viz=args.level, viz_hz=args.viz_hz, tp_camera=False, warmup_renders=30,
+                         camera=args.head)
+    _a.enable_cameras = _a.camera != "none" or _a.tp_camera or viz_enabled(_a)
+    _shim = SimpleNamespace(
+        a=_a, sim=sim, scene=SimpleNamespace(bounds=tuple(bounds)), floor_z=FLOOR, ports={"frames_pub": P["frames"]},
+        gt=SimpleNamespace(register=HOOK_OPS.__setitem__), log=log,
+        _read_state=lambda: {"base_pos": [kin.x, kin.y, kin.base_z()], "base_quat": quat_yaw(kin.yaw)})
+    cams = attach_p1(_shim, robot_prim_path="/World/Robot")
+    log(f"--hook: attach_p1 registered REP ops {sorted(HOOK_OPS)}")
+else:
+    cams = VizCams(sim, "/World/Robot", bounds, pub=f"tcp://127.0.0.1:{P['frames']}", hz=args.viz_hz,
+                   level=args.level, floor_z=FLOOR, render=args.viz_render,
+                   cams={"top": _top_over} if _top_over else None)
 
 # head publisher thread: encode exactly like the contract (cv2.imencode on the RGB array, q80, base64)
 head_q: queue.Queue = queue.Queue(maxsize=4)
@@ -712,10 +731,10 @@ def poll_body():
                 rep_ = {"id": op["id"], "ok": False, "state": "rejected", "error": "go_to needs x, y"}
             else:
                 rep_ = {"id": op["id"], "ok": True, "state": "accepted"}
-                body_event("accepted", op, {})
+                body_event("accepted", op, {"args": op["args"]})   # like body/service.py _start_motion
                 kin.start_op(op, t_sim, events)
         else:
-            rep_ = {"id": op["id"], "ok": False, "state": "rejected", "error": f"unknown op {op['op']}"}
+            rep_ = {"id": op["id"], "ok": False, "state": "rejected", "error": f"unknown op {op['op']!r}"}
         body_router.send_multipart(env + [json.dumps(rep_).encode()])
 
 
@@ -752,6 +771,9 @@ def poll_rep():
                 r = {"ok": True, "rtf_1s": rtf_window(1.0), "rtf_10s": rtf_window(10.0), "t_sim": t_sim,
                      "render_ms": {"mean": float(np.mean(rm)) if rm else None}, "physx_device": args.physx_device,
                      "viz": cams.stats(), "note": NOTE}
+            elif op in HOOK_OPS:           # --hook: the handlers attach_p1 registered (as P1's GtServer does)
+                r = HOOK_OPS[op](req)
+                r.setdefault("ok", True)
             elif op in ("viz_level", "viz_stats"):
                 r = cams.handle_op(req)
             elif op == "render_topdown":

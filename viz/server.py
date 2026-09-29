@@ -24,6 +24,18 @@ Also served (handy for curl, other UIs, and the future Worldline ui/server.py):
     POST /api/cmd             {"op": "walk", "args": {...}} -> body reply
     POST /api/record          {"action": "start"|"stop"}
     GET /occupancy.png, /topdown.png, /recordings/<run>/<file>
+
+Driving with held keys (page W/A/S/D/Q/E): the page sends {"type": "drive", "vx", "vy", "wz"} on every change
+(chords debounced 40 ms) and as a 5 Hz heartbeat while keys are held, and {"type": "drive", "stop": true} on
+release. The server turns that into ONE body op per key press, not one per change or per keepalive:
+  velocity mode  the body's streaming op `velocity` (body/velocity.py): the first message starts it with a fresh
+                 `stream` id, later ones (10 Hz from the server, box-local) update it without new ops or events,
+                 release sends `end`; the body's own watchdog (watchdog_s 0.5) stops the robot if the server dies.
+  walk mode      bodies without `velocity` (reply "unknown op"): one `walk` per distinct velocity, duration_s 10,
+                 re-sent only after 8 s of the same keys; release sends `stop`.
+--drive auto (default) tries velocity at the first key press and falls back to walk for the rest of the run.
+Deadman: no heartbeat for 0.6 s (tab hidden, tunnel stalled, WebSocket closed) ends the drive like a release.
+Any other command from the same page (stop, stand, go_to, turn_to) supersedes the drive without an extra message.
 """
 
 from __future__ import annotations
@@ -48,7 +60,7 @@ from aiohttp import WSMsgType, web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from viz.common import (  # noqa: E402
-    decode_head, dumps, ep, frame_from_msg, occupancy_rgba, pose_summary, ports, split_msg, swap_rb_jpeg,
+    decode_head, dumps, ep, frame_from_msg, occupancy_rgba, pose_summary, ports, same_frame, split_msg, swap_rb_jpeg,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -56,6 +68,32 @@ REPO = HERE.parent
 REC_ROOT = REPO / "outputs" / "recordings"
 MAX_INFLIGHT = 4   # unacked frames per stream per client; >= fps x RTT (tunnel RTT ~170 ms -> 4 allows ~23 fps)
 TEL_HZ = 10.0
+UI_OPS = {"stand", "walk", "go_to", "turn_to", "stop", "status", "ping", "clear_fault", "velocity"}
+DRIVE_TICK_S = 0.1        # velocity mode: server -> body stream rate (box-local, no tunnel jitter)
+DRIVE_DEADMAN_S = 0.6     # no page heartbeat (5 Hz) for this long -> end the drive
+DRIVE_WATCHDOG_S = 0.5    # body-side velocity watchdog we request (the server streams at 10 Hz)
+WALK_HOLD_S = 10.0        # walk mode: duration_s of each walk ...
+WALK_RESEND_S = 8.0       # ... re-sent only after this long with unchanged keys
+
+
+class DriveSession:
+    """Held-key drive of one page (see the module docstring)."""
+
+    def __init__(self, cid: str):
+        self.cid = cid
+        self.n = 0
+        self.v: tuple[float, float, float] | None = None   # wanted (vx, vy, wz); None = released
+        self.t_hb = 0.0            # monotonic time of the last page message
+        self.active = False        # our velocity/walk op is (believed) running on the body
+        self.mode: str | None = None
+        self.stream: str | None = None
+        self.sent_v: tuple[float, float, float] | None = None
+        self.t_sent = 0.0
+        self.failed_v: tuple[float, float, float] | None = None   # its start failed: no retry until it changes
+        self.epoch = 0             # bumped by any other command from this page (it supersedes the drive)
+        self.busy = False
+        self.ops = 0               # body ops started by this session (for tests / stats)
+        self.msgs = 0              # body messages sent (starts + stream updates + ends)
 
 
 class Stream:
@@ -94,6 +132,7 @@ class Client:
         self.wake = asyncio.Event()
         self.outbox: deque = deque()
         self.frames_sent = 0
+        self.drive = DriveSession(self.id)
 
 
 class Hub:
@@ -111,6 +150,7 @@ class Hub:
         self.body_state: dict | None = None
         self.body_state_t = 0.0
         self.body_events: deque = deque(maxlen=30)
+        self.velocity_ok: bool | None = None if args.drive == "auto" else (args.drive == "velocity")
         self.scene: dict | None = None
         self.occ_png: bytes | None = None
         self.occ_meta: dict | None = None
@@ -129,6 +169,7 @@ class Hub:
         self.head_raw_seq = 0
         self.head_event = asyncio.Event()
         self.tasks: list[asyncio.Task] = []
+        self.closed_drivers: list[Client] = []    # pages that closed while driving (the loop ends their drive)
         self.t_start = time.time()
 
     def stream(self, name: str) -> Stream:
@@ -202,6 +243,9 @@ class Hub:
             if got is None:
                 continue
             name, jpeg, msg, swap = got
+            held = self.streams.get(name)
+            if held is not None and held.jpeg is not None and same_frame(held.hdr, msg):
+                continue  # VizCams re-send of the snapshot we already have
             if swap:  # P1 frame.tp: cv2-encoded RGB (10 Hz, ~4 ms per swap, off the event loop)
                 try:
                     jpeg = await loop.run_in_executor(None, swap_rb_jpeg, jpeg, 85)
@@ -210,7 +254,7 @@ class Hub:
             cp = msg.get("cam_pose") or {}
             hdr = {"s": name, "seq": msg.get("seq"), "t_sim": msg.get("t_sim"), "t_wall": msg.get("t_wall"),
                    "w": msg.get("w"), "h": msg.get("h"), "extent": cp.get("extent"), "robot": msg.get("robot"),
-                   "snapshot": bool(msg.get("snapshot")), "src": msg.get("source")}
+                   "snapshot": bool(msg.get("snapshot")), "src": msg.get("source"), "source": msg.get("source")}
             await self.stream(name).publish(jpeg, hdr)
             self.wake_all()
 
@@ -265,14 +309,17 @@ class Hub:
                     fut.set_result(rep)
 
     async def body_cmd(self, op: str, args: dict | None, client: Client | None = None,
-                       timeout: float = 5.0) -> dict:
-        if op not in {"stand", "walk", "go_to", "turn_to", "stop", "status", "ping", "clear_fault"}:
+                       timeout: float = 5.0, note: bool = True) -> dict:
+        if op not in UI_OPS:
             return {"ok": False, "error": f"op {op!r} not allowed from the UI"}
+        if client is not None and op not in ("status", "ping", "velocity"):
+            client.drive.epoch += 1          # this command supersedes the page's held-key drive
+            client.drive.v, client.drive.active = None, False
         req = {"id": f"ui-{op}-{uuid.uuid4().hex[:8]}", "op": op, "args": args or {}}
         fut = asyncio.get_running_loop().create_future()
         self.pending[req["id"]] = (fut, client)
         await self.dealer.send(json.dumps(req).encode())
-        if op != "status":
+        if note and op not in ("status", "ping"):
             asyncio.create_task(self.rec_note(cmd={"op": op, "args": args or {}, "id": req["id"]}))
         try:
             rep = await asyncio.wait_for(fut, timeout)
@@ -280,6 +327,117 @@ class Hub:
             self.pending.pop(req["id"], None)
             rep = {"id": req["id"], "ok": False, "error": f"no reply from body on {self.p['body_ctl']} in {timeout}s"}
         return {"op": op, "args": args or {}, **rep}
+
+    # ------------------------------------------------------------------------------------------ held-key drive
+    def drive_msg(self, c: Client, m: dict) -> None:
+        ds = c.drive
+        ds.t_hb = time.monotonic()
+        if m.get("stop"):
+            ds.v = None
+        else:
+            def num(k: str, lim: float) -> float:
+                try:
+                    return round(max(-lim, min(lim, float(m.get(k) or 0.0))), 3)
+                except (TypeError, ValueError):
+                    return 0.0
+            ds.v = (num("vx", 1.0), num("vy", 1.0), num("wz", 1.5))
+        if ds.v != ds.sent_v or ds.v is None:
+            asyncio.create_task(self.drive_step(c))   # act on a change at once; the tick loop does the rest
+
+    async def drive_loop(self) -> None:
+        while True:
+            await asyncio.sleep(DRIVE_TICK_S)
+            for c in list(self.clients) + list(self.closed_drivers):
+                if c.drive.v is not None or c.drive.active:
+                    asyncio.create_task(self.drive_step(c))
+            self.closed_drivers = [c for c in self.closed_drivers if c.drive.active or c.drive.busy]
+
+    def _drive_tell(self, c: Client, **kw) -> None:
+        c.outbox.append({"type": "drive", **kw})
+        c.wake.set()
+
+    async def drive_step(self, c: Client) -> None:
+        ds = c.drive
+        if ds.busy:
+            return
+        ds.busy = True
+        try:
+            await self._drive_step(c, ds)
+        finally:
+            ds.busy = False
+
+    async def _drive_step(self, c: Client, ds: DriveSession) -> None:
+        now = time.monotonic()
+        want = ds.v
+        if want is not None and now - ds.t_hb > DRIVE_DEADMAN_S:
+            ds.v = want = None
+            self._drive_tell(c, state="deadman", mode=ds.mode,
+                             info=f"no key heartbeat for {DRIVE_DEADMAN_S} s: drive ended")
+        epoch = ds.epoch
+        if want is None:                                   # released
+            if ds.active:
+                ds.active = False
+                if ds.mode == "velocity":
+                    await self.body_cmd("velocity", {"stream": ds.stream, "end": True, "t_wall": time.time()},
+                                        timeout=2.0, note=False)
+                else:
+                    await self.body_cmd("stop", {}, timeout=2.0, note=False)
+                ds.msgs += 1
+                await self.rec_note(cmd={"op": "drive", "args": {"released": True}})
+                self._drive_tell(c, state="ended", mode=ds.mode)
+            ds.sent_v = ds.failed_v = None
+            return
+        if want == ds.failed_v:
+            return
+        changed = want != ds.sent_v
+        vx, vy, wz = want
+        if self.velocity_ok is not False:
+            if not changed and ds.active and now - ds.t_sent < DRIVE_TICK_S * 0.8:
+                return
+            if not ds.active:
+                ds.n += 1
+                ds.stream = f"ui-{c.id}-{ds.n}"
+            args = {"vx": vx, "vy": vy, "wz": wz, "stream": ds.stream, "t_wall": time.time(),
+                    "watchdog_s": DRIVE_WATCHDOG_S}
+            rep = await self.body_cmd("velocity", args, timeout=2.0, note=False)
+            if changed and rep.get("ok"):   # note the recorder only about what the body took, and only on change
+                asyncio.create_task(self.rec_note(cmd={"op": "velocity", "args": args, "id": rep.get("id")}))
+            ds.msgs += 1
+            err = str(rep.get("error") or "")
+            if not rep.get("ok") and "unknown op" in err and self.args.drive == "auto":
+                self.velocity_ok = False            # this body has no streaming op: walk mode for the rest of the run
+                self._drive_tell(c, state="mode", mode="walk",
+                                 info="body has no 'velocity' op: using walk (one op per key change)")
+            elif not rep.get("ok"):
+                ds.failed_v, ds.active = want, False
+                self._drive_tell(c, state="failed", mode="velocity", error=err or rep.get("state"))
+                return
+            else:
+                self.velocity_ok = True
+                if ds.epoch != epoch:                 # another command superseded us while this was in flight
+                    ds.active = False
+                    return
+                if rep.get("state") == "accepted" or not ds.active:
+                    ds.ops += int(rep.get("state") == "accepted")
+                    self._drive_tell(c, state="started", mode="velocity", stream=ds.stream, v=list(want))
+                ds.active, ds.mode, ds.sent_v, ds.t_sent = True, "velocity", want, now
+                return
+        # walk mode
+        if not changed and ds.active and now - ds.t_sent < WALK_RESEND_S:
+            return
+        rep = await self.body_cmd("walk", {"vx": vx, "vy": vy, "yaw_rate": wz, "duration_s": WALK_HOLD_S},
+                                  timeout=2.0)
+        ds.msgs += 1
+        if not rep.get("ok"):
+            ds.failed_v, ds.active = want, False
+            self._drive_tell(c, state="failed", mode="walk", error=str(rep.get("error") or rep.get("state")))
+            return
+        ds.ops += 1
+        if ds.epoch != epoch:
+            ds.active = False
+            return
+        ds.active, ds.mode, ds.sent_v, ds.t_sent = True, "walk", want, now
+        self._drive_tell(c, state="started", mode="walk", v=list(want))
 
     # ------------------------------------------------------------------------------------------ P1 REP
     async def p1(self, op: str, timeout: float = 5.0, **args) -> dict | None:
@@ -365,8 +523,11 @@ class Hub:
             so.bind(("127.0.0.1", 0))
             port = so.getsockname()[1]
         self.rec_ctl = f"tcp://127.0.0.1:{port}"
+        # every port explicitly: the recorder must use this server's sources (offset or per-port overrides), never
+        # its own WL_PORT_OFFSET/default, or a test UI would query the production P1 REP on 5600
         cmd = [sys.executable, str(HERE / "recorder.py"), "--control", self.rec_ctl, "--label", label,
                "--head", str(self.p["head"]), "--frames", str(self.p["frames"]), "--gt", str(self.p["gt_pub"]),
+               "--gt-rep", str(self.p["gt_rep"]), "--body-ctl", str(self.p["body_ctl"]),
                "--body-evt", str(self.p["body_evt"]), "--out", str(self.args.rec_out)]
         if not self.args.head_swap_rb:
             cmd.append("--no-head-swap")
@@ -463,6 +624,8 @@ def make_app(hub: Hub) -> web.Application:
                 elif t == "sub":
                     c.subs = set(m.get("streams") or []) or None
                     c.wake.set()
+                elif t == "drive":
+                    hub.drive_msg(c, m)
                 elif t == "cmd":
                     asyncio.create_task(_cmd_reply(hub, c, m))
                 elif t == "record":
@@ -476,6 +639,10 @@ def make_app(hub: Hub) -> web.Application:
         finally:
             hub.clients.discard(c)
             sender.cancel()
+            if c.drive.v is not None or c.drive.active:   # page gone while driving: end it now
+                c.drive.v = None
+                hub.closed_drivers.append(c)
+                asyncio.create_task(hub.drive_step(c))
         return ws
 
     async def mjpeg(req: web.Request):
@@ -511,7 +678,11 @@ def make_app(hub: Hub) -> web.Application:
 
     async def api_state(_req):
         return web.json_response({**hub.telemetry(), "hello": hub.hello(),
-                                   "body_events": list(hub.body_events)[-10:], "rec_last": hub.rec_last},
+                                   "body_events": list(hub.body_events)[-10:], "rec_last": hub.rec_last,
+                                   "drive": {"velocity_ok": hub.velocity_ok, "mode_arg": hub.args.drive,
+                                             "sessions": [{"client": cl.id, "active": cl.drive.active,
+                                                           "mode": cl.drive.mode, "ops": cl.drive.ops,
+                                                           "msgs": cl.drive.msgs} for cl in hub.clients]}},
                                   dumps=dumps)
 
     async def api_cmd(req: web.Request):
@@ -614,7 +785,7 @@ async def main_async(args: argparse.Namespace) -> None:
                      body_ctl=args.body_ctl, body_evt=args.body_evt, http=args.http)
     hub = Hub(args, port_map)
     for fn in (hub.head_loop, hub.head_convert_loop, hub.frames_loop, hub.gt_loop, hub.body_evt_loop,
-               hub.dealer_loop, hub.p1_stats_loop, hub.rec_status_loop):
+               hub.dealer_loop, hub.p1_stats_loop, hub.rec_status_loop, hub.drive_loop):
         hub.tasks.append(asyncio.create_task(fn(), name=fn.__name__))
     app = make_app(hub)
     runner = web.AppRunner(app, access_log=None)
@@ -629,6 +800,11 @@ async def main_async(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
+    for c in list(hub.clients):          # end held-key drives, then close the pages (no 60 s graceful wait)
+        if c.drive.active:
+            c.drive.v = None
+            await hub.drive_step(c)
+        await c.ws.close()
     if hub.rec_proc and hub.rec_proc.returncode is None:
         print("[viz] stopping the recorder", flush=True)
         await hub.rec_stop()
@@ -652,6 +828,8 @@ def main() -> None:
     ap.add_argument("--no-head-swap", dest="head_swap_rb", action="store_false",
                     help="the head JPEG already has standard channel order (contract: it does not)")
     ap.add_argument("--rec-out", default=str(REC_ROOT))
+    ap.add_argument("--drive", choices=["auto", "velocity", "walk"], default="auto",
+                    help="held-key driving: body op 'velocity' (streaming), 'walk', or auto-detect (module docstring)")
     ap.add_argument("--ws-window", type=int, default=MAX_INFLIGHT,
                     help="unacked frames per stream per browser (flow control; >= fps x RTT)")
     args = ap.parse_args()

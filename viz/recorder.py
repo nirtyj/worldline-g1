@@ -23,7 +23,8 @@ CLI (run in viz/.venv on the box):
     python viz/recorder.py --control tcp://127.0.0.1:5620      # record now; stop via the control socket or Ctrl-C
     python viz/recorder.py --control tcp://127.0.0.1:5620 --idle   # daemon: wait for start/stop (many runs)
     python viz/recorder.py ctl tcp://127.0.0.1:5620 start|stop|status|quit|note "text"
-Ports: --port-offset N (or WL_PORT_OFFSET) shifts every port; --head/--frames/--gt/--body-evt override one.
+Ports: --port-offset N (or WL_PORT_OFFSET) shifts every port; --head/--frames/--gt/--gt-rep/--body-ctl/--body-evt
+override one (viz/server.py passes all of them explicitly to the recorders it spawns).
 
 Importable:  from viz.recorder import Recorder;  r = Recorder(out_root, ports); r.start(); ...; r.stop()
 """
@@ -48,7 +49,7 @@ import zmq
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from viz.common import (  # noqa: E402
     TopMap, decode_head, decode_jpeg, draw_robot_overlay, dumps, ep, font, frame_from_msg, occupancy_rgba,
-    pose_summary, ports, split_msg,
+    pose_summary, ports, same_frame, split_msg,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -56,6 +57,9 @@ DEFAULT_OUT = REPO / "outputs" / "recordings"
 TILE = (640, 360)
 HEADER_H = 58
 STREAMS = ("head", "chase", "top", "overview")
+TOP_LONG = 768            # top.mp4 long side: fixed, so a small first image (P1 render_topdown) cannot shrink it
+MIN_LONG = {"chase": 640, "overview": 640}   # a level switch (min 480x270 -> low 640x360) keeps native size
+TEL_LINE_H = 20           # telemetry panel line height (15 px font)
 
 
 class _Stream:
@@ -84,7 +88,7 @@ class Recorder:
     def __init__(self, out_root: str | Path = DEFAULT_OUT, port_map: dict | None = None, fps: float = 10.0,
                  label: str = "", head_swap_rb: bool = True, duration: float | None = None,
                  until_event: list[str] | None = None, post_roll: float = 2.0, crf: int = 23,
-                 occupancy_npz: str | None = None, verbose: bool = True):
+                 occupancy_npz: str | None = None, top_long: int = TOP_LONG, verbose: bool = True):
         self.out_root = Path(out_root)
         self.ports = port_map or ports()
         self.fps = float(fps)
@@ -95,6 +99,7 @@ class Recorder:
         self.post_roll = post_roll
         self.crf = crf
         self.occupancy_npz = occupancy_npz
+        self.top_long = int(top_long)
         self.verbose = verbose
 
         self.dir: Path | None = None
@@ -103,7 +108,7 @@ class Recorder:
         self.pose_n = 0
         self.traj: deque = deque(maxlen=20000)
         self.body: dict = {}          # latest body state/event summary
-        self.body_log: deque = deque(maxlen=8)
+        self.body_log: deque = deque(maxlen=32)   # progress events of one op collapse into one entry
         self.last_cmd: dict | None = None
         self.target: list[float] | None = None
         self.fallen_ever = False
@@ -133,7 +138,7 @@ class Recorder:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._tel = open(self.dir / "telemetry.jsonl", "w", buffering=1)
         self._t0 = time.time()
-        self._log({"k": "start", "ports": self.ports, "fps": self.fps, "until": self.until,
+        self._log({"k": "start", "ports": self._used_ports(), "fps": self.fps, "until": self.until,
                    "duration": self.duration, "dir": str(self.dir)})
         for fn, name in ((self._rx_loop, "rec.rx"), (self._tick_loop, "rec.tick"), (self._scene_loop, "rec.scene")):
             t = threading.Thread(target=fn, name=name, daemon=True)
@@ -141,6 +146,10 @@ class Recorder:
             self._threads.append(t)
         self._say(f"recording -> {self.dir}")
         return self.dir
+
+    def _used_ports(self) -> dict:
+        """The ports this recorder connects to (summary/telemetry; body_ctl is recorded for reference only)."""
+        return {k: self.ports[k] for k in ("head", "frames", "gt_pub", "gt_rep", "body_ctl", "body_evt") if k in self.ports}
 
     def _scene_loop(self) -> None:
         """Background: scene bounds + occupancy for the top-view fallback (never blocks the recording)."""
@@ -239,14 +248,25 @@ class Recorder:
     def annotate(self, text: str | None = None, **kw) -> None:
         """Record an external note, e.g. the command the UI just sent: annotate(cmd={"op": "walk", ...})."""
         rec = {"k": "note", **({"text": text} if text else {}), **kw}
-        with self._lock:
-            if "cmd" in kw and isinstance(kw["cmd"], dict):
-                self.last_cmd = kw["cmd"]
-                if kw["cmd"].get("op") == "go_to":
-                    a = kw["cmd"].get("args") or {}
-                    if "x" in a and "y" in a:
-                        self.target = [float(a["x"]), float(a["y"])]
+        if "cmd" in kw and isinstance(kw["cmd"], dict):
+            self._set_cmd(kw["cmd"])
         self._log(rec)
+
+    def _set_cmd(self, cmd: dict, accepted: bool = False) -> None:
+        """Last command (header + panel) and the go_to target (top view). Sources: UI notes, and the body's
+        'accepted' event, which carries data.args for every op (body/service.py _start_motion), so commands from
+        the CLI, /api/cmd or BodyClient show up too. The target stays after the go_to ends (final pose vs target)
+        and is cleared when the body accepts any other motion op."""
+        with self._lock:
+            self.last_cmd = cmd
+            if cmd.get("op") == "go_to":
+                a = cmd.get("args") or {}
+                try:
+                    self.target = [float(a["x"]), float(a["y"])]
+                except (KeyError, TypeError, ValueError):
+                    pass
+            elif accepted:
+                self.target = None
 
     def status(self) -> dict:
         el = time.time() - self._t0 if self._t0 else 0.0
@@ -345,6 +365,8 @@ class Recorder:
             st = self.streams.get(cam)
             if st is None:
                 st = self.streams[cam] = _Stream(cam)
+            if st.jpeg is not None and same_frame(st.meta, msg):
+                return   # VizCams re-send of the snapshot we already hold
             with self._lock:
                 st.jpeg, st.meta, st.swap_rb = jpeg, msg, swap
                 st.rx += 1
@@ -381,13 +403,23 @@ class Recorder:
                     self._log({"k": "body_state", "msg": msg})
                 return
             ev = {"t": round(now - self._t0, 1), "id": msg.get("id"), "op": msg.get("op"),
-                  "state": msg.get("state")}
+                  "state": msg.get("state"), "n": 1}
             with self._lock:
                 self.body["event"] = ev
-                self.body_log.append(ev)
+                last = self.body_log[-1] if self.body_log else None
+                if (ev["state"] == "progress" and last is not None and last.get("state") == "progress"
+                        and last.get("id") == ev["id"]):
+                    last["n"] += 1          # keep accepted / succeeded visible: one line per run of progress
+                    last["t"] = ev["t"]
+                else:
+                    self.body_log.append(ev)
             self._log({"k": "body", "topic": topic, "msg": msg})
             state = str(msg.get("state") or "")
             op = str(msg.get("op") or "")
+            data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+            if state == "accepted":
+                self._set_cmd({"op": op, "args": data.get("args") if isinstance(data.get("args"), dict) else {},
+                               "id": msg.get("id")}, accepted=True)
             for u in self.until:
                 if u and u != "fallen" and (u == state or u == f"{op}:{state}" or u == topic):
                     self._trigger(f"event {op}:{state}")
@@ -435,6 +467,20 @@ class Recorder:
                 im.paste(o, (int(u0), int(v0)), o)
         draw_robot_overlay(im, tm, traj, pose, tgt)
         return im
+
+    def _video_size(self, name: str, wh: tuple[int, int]) -> tuple[int, int]:
+        """Fixed size of a stream's video, chosen at its first frame. top: long side = top_long whatever the first
+        image is (P1's render_topdown fallback is ~350 px, VizCams snapshots 512-1024 px); chase/overview: at least
+        MIN_LONG; everything: at most 1280 wide. Later frames of another size are letterboxed into it."""
+        w, h = wh
+        if name == "top":
+            s = self.top_long / max(w, h)
+        else:
+            s = max(1.0, MIN_LONG.get(name, 0) / max(w, h))
+        if w * s > 1280:
+            s = 1280 / w
+        w, h = int(round(w * s)), int(round(h * s))
+        return max(2, w - w % 2), max(2, h - h % 2)
 
     def _fit(self, im, size):
         """Letterbox `im` into `size` (w, h)."""
@@ -485,10 +531,7 @@ class Recorder:
             if im is None:
                 continue
             if st.size is None:
-                w, h = im.size
-                if w > 1280:
-                    h, w = int(h * 1280 / w), 1280
-                st.size = (w - w % 2, h - h % 2)
+                st.size = self._video_size(name, im.size)
                 st.first_tick = self._tick
                 st.writer = self._open_writer(self.dir / f"{name}.mp4", st.size)
                 black = np.zeros((st.size[1], st.size[0], 3), np.uint8)
@@ -550,7 +593,8 @@ class Recorder:
             d.text((x + 8, y + HEADER_H + 3), cap, fill=(230, 230, 230), font=f_small)
         if not br:
             self._telemetry_panel(d, W, H + HEADER_H, W, H, f_small, f_big)
-        # header band
+        # header band: line 1 pose/time, line 2 body state + last command (left) and the source's note (right,
+        # e.g. "VIZ TEST: kinematic"), so no overlay ever covers a tile or the telemetry panel
         with self._lock:
             p, body, cmd = self.pose, dict(self.body), self.last_cmd
         el = time.time() - self._t0
@@ -572,32 +616,40 @@ class Recorder:
             parts.append("no gt.pose")
         d.text((10, 6), "   ".join(parts), fill=(255, 90, 90) if p and p.get("fallen") else (235, 235, 240),
                font=f_big)
-        right = ""
+        right_edge = 2 * W - 6
+        if p and p.get("note"):
+            note = str(p["note"])[:60]
+            tw = d.textlength(note, font=f_small)
+            d.rectangle([right_edge - tw - 16, 30, right_edge, 53], fill=(120, 60, 0))
+            d.text((right_edge - tw - 8, 33), note, fill=(255, 220, 150), font=f_small)
+            right_edge -= tw + 28
+        line2 = ""
         if body:
-            right = f"body: {body.get('op') or 'idle'}" + (f"/{body['phase']}" if body.get("phase") else "")
+            line2 = f"body: {body.get('op') or 'idle'}" + (f"/{body['phase']}" if body.get("phase") else "")
             if body.get("fault"):
-                right += f" FAULT {body['fault']}"
+                line2 += f" FAULT {body['fault']}"
             ev = body.get("event")
             if ev:
-                right += f"  [{ev.get('op')}:{ev.get('state')}]"
+                line2 += f"  [{ev.get('op')}:{ev.get('state')}]"
         if cmd:
-            right += f"   cmd: {cmd.get('op')} {json.dumps(cmd.get('args') or {}, separators=(',', ':'))[:40]}"
-        if right:
-            d.text((10, 33), right.strip(), fill=(150, 220, 255), font=f_small)
-        if p and p.get("note"):
-            note = str(p["note"])
-            tw = d.textlength(note, font=f_big)
-            d.rectangle([2 * W - tw - 20, 2 * H + HEADER_H - 34, 2 * W - 4, 2 * H + HEADER_H - 6], fill=(120, 60, 0))
-            d.text((2 * W - tw - 12, 2 * H + HEADER_H - 31), note, fill=(255, 220, 150), font=f_big)
+            line2 += f"   cmd: {cmd.get('op')} {json.dumps(cmd.get('args') or {}, separators=(',', ':'))[:48]}"
+        line2 = line2.strip()
+        while line2 and d.textlength(line2, font=f_small) > right_edge - 10:
+            line2 = line2[:-2]
+        if line2:
+            d.text((10, 33), line2, fill=(150, 220, 255), font=f_small)
         return comp
 
-    def _telemetry_panel(self, d, x, y, W, H, f_small, f_big) -> None:
+    def _telemetry_panel(self, d, x, y, W, H, f_small, f_big) -> dict:
+        """Bottom-right tile when there is no overview. Lines are fitted to the tile: the pose block, the last
+        command and the go_to target stay; the body-event list shows as many of the newest events as fit (runs of
+        'progress' events are one line with a count). Returns the layout for tests."""
         with self._lock:
-            p, log, cmd = self.pose, list(self.body_log), self.last_cmd
-        lines = ["TELEMETRY"]
+            p, log, cmd, tgt = self.pose, [dict(e) for e in self.body_log], self.last_cmd, self.target
+        fixed = []
         if p:
             fc = p.get("foot_contact") or {}
-            lines += [
+            fixed += [
                 f"t_sim     {p.get('t_sim') or 0:.2f} s      RTF {p.get('rtf') or 0:.2f}",
                 f"base_pos  {', '.join(f'{v:+.2f}' for v in (p.get('base_pos') or []))}",
                 f"yaw       {math.degrees(p.get('yaw') or 0):+.1f} deg",
@@ -607,16 +659,35 @@ class Recorder:
                 f"distance  {self.dist:.2f} m   fallen ever {self.fallen_ever}",
             ]
         else:
-            lines.append("no gt.pose yet")
+            fixed.append("no gt.pose yet")
         if cmd:
-            lines.append(f"last cmd  {cmd.get('op')} {json.dumps(cmd.get('args') or {})[:48]}")
-        lines.append("body events:")
-        lines += [f"  {e['t']:6.1f}s  {e.get('op') or ''}  {e.get('state') or ''}  {e.get('id') or ''}"
-                  for e in log[-6:]] or ["  (none)"]
-        yy = y + 30
-        for i, ln in enumerate(lines):
-            d.text((x + 16, yy), ln, fill=(200, 200, 210) if i else (150, 220, 255), font=f_small if i else f_big)
-            yy += 24 if i else 30
+            fixed.append(f"last cmd  {cmd.get('op')} {json.dumps(cmd.get('args') or {}, separators=(',', ':'))[:44]}")
+        if tgt:
+            bp = (p or {}).get("base_pos")
+            dist = f"   {math.hypot(tgt[0] - bp[0], tgt[1] - bp[1]):.2f} m away" if bp else ""
+            fixed.append(f"target    ({tgt[0]:+.2f}, {tgt[1]:+.2f}){dist}")
+        ev_lines = []
+        for e in log:
+            n = f" x{e['n']}" if e.get("n", 1) > 1 else ""
+            eid = str(e.get("id") or "").rsplit("-", 1)[-1][:10]     # ui-go_to-1a2b3c4d -> 1a2b3c4d
+            ev_lines.append(f"  {e['t']:6.1f}s  {e.get('op') or ''}  {e.get('state') or ''}{n}  {eid}"[:60])
+        top_y = y + 10
+        first = top_y + 28                       # first line under the title
+        bottom = y + H - 6                       # last pixel a line may use
+        room = (bottom - first) // TEL_LINE_H    # lines that fit
+        n_ev = max(1, room - len(fixed) - 1)     # "body events:" takes one line
+        if len(fixed) + 1 + n_ev > room:          # (never with the fixed block above: 8 + 1 + 6 = 15 = room)
+            fixed = fixed[: max(0, room - 1 - n_ev)]
+        shown = ev_lines[-n_ev:] if ev_lines else ["  (none)"]
+        hidden = max(0, len(ev_lines) - n_ev)
+        lines = fixed + [f"body events:{f'  ({hidden} older)' if hidden else ''}"] + shown
+        d.text((x + 16, top_y), "TELEMETRY", fill=(150, 220, 255), font=f_big)
+        yy = first
+        for ln in lines:
+            d.text((x + 16, yy), ln, fill=(200, 200, 210), font=f_small)
+            yy += TEL_LINE_H
+        return {"lines": lines, "last_line_bottom": yy - TEL_LINE_H + 18, "tile_bottom": y + H,
+                "events_shown": len(shown), "events_hidden": hidden}
 
     def _finalize(self) -> dict:
         from PIL import Image, ImageDraw
@@ -663,7 +734,7 @@ class Recorder:
                          "p95": round(float(np.percentile(self._tick_ms, 95)), 1)} if self._tick_ms else None),
             "streams": streams, "pose_msgs": self.pose_n, "distance_m": round(self.dist, 3),
             "fallen_ever": self.fallen_ever, "last_pose": pose, "contact_sheet": str(sheet_path) if sheet_path else None,
-            "ports": self.ports,
+            "ports": self._used_ports(),
         }
         self._log({"k": "stop", **{k: v for k, v in summary.items() if k != "streams"}})
         with open(self.dir / "summary.json", "w") as fh:
@@ -702,7 +773,7 @@ def serve(args, port_map: dict) -> int:
     def new() -> Recorder:
         return Recorder(args.out, port_map, fps=args.fps, label=args.label, head_swap_rb=not args.no_head_swap,
                         duration=args.duration, until_event=args.until_event, post_roll=args.post_roll,
-                        crf=args.crf, occupancy_npz=args.occupancy)
+                        crf=args.crf, occupancy_npz=args.occupancy, top_long=args.top_long)
 
     signal.signal(signal.SIGINT, lambda *_: quit_.set())
     signal.signal(signal.SIGTERM, lambda *_: quit_.set())
@@ -790,18 +861,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-head-swap", action="store_true",
                     help="do not swap R/B of the head JPEG (the contract publishes cv2-encoded RGB -> swapped)")
     ap.add_argument("--occupancy", default=None, help="P1 occupancy npz to draw under the top view")
+    ap.add_argument("--top-long", type=int, default=TOP_LONG, help="top.mp4 long side in px (fixed for the run)")
     ap.add_argument("--port-offset", type=int, default=None)
-    ap.add_argument("--head", type=int, default=None)
-    ap.add_argument("--frames", type=int, default=None)
-    ap.add_argument("--gt", type=int, default=None)
-    ap.add_argument("--body-evt", type=int, default=None)
+    ap.add_argument("--head", type=int, default=None, help="head camera SUB port (5565)")
+    ap.add_argument("--frames", type=int, default=None, help="viz frames SUB port (5602)")
+    ap.add_argument("--gt", type=int, default=None, help="gt.pose SUB port (5601)")
+    ap.add_argument("--gt-rep", type=int, default=None, help="P1 REP port for scene/top-down/occupancy (5600)")
+    ap.add_argument("--body-ctl", type=int, default=None, help="body ROUTER port (5610; only recorded in summary)")
+    ap.add_argument("--body-evt", type=int, default=None, help="body events SUB port (5611)")
     args = ap.parse_args(argv)
-    port_map = ports(args.port_offset, head=args.head, frames=args.frames, gt_pub=args.gt, body_evt=args.body_evt)
+    port_map = ports(args.port_offset, head=args.head, frames=args.frames, gt_pub=args.gt, gt_rep=args.gt_rep,
+                     body_ctl=args.body_ctl, body_evt=args.body_evt)
     if args.control:
         return serve(args, port_map)
     rec = Recorder(args.out, port_map, fps=args.fps, label=args.label, head_swap_rb=not args.no_head_swap,
                    duration=args.duration, until_event=args.until_event, post_roll=args.post_roll, crf=args.crf,
-                   occupancy_npz=args.occupancy)
+                   occupancy_npz=args.occupancy, top_long=args.top_long)
 
     def _sig(*_):
         rec.stop_reason = rec.stop_reason or "signal"
