@@ -90,6 +90,10 @@ def parse_args():
     ap.add_argument("--gc-freeze", action=argparse.BooleanOptionalAction, default=True,
                     help="gc.freeze() after start-up so collections do not rescan Kit's objects")
     ap.add_argument("--no-default-lights", action="store_true")
+    ap.add_argument("--test-ops", action="store_true",
+                    help="register the TEST-ONLY fault-injection ops (sim_isaac/test_ops.py: push_robot, rtf_throttle, "
+                         "spawn_box, clear_box, test_ops_status) for eval/stack_suite.py; never in the demo stack")
+    ap.add_argument("--test-box-size", default="0.3,1.6,1.2", help="with --test-ops: the spawn_box box, x,y,z metres")
     AppLauncher.add_app_launcher_args(ap)
     # RTX preset: "balanced" (Isaac Lab default). "performance" renders ~1 ms faster in a house but the frames are
     # extremely noisy (Laplacian std 310 vs 2.2, even with the DL denoiser): tools/render_ab.sh, outputs/.../render_ab
@@ -177,6 +181,12 @@ class App:
             from sim_isaac.cameras import prim_path_of
             for spec in self.cam_specs:
                 spawn_spec_camera(prim_path_of(spec), spec)
+
+        self.test_ops = None
+        if a.test_ops:        # TEST-ONLY fault injection (eval/stack_suite.py); its box must exist before reset()
+            from sim_isaac.test_ops import TestOps
+            self.test_ops = TestOps(self, a.test_box_size, log=self.log)
+            self.test_ops.spawn_prims(sim_utils, (sx, sy, self.floor_z))
 
         self.sim.reset()
         self.robot.update(0.0)
@@ -288,6 +298,8 @@ class App:
                                          topic=b"frame.tp") if self.chase else None
         for op in M1_OPS + M2B_OPS:
             self.gt.register(op, getattr(self, f"op_{op}"))
+        if self.test_ops is not None:
+            self.test_ops.register(self.gt)
         from viz.isaac_cams import attach_p1  # viz hook: None unless --viz is on
         self.viz = attach_p1(self)
 
@@ -530,7 +542,7 @@ class App:
                  "physx_device": a.physx_device, "pd": a.pd, "dds_domain": a.dds_domain, "dds_iface": a.dds_iface,
                  "camera": a.camera, "camera_hz": a.camera_hz, "band": self.band.enabled,
                  "cameras": self.rig.on_map() if self.rig else {}, "p1_contract": _contract(),
-                 "dynamic_objects": len(self.objects.dyn_ids),
+                 "dynamic_objects": len(self.objects.dyn_ids), "test_ops": self.test_ops is not None,
                  "scene_load_s": round(self.scene_load_s, 2), "warmup_s": round(self.warmup_s, 2)}
         print("WL_ISAAC_READY " + json.dumps(ready), flush=True)
         self.pacer.mark_start_sim()
@@ -542,6 +554,8 @@ class App:
             tau_est = self._apply_commands(st)
             t1 = pc()
             self._apply_band(st)
+            if self.test_ops is not None:
+                self.test_ops.pre_step(st)     # push_robot's wrench (test-only)
             self.objects.pre_step(st)          # attach 'follow': held bodies to palm x grip offset
             t2 = pc()
             self.sim.step(render=False)
@@ -648,6 +662,8 @@ class App:
             if deadline is not None and now >= deadline:
                 self.log("duration reached")
                 break
+            if self.test_ops is not None:
+                self.test_ops.before_wait()    # rtf_throttle, expiries (test-only)
             self.pacer.wait()
 
     def _sim_closed(self) -> bool:

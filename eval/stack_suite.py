@@ -18,7 +18,12 @@ Two ways to run, one referee:
                       delay_proxy_on, delay_proxy_off, place_object. A scenario whose hook is missing is SKIPPED.
                       A hook command may use the injection's arguments as {placeholders} (push_robot {newtons},
                       throttle_rtf {rtf}, delay_proxy_on {ms}, place_object {object} {offset_m}); write literal
-                      braces as {{ }}. Hooks run on the laptop, e.g. an ssh to the box.
+                      braces as {{ }}. Hooks run where the suite runs. `--hooks box|laptop` takes the whole map from
+                      eval/hooks.py (tools/hooks on the box; docs/eval_hooks.md), with three fixtures that restore
+                      the stack and are never scored: recover_robot (before every scenario, and after G7's scoring
+                      window), restore_deploy (after each G8 variant's window) and clear_all (at the end).
+                      G7/G8 score the stack's OWN recovery inside RECOVERY_WINDOW_S; the fixture's operator-driven
+                      recovery after it is reported in extra.fixtures, labelled as such.
 
 Scoring reads only the page's messages (frame.truth from world.truth(), trace rows, events, model calls), exactly like
 eval/suite.py; the injectors are fixtures, never a source of verdicts. Each scenario reports its criteria one by one:
@@ -190,10 +195,15 @@ class Injector:
 
 
 class HookInjector(Injector):
-    """Shell hooks for a live stack (--hook name=cmd): the command runs on the laptop (e.g. an ssh to the box)."""
+    """Shell hooks for a live stack (--hook name=cmd, or --hooks box|laptop from eval/hooks.py): the command runs
+    where the suite runs (on the box, or on the laptop through ssh). Every run is kept in `log` with its exit code,
+    its duration and the last JSON line it printed (tools/hooks prints one), for the result's hooks_log."""
+
+    TIMEOUT_S = 600.0                    # restore_policy (a GR00T checkpoint load + warm-up) takes minutes
 
     def __init__(self, hooks: dict[str, str]) -> None:
         self.hooks = dict(hooks)
+        self.log: list[dict[str, Any]] = []
 
     def has(self, name: str) -> bool:
         return name in self.hooks
@@ -203,9 +213,37 @@ class HookInjector(Injector):
         if not cmd:
             return False, f"no --hook {name}=..."
         cmd = cmd.format(**{k: shlex.quote(str(v)) for k, v in kw.items()})
-        p = await asyncio.to_thread(subprocess.run, cmd, shell=True, capture_output=True, text=True, timeout=120)
-        tail = (p.stdout + p.stderr).strip().splitlines()[-1:] or [""]
-        return p.returncode == 0, f"hook exit {p.returncode}: {tail[0][:160]}"
+        t0, wall = time.monotonic(), time.time()
+        try:
+            p = await asyncio.to_thread(subprocess.run, cmd, shell=True, capture_output=True, text=True,
+                                        timeout=self.TIMEOUT_S)
+            rc, out, err = p.returncode, p.stdout or "", p.stderr or ""
+        except subprocess.TimeoutExpired as e:
+            rc, out, err = None, str(e.stdout or ""), f"hook timed out after {self.TIMEOUT_S:.0f} s"
+        js = last_json(out)
+        s = round(time.monotonic() - t0, 1)
+        tail = (json.dumps(js, default=str) if js is not None
+                else ((out + err).strip().splitlines()[-1:] or [""])[0])
+        self.log.append({"name": name, "args": kw, "rc": rc, "s": s, "t_wall": round(wall, 3), "json": js,
+                         "tail": tail[:400]})
+        return rc == 0, f"hook exit {rc} in {s} s: {tail[:200]}"
+
+    def last(self, name: str) -> dict[str, Any] | None:
+        return next((x for x in reversed(self.log) if x["name"] == name), None)
+
+
+def last_json(text: str) -> dict[str, Any] | None:
+    """The last line of `text` that is a JSON object (tools/hooks' one-line reply), else None."""
+    for ln in reversed((text or "").strip().splitlines()):
+        ln = ln.strip()
+        if ln.startswith("{"):
+            try:
+                v = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(v, dict):
+                return v
+    return None
 
 
 class LocalInjector(Injector):
@@ -331,6 +369,50 @@ def _res_of(r: StackRun, started: dict[str, Any] | None) -> dict[str, Any] | Non
     return r.row_for(started.get("execution_id")) if started else None
 
 
+async def _fixture(r: StackRun, o: Outcome, name: str, why: str, **kw: Any) -> dict[str, Any] | None:
+    """A restoring hook (recover_robot, restore_deploy, ...) after a scenario's scoring window: recorded in
+    extra.fixtures with its own timing, labelled operator-driven. Never a source of verdicts."""
+    if not r.injector.has(name):
+        o.notes.append(f"no {name} hook: the stack is left as the scenario left it")
+        return None
+    ok, note = await r.inject(name, **kw)
+    last = r.injector.last(name) if isinstance(r.injector, HookInjector) else None
+    rec = {"hook": name, "why": why, "ok": ok, "s": (last or {}).get("s"), "reply": (last or {}).get("json"),
+           "label": "operator fixture (tools/hooks), not the stack's own recovery"}
+    o.extra.setdefault("fixtures", []).append(rec)
+    return rec
+
+
+BODY_DOWN_MODES = ("FAULT", "ESTOP", "TRANSITION", "OFF")
+
+
+def _ready_after(r: StackRun, t: float) -> tuple[float, str] | None:
+    """When the body was ready again after t: a body.ready event, or (what the page shows today) the body back in
+    HOLD and upright after having been down (FAULT / ESTOP / TRANSITION / OFF, or fallen) since t."""
+    ev = next((e for e in r.events if e.get("type") in ("body.ready", "body_ready") and (e.get("t") or 0) > t), None)
+    if ev is not None:
+        return float(ev.get("t") or 0.0), "body.ready"
+    down = False
+    for f in r.frames:
+        if f["t"] <= t:
+            continue
+        if f["mode"] in BODY_DOWN_MODES or f["fallen"] or f["upright"] is False:
+            down = True
+        elif down and f["mode"] == "HOLD":
+            return f["t"], "the body in HOLD and upright again"
+    return None
+
+
+def _no_estop_after(r: StackRun, t: float) -> Any:
+    """No command{stop} since t, as the page can tell: the body never entered ESTOP (the only mode command{stop} leads
+    to) and no estop safety event. None when the page carried no body mode at all."""
+    modes = [f["mode"] for f in r.frames if f["t"] >= t and f["mode"]]
+    if not modes:
+        return None
+    return "ESTOP" not in modes and not [x for x in r.rows("safety_event")
+                                         if x.get("kind") == "estop" and (x.get("t") or 0) >= t]
+
+
 # ----------------------------------------------------------------------------------------------------------
 # G1-G14
 # ----------------------------------------------------------------------------------------------------------
@@ -444,6 +526,9 @@ async def g3_grasp_cancel(r: StackRun, o: Outcome) -> None:
 async def g4_stale_chunk(r: StackRun, o: Outcome) -> None:
     ok, note = await r.inject("delay_proxy_on", ms=600)
     o.notes.append(f"injected: delay proxy 600 ms ({note})")
+    if not ok:                  # the proxy must be in the loop: P5 on WL_GROOT_ENDPOINT=tcp://127.0.0.1:5551
+        o.check("delay proxy on (600 ms)", False, note)
+        return
     try:
         await g3_grasp_cancel(r, o)
         stale = [e for e in r.events if "stale" in str(e.get("reason") or e.get("type") or "")]
@@ -542,36 +627,59 @@ async def g6_blocked_path(r: StackRun, o: Outcome) -> None:
         await r.inject("clear" if local else "clear_box")
 
 
+RECOVERY_WINDOW_S = 65.0      # path B's 60 s budget + margin: the stack's own recovery must show within it
+
+
+def _sim_recovery_after(r: StackRun, t: float) -> dict[str, Any] | None:
+    return next((e for e in r.events if e.get("type") in ("sim_recovery", "sim.recovery") and (e.get("t") or 0) >= t),
+                None)
+
+
 async def g7_fall_recovery(r: StackRun, o: Outcome) -> None:
     t0 = await _fetch_start(r)
-    await r.wait_row(lambda x: x.get("type") == "started" and x.get("tool") == "navigate", r.wait(60))
+    nav = await r.wait_row(lambda x: x.get("type") == "started" and x.get("tool") == "navigate", r.wait(60))
+    if nav is None:
+        o.check("a walk started", False)
+        return
     await r.wait_sim(2.0, 30)
     t_push = r.now()
     ok, note = await r.inject("push_robot", newtons=250)
-    o.notes.append(note)
+    o.notes.append(f"injected: {note}")
     if not ok:
         o.check("push injected", False, note)
         return
-    fell = await r.wait_row(lambda x: x.get("type") == "safety_event" and x.get("kind") == "fell", 30)
-    o.check("safety_event(fell)", fell is not None)
-    stop = await r.wait_row(lambda x: x.get("type") == "stop" and "fell" in str(x.get("reason")), 10)
-    o.check("paused", stop is not None or any(f["paused"] for f in r.frames if f["t"] >= t_push))
-    o.check("spoken notice", bool(r.said_after(t_push, r"balance|fell|fall|steady")), r.said_after(t_push, r".")[:2])
-    await r.until(lambda: any(e.get("type") in ("body.ready", "body_ready") and (e.get("t") or 0) >= t_push
-                              for e in r.events), 70)
-    ready = next((e for e in r.events if e.get("type") in ("body.ready", "body_ready") and (e.get("t") or 0) >= t_push),
-                 None)
-    rec = next((e for e in r.events if e.get("type") in ("sim_recovery", "sim.recovery") and (e.get("t") or 0) >= t_push),
-               None)
-    path = (rec or {}).get("path")
-    took = None if ready is None else float(ready.get("t") or 0) - t_push
-    o.check("sim_recovery{path} labelled", rec is not None, rec)
-    o.check("body.ready <= 20 s (path A) or <= 60 s (path B)", None if ready is None else
-            (took <= 20 if path in ("A", "a", None) else took <= 60), {"took_s": took, "path": path})
-    o.check("no command{stop} sent", None if not any("command" in str(e.get("type")) for e in r.events) else
-            not any(e.get("type") in ("body.command_stop", "command_stop") for e in r.events))
-    o.check("reconcile after recovery", bool([x for x in r.rows("reconcile_start") if (x.get("t") or 0) >= t_push]))
-    o.extra["t0"] = t0
+    try:
+        fell = await r.wait_row(lambda x: x.get("type") == "safety_event" and x.get("kind") == "fell"
+                                and (x.get("t") or 0) >= t_push - 0.5, 30)
+        o.check("safety_event(fell)", fell is not None, None if fell is None else {"t": fell.get("t"),
+                                                                                    "source": fell.get("source")})
+        stop = await r.wait_row(lambda x: x.get("type") == "stop" and "fell" in str(x.get("reason")), 10)
+        o.check("paused", stop is not None or any(f["paused"] for f in r.frames if f["t"] >= t_push))
+        await r.until(lambda: bool(r.said_after(t_push, r"balance|fell|fall|steady")), 15)
+        o.check("spoken notice", bool(r.said_after(t_push, r"balance|fell|fall|steady")),
+                r.said_after(t_push, r".")[:2])
+        # the stack's own recovery (PLAN 7.3.3: path A <= 20 s, else path B <= 60 s); nothing else acts meanwhile
+        await r.until(lambda: _ready_after(r, t_push) is not None and _sim_recovery_after(r, t_push) is not None,
+                      RECOVERY_WINDOW_S)
+        ready = _ready_after(r, t_push)
+        rec = _sim_recovery_after(r, t_push)
+        path = str((rec or {}).get("path") or "").upper() or None
+        took = None if ready is None else round(ready[0] - t_push, 2)
+        o.check("sim_recovery{path} labelled", rec is not None, rec)
+        o.check("upright and ready: path A <= 20 s (or path B <= 60 s)",
+                ready is not None and (took <= 20 if path in ("A", None) else took <= 60),
+                {"took_s": took, "path": path, "seen": None if ready is None else ready[1],
+                 "window_s": RECOVERY_WINDOW_S})
+        o.check("no command{stop} sent (the body never in ESTOP)", _no_estop_after(r, t_push))
+        o.check("the deploy process stays alive (no deploy_lost)",
+                not [x for x in r.rows("safety_event") if x.get("kind") == "deploy_lost" and (x.get("t") or 0) >= t_push])
+        o.check("reconcile after recovery",
+                bool([x for x in r.rows("reconcile_start") if (x.get("t") or 0) >= t_push]))
+        o.check("the recovery counter increments", None if rec is None else rec.get("count") is not None,
+                "the page shows no recovery counter unless sim_recovery carries it")
+        o.extra.update(t0=t0, t_push=t_push, fell_t=None if fell is None else fell.get("t"))
+    finally:
+        await _fixture(r, o, "recover_robot", "G7: the robot back on its feet for the next scenario")
 
 
 async def g8_deploy_restart(r: StackRun, o: Outcome) -> None:
@@ -581,33 +689,42 @@ async def g8_deploy_restart(r: StackRun, o: Outcome) -> None:
         if variant.startswith("a"):
             ok, note = await r.inject("kill_deploy")
         else:
-            await r.send(type="estop", confirm=True)
+            await r.send(type="estop", confirm=True)       # the deliberate estop test: command{stop}, the deploy exits
             ok, note = True, "page estop"
         o.notes.append(f"{variant}: {note}")
         if not ok:
             o.check(f"{variant}: injected", False, note)
             continue
-        await r.until(lambda: any(e.get("type") in ("body.ready", "body_ready") and (e.get("t") or 0) > t
-                                  for e in r.events), 90)
-        ready = next((e for e in r.events if e.get("type") in ("body.ready", "body_ready") and (e.get("t") or 0) > t),
-                     None)
-        took = None if ready is None else float(ready.get("t") or 0) - t
-        o.check(f"{variant}: body.ready <= 60 s (target 30-45 s)", None if ready is None else took <= 60,
-                {"took_s": took})
-        rec = next((e for e in r.events if e.get("type") in ("sim_recovery", "sim.recovery") and (e.get("t") or 0) > t),
-                   None)
-        o.check(f"{variant}: path B labelled", None if rec is None else str(rec.get("path")).upper() == "B", rec)
+        try:
+            lost = await r.wait_row(lambda x: x.get("type") == "safety_event"
+                                    and x.get("kind") in ("deploy_lost", "estop") and (x.get("t") or 0) >= t - 0.5, 15)
+            o.check(f"{variant}: the stack noticed (safety_event {'deploy_lost' if variant[0] == 'a' else 'estop'})",
+                    lost is not None, None if lost is None else lost.get("kind"))
+            # the stack's own path B (PLAN 7.3.3: a supervised P2 restart); nothing else acts in this window
+            await r.until(lambda: _ready_after(r, t) is not None, RECOVERY_WINDOW_S)
+            ready = _ready_after(r, t)
+            took = None if ready is None else round(ready[0] - t, 2)
+            o.check(f"{variant}: the band catches (no fall)", not r.fell(t))
+            o.check(f"{variant}: body.ready <= 60 s (target 30-45 s)", ready is not None and took <= 60,
+                    {"took_s": took, "seen": None if ready is None else ready[1], "window_s": RECOVERY_WINDOW_S})
+            rec = _sim_recovery_after(r, t)
+            o.check(f"{variant}: path B labelled", rec is not None and str(rec.get("path")).upper() == "B", rec)
+        finally:
+            await _fixture(r, o, "restore_deploy", f"G8 {variant}: the deploy back (operator path B)")
     o.check("a third recovery disables the body tools", None, "not exercised (costly); verify by hand")
 
 
 async def g9_rtf_degraded(r: StackRun, o: Outcome) -> None:
-    ok, note = await r.inject("throttle_rtf", rtf=0.9)
-    o.notes.append(note)
-    if not ok:
-        o.check("RTF throttled", False, note)
-        return
+    box: dict[str, Any] = {}
+
+    async def throttle() -> None:          # after the scene reset: a reset and a stand at RTF 0.9 are not the test
+        box["ok"], box["note"] = await r.inject("throttle_rtf", rtf=0.9)
+        o.notes.append(f"injected: {box['note']}")
     try:
-        t0 = await _fetch_start(r)
+        t0 = await _fetch_start(r, before=throttle)
+        if not box.get("ok"):
+            o.check("RTF throttled", False, box.get("note"))
+            return
         rej = await r.wait_row(lambda x: x.get("type") == "rejected" and x.get("tool") == "manipulate", r.limit())
         o.check("manipulate rejected (DEGRADED)", rej is not None and re.search(r"rtf|degraded|sim_slow|slow",
                                                                                str(rej.get("why")), re.I) is not None,
@@ -930,6 +1047,12 @@ async def run_one(spec: Spec, run: StackRun, local: bool) -> dict[str, Any]:
         verdict, o.notes = "SKIPPED", [f"no injector for {', '.join(missing)}"
                                        + ("" if local else " (pass --hook name=cmd)")]
     else:
+        if not local and run.injector.has("recover_robot"):
+            # preflight fixture: a scenario starts from a standing robot with a live deploy even when the one before
+            # left it down ("none needed" when it did not); logged in hooks_log, never scored
+            ok, note = await run.inject("recover_robot")
+            o.notes.append(f"preflight recover_robot: {'ok' if ok else 'FAILED'}")
+            run.injected = [x for x in run.injected if not x.startswith("recover_robot")]
         try:
             await spec.fn(run, o)
             verdict = o.verdict()
@@ -1002,6 +1125,9 @@ async def run_suite(ids: list[str], *, url: str | None = None, profile: str = "l
                 print(line(res), flush=True)
             reader.cancel()
     finally:
+        if hub is None and injector.has("clear_all"):
+            ok, note = await injector.do("clear_all")          # nothing left active: no throttle, box or delay
+            print(f"clear_all: {note}", flush=True)
         if hub is not None:
             ticker.cancel()
             server.close()
@@ -1009,6 +1135,9 @@ async def run_suite(ids: list[str], *, url: str | None = None, profile: str = "l
                 await hub.session.stop()
             hub.close()
     out = summarize(results, profile)
+    if isinstance(injector, HookInjector):
+        out["hooks"] = sorted(injector.hooks)
+        out["hooks_log"] = injector.log
     out.update(mode="offline (in-process lite)" if hub is not None else f"live page {url}",
                planner=planner if hub is not None else "(the page's)", system1=system1 if hub is not None else "(the page's)",
                speed=speed if hub is not None else None)
@@ -1024,12 +1153,21 @@ def main() -> int:
     ap.add_argument("--planner", default="brains.scripted:create", help="offline planner factory")
     ap.add_argument("--system1", default="tests.kept.system1_stub:create", help="offline System 1 factory")
     ap.add_argument("--hook", action="append", default=[], help="name=shell command (live stack fault injection)")
+    ap.add_argument("--hooks", default="none", choices=["none", "box", "laptop"],
+                    help="eval/hooks.py's hook map: 'box' when the suite runs on the box, 'laptop' through 00_infra/"
+                         "ssh.sh; --hook entries override it")
+    ap.add_argument("--hooks-session", default="wl-m2", help="the stack's tmux session for --hooks")
+    ap.add_argument("--no-hook", action="append", default=[], help="drop a hook of the --hooks map (e.g. kill_policy)")
     ap.add_argument("--time-scale", type=float, default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--trace-dir", default=None)
     args = ap.parse_args()
     ids = [x.strip().upper() for x in args.only.split(",") if x.strip()] or [s.id for s in SPECS if s.id != "E5"]
-    hooks = dict(h.split("=", 1) for h in args.hook if "=" in h)
+    from eval import hooks as hook_maps
+    hooks = hook_maps.preset(args.hooks, session=args.hooks_session)
+    hooks.update(dict(h.split("=", 1) for h in args.hook if "=" in h))
+    for name in args.no_hook:
+        hooks.pop(name, None)
     if args.url is None and (args.planner != "brains.scripted:create" or "stub" not in args.system1):
         from ui.server import load_env_files
         load_env_files()                  # live models offline: keys from ~/.config/ludo-g1/secrets.env, never printed
