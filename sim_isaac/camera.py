@@ -29,17 +29,32 @@ def _pinhole_cfg(width: int, height: int, vfov_deg: float, near: float = 0.05, f
 
 
 def spawn_camera_prim(prim_path: str, width: int, height: int, vfov_deg: float, xyz, quat_world_wxyz,
-                      near: float = 0.05, far: float = 50.0) -> str:
+                      near: float = 0.05, far: float = 50.0, apertures: tuple[float, float, float] | None = None) -> str:
     """Create a USD camera at prim_path. quat_world_wxyz is the mount orientation in the 'world' convention
-    (x forward, z up), converted here to the USD/OpenGL camera convention (-z forward, y up)."""
+    (x forward, z up), converted here to the USD/OpenGL camera convention (-z forward, y up).
+    apertures = (focal_length, horizontal_aperture, vertical_aperture) overrides the vfov-derived pinhole."""
     import torch
     from isaaclab.utils.math import convert_camera_frame_orientation_convention
 
     q = convert_camera_frame_orientation_convention(
         torch.tensor([list(quat_world_wxyz)], dtype=torch.float32), origin="world", target="opengl")[0]
-    cfg = _pinhole_cfg(width, height, vfov_deg, near, far)
+    if apertures is None:
+        cfg = _pinhole_cfg(width, height, vfov_deg, near, far)
+    else:
+        import isaaclab.sim as sim_utils
+
+        f, ha, va = apertures
+        cfg = sim_utils.PinholeCameraCfg(focal_length=float(f), horizontal_aperture=float(ha),
+                                         vertical_aperture=float(va), clipping_range=(near, far))
     cfg.func(prim_path, cfg, translation=tuple(float(x) for x in xyz), orientation=tuple(float(x) for x in q))
     return prim_path
+
+
+def spawn_spec_camera(prim_path: str, spec) -> str:
+    """A sim_isaac.wire.CameraSpec camera (explicit focal length and apertures, e.g. Arena's head camera)."""
+    return spawn_camera_prim(prim_path, spec.width, spec.height, spec.vfov_deg, spec.mount_xyz, spec.mount_quat_wxyz,
+                             near=spec.clipping[0], far=spec.clipping[1],
+                             apertures=(spec.focal_length_mm, spec.horizontal_aperture_mm, spec.vertical_aperture_mm))
 
 
 class RgbCapture:
@@ -67,6 +82,23 @@ class RgbCapture:
         except Exception:  # noqa: BLE001  (older API / str render product)
             return False
 
+    def disable(self) -> bool:
+        return self.set_enabled(False)
+
+    def enable(self) -> float:
+        """Re-arm a disabled render product: a product that was ever disabled only delivers annotator data again
+        after its annotator is re-attached (docs/viz.md §4 finding 3). Returns the sim-thread cost in ms."""
+        t0 = time.perf_counter()
+        if not self.enabled:
+            try:
+                self.annot.detach([self.rp_path])
+            except Exception:  # noqa: BLE001
+                pass
+            self._rp.hydra_texture.set_updates_enabled(True)
+            self.annot.attach([self.rp_path])
+            self.enabled = True
+        return (time.perf_counter() - t0) * 1e3
+
     def read(self) -> np.ndarray | None:
         d = self.annot.get_data()
         if isinstance(d, dict):
@@ -77,6 +109,19 @@ class RgbCapture:
         if a.size == 0 or a.ndim != 3:
             return None
         return a[..., :3]
+
+    def read_copy(self) -> np.ndarray | None:
+        """A contiguous copy of the annotator's buffer (RGBA or RGB) before the next render overwrites it: one memcpy
+        (~0.1 ms at 640x480); the strided RGB slice costs ~1.7 ms (docs/viz.md §7.2) and is left to the worker."""
+        d = self.annot.get_data()
+        if isinstance(d, dict):
+            d = d.get("data")
+        if d is None:
+            return None
+        a = np.asarray(d)
+        if a.size == 0 or a.ndim != 3:
+            return None
+        return np.array(a, copy=True, order="C")
 
     def destroy(self) -> None:
         try:
@@ -101,15 +146,18 @@ def encode_b64_jpeg(rgb: np.ndarray, quality: int = 80) -> str:
 class FramePublisher:
     """Encodes frames on a worker thread (cv2 releases the GIL) and publishes them on a ZMQ PUB socket.
 
-    mode="gear_sonic": the MuJoCo sensor_server message (see module docstring), one frame per message.
+    mode="gear_sonic": the MuJoCo sensor_server message (see module docstring), one frame per message. With `extra`
+    (the M2b frame metadata, sim_isaac.wire.frame_meta) the message also carries those keys and `timestamps` is the
+    capture time (docs/contracts/p1_m2b.md §5.2).
     mode="multipart": [topic, msgpack{seq, t_sim, t_wall, jpeg(bytes), ...extra}] for non-gear_sonic consumers.
+    Frames may be RGB or RGBA (alpha dropped here, off the sim thread).
     """
 
     def __init__(self, ctx, port: int, name: str = "ego_view", mode: str = "gear_sonic", topic: bytes = b"",
-                 bind_host: str = "127.0.0.1"):
+                 bind_host: str = "127.0.0.1", jpeg_q: int = 80):
         import zmq
 
-        self.name, self.mode, self.topic = name, mode, topic
+        self.name, self.mode, self.topic, self.jpeg_q = name, mode, topic, int(jpeg_q)
         self.sock = ctx.socket(zmq.PUB)
         self.sock.setsockopt(zmq.SNDHWM, 20)   # sensor_server.py:45-46
         self.sock.setsockopt(zmq.LINGER, 0)
@@ -141,9 +189,14 @@ class FramePublisher:
             except queue.Empty:
                 continue
             t0 = time.perf_counter()
-            b64 = encode_b64_jpeg(rgb)
+            if rgb.ndim == 3 and rgb.shape[2] == 4:
+                rgb = rgb[..., :3]
+            b64 = encode_b64_jpeg(rgb, self.jpeg_q)
             now = time.time()
-            if self.mode == "gear_sonic":
+            if self.mode == "gear_sonic" and extra:
+                from sim_isaac.wire import gear_sonic_message
+                parts = [msgpack.packb(gear_sonic_message(self.name, b64, extra, now), use_bin_type=True)]
+            elif self.mode == "gear_sonic":
                 msg = {"timestamps": {self.name: now}, "images": {self.name: b64}, self.name: b64,
                        "t_sim": t_sim, "seq": seq}
                 parts = [msgpack.packb(msg, use_bin_type=True)]
@@ -225,12 +278,31 @@ class ChaseCamera:
 
 
 def render_topdown(sim, stage, extent: tuple[float, float, float, float], path: str, px_per_m: float = 40.0,
-                   max_px: int = 1600, height_m: float = 60.0) -> dict:
+                   max_px: int = 1600, height_m: float = 60.0, hide_paths: list[str] | None = None) -> dict:
     """Render a top-down image of the scene with a temporary perspective camera high above the centre.
 
     Perspective from `height_m` above: objects at floor level map exactly; tall objects are displaced outwards by
-    about (distance from centre) * h / height_m.
+    about (distance from centre) * h / height_m. `hide_paths`: prims made invisible for this render only (the
+    furniture-only mode hides the dynamic props and the robot, docs/contracts/p1_m2b.md §9).
     """
+    if hide_paths:
+        from pxr import UsdGeom
+
+        hidden = []
+        for p in hide_paths:
+            prim = stage.GetPrimAtPath(p)
+            if prim.IsValid() and prim.IsA(UsdGeom.Imageable):
+                img_api = UsdGeom.Imageable(prim)
+                if img_api.ComputeVisibility() != UsdGeom.Tokens.invisible:
+                    img_api.MakeInvisible()
+                    hidden.append(img_api)
+        try:
+            info = render_topdown(sim, stage, extent, path, px_per_m, max_px, height_m)
+        finally:
+            for img_api in hidden:
+                img_api.MakeVisible()
+        info["hidden"] = len(hidden)
+        return info
     import cv2
 
     xmin, ymin, xmax, ymax = extent
