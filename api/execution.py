@@ -116,7 +116,7 @@ class Execution:
 
 
 class Rejected(Exception):
-    """A call refused before it runs (replaces sim.goals.GoalRejected).
+    """A call refused before it runs (replaces the THOR-era GoalRejected).
 
     ``stage`` is one of schema | enum | state | capability (PLAN 5.7)."""
 
