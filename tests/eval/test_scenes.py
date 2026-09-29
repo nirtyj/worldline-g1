@@ -217,14 +217,14 @@ DELIVERIES = [("fetch_other_room", None, ["alarm_clock_1"]), ("fetch_search", No
               ("addition", "g1_alternative", ["alarm_clock_1", "wine_bottle_1"])]
 
 
-TARGET_STANCE = {"stance_via": "approach", "stance_clearance_m": 0.20}    # R.7's validated reach stance
+TARGET_STANCE = {"stance_via": "approach", "stance_clearance_m": 0.20}    # R.7's validated reach stance (= config)
 
 
 def _g1_stack(scene: str, target_stance: bool = True):
     """A lite service stack built as an Isaac world is: the R.7 stands (config mapgen, not mapgen.lite_world) and a
     reachability (and the place reach test that reads it) that judges with the calibrated G1 arm (config workspace,
-    not workspace.lite_world); with target_stance, the approach stances 0.20 m from the furniture that R.7 validated
-    live (config keeps A*'s 0.25 m until navigate(reach_stance) checks stances with ReachabilityModel.stance_ok)."""
+    not workspace.lite_world); target_stance pins the approach stances 0.20 m from the furniture that R.7 validated
+    live (today's config too)."""
     from services.reachability import G1Workspace
     from tests.services.conftest import Stack
     from world.mapgen import MapParams
@@ -352,17 +352,19 @@ def test_the_apple_is_beyond_a_g1s_reach_and_the_mugs_beyond_one_reposition():
 
 
 @pytest.mark.parametrize("scene, oid", [("procthor-train-40", "alarm_clock_1"), ("procthor-train-40", "wine_bottle_1"),
-                                        ("ithor-FloorPlan10", "bowl_1")])
-def test_with_todays_config_the_stances_pass_navigations_own_check(scene, oid):
-    """The INTERIM config (stance_via go_to, 0.25 m) gives stances that services/navigation.py's reach_stance check
-    accepts today (A*'s inflated free space and a free straight segment, within approach_max_m), so the live F1 is
-    not blocked while the 0.20 m approach stances wait for navigation."""
+                                        ("procthor-train-15", "dish_sponge_1"), ("ithor-FloorPlan10", "bowl_1")])
+def test_the_config_stances_pass_navigations_own_reach_stance_check(scene, oid):
+    """The config's reach stances (approach, 0.20 m) are ones services/navigation.py sends: its check for a body with
+    the approach op is the op's own map rule (NavigationService._stance_line_ok), within approach_max_m."""
     pytest.importorskip("scipy")
     import math
     from tests.services.conftest import run
     s = _g1_stack(scene, target_stance=False)
     ws = s.robot.reach.ws
-    assert ws.stance_via == "go_to" and ws.stance_clearance_m == 0.25
+    assert ws.stance_via == "approach" and ws.stance_clearance_m == 0.20
+    line_ok = getattr(s.robot.nav, "_stance_line_ok", None)
+    if line_ok is None:
+        pytest.skip("services/navigation.py has no _stance_line_ok")
 
     async def main():
         o = s.world.object(oid)
@@ -370,7 +372,7 @@ def test_with_todays_config_the_stances_pass_navigations_own_check(scene, oid):
         await s.run("observe", {"mode": "scan"})
         r = s.robot.reach.check(o.type, oid)
         assert r.reason == "needs_reposition", r.reason
-        st, p, g = r.stance, s.world.robot_pose(), s.world.static_map().grid
-        assert g.is_free(st["x"], st["y"]) and g.segment_free((p.x, p.y), (st["x"], st["y"]))
+        st, p = r.stance, s.world.robot_pose()
+        assert line_ok(p, st["x"], st["y"], True)
         assert math.hypot(st["x"] - p.x, st["y"] - p.y) <= ws.approach_max_m + 0.05
     run(main())

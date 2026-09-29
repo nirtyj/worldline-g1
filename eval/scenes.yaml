@@ -203,10 +203,9 @@ scenarios:
       0.43 m). No stand, stance or reposition can help (world/workspace_cal.py coverage: `beyond_reach`). The
       substitute keeps the scenario's point (a forgotten house, an object in another room, a search, a delivery to the
       user): dish_sponge_1, the only sponge in H15, lies on the bathroom sink (0.91-0.93 m, dynamic) and is reachable
-      after one reach_stance from the sink's stand: on the lite world today, and on the Isaac profiles once
-      navigate(reach_stance) takes R.7's 0.20 m approach stances (config workspace.stance_via, INTERIM go_to 0.25 m:
-      there it is `too_far`, docs/calibration.md §4). `use: original` (--original) runs THOR's apple text; it ends
-      with an honest "I can't reach it".
+      after one reach_stance from the sink's stand (the lite world's M2a arm and the calibrated G1 arm with its 0.20 m
+      approach stance, tests/eval/test_scenes.py). `use: original` (--original) runs THOR's apple text; it ends with
+      an honest "I can't reach it".
   question_midtask:
     house: H15
     say: "Bring me the dish sponge."

@@ -23,13 +23,11 @@ workspace:                      # PLAN §6.4 G1Workspace (object positions in th
   either_deadband_m: 0.10       # |lateral| below this -> preferred_arm "either"
   stance_fwd_m: [0.22, 0.36]    # the comfortable band a reach stance aims the object at (forward of the pelvis)
   stance_lat_m: [0.0, 0.05, -0.05, 0.10, -0.10, 0.15, -0.15, 0.20, -0.20]
-  stance_clearance_m: 0.25      # reach stance: pelvis to the nearest obstacle, raw occupancy. R.7 validated 0.20 live (the
-                                # body stood 0.15-0.20 m from a counter in 15/15 approaches, no fall; toes are 0.13 m ahead
-                                # of the pelvis) with stance_via approach: 22.7 % of household pickables instead of 11.8 %.
-                                # INTERIM 0.25 + go_to until navigate(reach_stance) validates stances with the same rule
-                                # (services/navigation.py still requires A*'s inflated free space + a free segment, which
-                                # rejects every 0.20 m stance: request to robot, ReachabilityModel.stance_ok)
-  stance_via: go_to             # target: approach (the body's B.6 op: a straight segment, not A*'s free space)
+  stance_clearance_m: 0.20      # reach stance: pelvis to the nearest obstacle, raw occupancy (toes 0.13 m ahead of the
+                                # pelvis; R.7 live: the body stood 0.15-0.20 m from a counter in 15/15 approaches, no fall)
+  stance_via: approach          # reach_stance is the body's `approach` (B.6): a straight segment, not A*'s free space.
+                                # services/navigation.py checks it with the approach op's own map rule (0.12 m goal,
+                                # 0.05 m segment), which these stances (0.20 m goal, 0.15 m segment) always satisfy
   stance_margin_m: 0.02         # stances keep this much inside arm_reach_m (arrival error)
   max_held: 1                   # one object at a time (Worldline rule; two hands, one object)
   reach_fresh_s: 30.0

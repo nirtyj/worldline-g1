@@ -194,7 +194,7 @@ APPROACH = {"stance_via": "approach", "stance_clearance_m": 0.20}      # R.7's v
 def test_the_lite_world_gets_the_interim_arm_and_an_isaac_world_the_calibrated_one():
     s = Stack()
     ws = G1Workspace.from_dict(s.robot.stack_profile.g1["workspace"])
-    assert ws.arm_reach_m < 0.45 and ws.stance_via == "go_to" and ws.lite_world
+    assert ws.arm_reach_m < 0.45 and ws.stance_via == "approach" and ws.lite_world
     lite = ws.for_world(s.world)
     assert lite.arm_reach_m == 0.65 and lite.stance_via == "go_to" and lite.obj_z_min_m == 0.55 and not lite.lite_world
 
