@@ -344,7 +344,11 @@ class BodyClient:
         with self._halt_lock:
             if self._halt_push is None:
                 raise RuntimeError("BodyClient.halt before connect()")
-            self._halt_push.send(dumps_json(msg), zmq.NOBLOCK)
+            try:
+                self._halt_push.send(dumps_json(msg), zmq.NOBLOCK)
+            except zmq.Again:                    # the lane queue is full: the body has been gone for a while
+                return {"acked": earlier is not None, "epoch": epoch, "rtt_ms": None, "wait_ms": 0.0,
+                        "body": None if earlier is None else earlier[0], "error": "lane_queue_full"}
         got = self.wait_halted(epoch, timeout_s)
         t1 = time.perf_counter()
         body, t_recv = got if got is not None else (None, None)

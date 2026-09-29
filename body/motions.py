@@ -509,8 +509,10 @@ class RecoverMotion(Motion):
       band_hold: band_hold_s (2 s) for the band to lift the pelvis to ~0.8 m and hold it upright
       reset:     P1 reset_robot{x, y, yaw} (default: where the pelvis is now, current yaw): root teleport, joints to the
                  default pose, band engaged at the new pose. Logged by P1 (root_writes).
-      stabilize: stable_s (2 s) continuously: deploy in control, not fallen, pelvis_z 0.70-0.90 m, |v| < 0.1 m/s
-                 (else `recovery_unstable` after 15 s)
+      stabilize: stable_s (2 s) continuously: deploy in control, not fallen, pelvis_z 0.70-0.90 m, and the pelvis
+                 drifting < 2.5 cm per 0.5 s (else `recovery_unstable` after 15 s). Drift, not the instantaneous
+                 speed: SONIC jitters in the band (live 2026-09-29, outputs/body_wave/modes-20260929-080856: gt.pose
+                 speed 0.05-0.25 m/s for 15 s while the band held the pelvis within 7 x 15 mm)
       release:   P1 band{on: false, ramp_s: 1.5}
       watch:     ramp + watch_s (3 s): pelvis_z within [pelvis_z_min, pelvis_z_max], not fallen (else
                  `recovery_fell`, band on again)
@@ -569,11 +571,16 @@ class RecoverMotion(Motion):
                 self.ctx.emit(self.id, "progress", {"phase": "reset", "pose": pose.brief()})
                 self.phase, self.t_phase = "stabilize", now
                 self.t_stable = None
+                self._xy: list[tuple[float, float, float]] = []
             return None
         if self.phase == "stabilize":
-            vx, vy, _ = self.ctx.velocity()
+            self._xy.append((now, pose.x, pose.y))
+            while len(self._xy) > 2 and now - self._xy[1][0] >= 0.5:
+                self._xy.pop(0)
+            t_a, xa, ya = self._xy[0]
+            drift = math.hypot(pose.x - xa, pose.y - ya) if now - t_a >= 0.45 else None
             ok = (self.ctx.deploy.in_control() and not pose.fallen and 0.70 <= pose.pelvis_z <= 0.90
-                  and math.hypot(vx, vy) < 0.1)
+                  and drift is not None and drift < 0.025)
             if ok:
                 if self.t_stable is None:
                     self.t_stable = now

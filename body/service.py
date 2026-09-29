@@ -790,7 +790,8 @@ class BodyService:
         vx, vy, wz = self.pose_sub.velocity()
         arm = self.arm.snapshot()
         fences = self.fences.snapshot()
-        hm = sorted(self.halt_ms)
+        with self._halt_lock:                   # the lane thread appends to halt_ms
+            hm = sorted(self.halt_ms)
         return {
             "t_wall": time.time(), "uptime_s": round(time.monotonic() - self.t_start, 1),
             "mode": self.mode, "mode_for_s": round(time.monotonic() - self._mode_t, 2),
