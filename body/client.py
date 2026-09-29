@@ -8,9 +8,15 @@
         h.wait(120); h.state, h.result
         bc.stop()
         bc.pose(); bc.status(); ts, img = bc.camera_frame()
+        r = bc.halt(epoch=7)                       # halt lane (PUSH 5612) -> body.halted{7} within 30 ms: r["acked"]
+        bc.resume(8)
+        bc.approach(2.1, 1.3, yaw=0.0)             # short strafing reposition (0.1-0.4 m)
 
 Every motion returns an OpHandle whose terminal state is one of succeeded | failed | canceled (rejections surface
 as failed with data.reason). Nothing here fakes a result: the state is what wl-body reported.
+Fences (docs/contracts/m1.md §3.11): pass execution_id / generation / control_epoch to any motion as keyword
+arguments, or set them once with set_fence(); body topics other than body.event/body.state (body.halted, body.mode,
+body.fault, body.stale_command, body.lease, body.session, body.resumed) go to add_topic_listener(fn(topic, msg)).
 """
 
 from __future__ import annotations
@@ -124,6 +130,14 @@ class BodyClient:
         self._evt_thread: threading.Thread | None = None
         self._pose_sub = None
         self._cam: zmq.Socket | None = None
+        self._halt_push: zmq.Socket | None = None
+        self._halt_lock = threading.Lock()
+        self._halted: dict[int, tuple[dict, float]] = {}       # epoch -> (body.halted payload, perf_counter at recv)
+        self._halt_cv = threading.Condition()
+        self._topic_listeners = []
+        self.fence: dict = {}                                   # default fence fields for every motion (set_fence)
+        self.session: str | None = None
+        self._hb_thread: threading.Thread | None = None
 
     # -- lifecycle -------------------------------------------------------------------------------
     def connect(self, wait_s: float = 10.0) -> "BodyClient":
@@ -132,6 +146,11 @@ class BodyClient:
         self._evt_thread = threading.Thread(target=self._evt_loop, name="body-evt", daemon=True)
         self._evt_thread.start()
         self._dealer = self._new_dealer()
+        # the halt lane PUSH is connected now so a halt never pays a connect: ZMQ queues on the pipe at once
+        self._halt_push = self.ctx.socket(zmq.PUSH)
+        self._halt_push.setsockopt(zmq.LINGER, 0)
+        self._halt_push.setsockopt(zmq.SNDHWM, 100)
+        self._halt_push.connect(ep(self.ports["body_halt"], self.host))
         # the first body.state proves both that the service is up and that our SUB is live (no slow-joiner loss)
         t0 = time.monotonic()
         while time.monotonic() - t0 < wait_s:
@@ -151,7 +170,9 @@ class BodyClient:
         self._running = False
         if self._evt_thread:
             self._evt_thread.join(timeout=1.0)
-        for s in (self._dealer, self._cam):
+        if self._hb_thread:
+            self._hb_thread.join(timeout=1.0)
+        for s in (self._dealer, self._cam, self._halt_push):
             if s is not None:
                 s.close(0)
         if self._pose_sub is not None:
@@ -166,6 +187,10 @@ class BodyClient:
     def add_listener(self, fn) -> None:
         """fn(event_dict) for every body.event (all ops)."""
         self._listeners.append(fn)
+
+    def add_topic_listener(self, fn) -> None:
+        """fn(topic: str, msg: dict) for every body.* topic other than body.event and body.state."""
+        self._topic_listeners.append(fn)
 
     def _evt_loop(self) -> None:
         s = self.ctx.socket(zmq.SUB)
@@ -188,6 +213,25 @@ class BodyClient:
             if topic == b"body.state":
                 self.last_state = msg
                 self.last_state_mono = time.monotonic()
+                continue
+            if topic != b"body.event":
+                t_recv = time.perf_counter()
+                if topic == b"body.halted":
+                    try:
+                        ep_ = int(msg.get("requested_epoch", msg.get("epoch")))
+                    except (TypeError, ValueError):
+                        ep_ = None
+                    if ep_ is not None:
+                        with self._halt_cv:
+                            self._halted.setdefault(ep_, (msg, t_recv))
+                            if len(self._halted) > 200:
+                                self._halted.pop(next(iter(self._halted)))
+                            self._halt_cv.notify_all()
+                for fn in list(self._topic_listeners):
+                    try:
+                        fn(topic.decode(), msg)
+                    except Exception:
+                        pass
                 continue
             h = self._handles.get(msg.get("id"))
             if h is not None:
@@ -218,7 +262,8 @@ class BodyClient:
 
     def submit(self, op: str, args: dict | None = None) -> OpHandle:
         op_id = f"{op}-{uuid.uuid4().hex[:8]}"
-        h = OpHandle(self, op_id, op, args or {})
+        args = {**self.fence, **(args or {})}
+        h = OpHandle(self, op_id, op, args)
         self._handles[op_id] = h  # register before sending: events can beat the reply
         rep = self.request(op, args, op_id=op_id)
         h.reply = rep
@@ -236,13 +281,13 @@ class BodyClient:
 
     # -- motions --------------------------------------------------------------------------------
     def stand(self, release_band: bool = True, settle_s: float = 2.0, verify_s: float = 3.0, wait: bool = True,
-              timeout: float | None = 90.0) -> OpHandle:
-        return self.run("stand", {"release_band": release_band, "settle_s": settle_s, "verify_s": verify_s},
+              timeout: float | None = 90.0, **kw) -> OpHandle:
+        return self.run("stand", {"release_band": release_band, "settle_s": settle_s, "verify_s": verify_s, **kw},
                         wait, timeout)
 
     def walk(self, vx: float = 0.0, vy: float = 0.0, yaw_rate: float = 0.0, duration_s: float = 2.0,
-             wait: bool = True, timeout: float | None = None) -> OpHandle:
-        return self.run("walk", {"vx": vx, "vy": vy, "yaw_rate": yaw_rate, "duration_s": duration_s}, wait,
+             wait: bool = True, timeout: float | None = None, **kw) -> OpHandle:
+        return self.run("walk", {"vx": vx, "vy": vy, "yaw_rate": yaw_rate, "duration_s": duration_s, **kw}, wait,
                         timeout if timeout is not None else duration_s + 30.0)
 
     def go_to(self, x: float, y: float, yaw: float | None = None, timeout_s: float | None = None,
@@ -257,8 +302,8 @@ class BodyClient:
         return self.run("go_to", args, wait, (timeout_s or 180.0) + 30.0)
 
     def turn_to(self, yaw: float, tol_deg: float | None = None, relative: bool = False, wait: bool = True,
-                timeout: float | None = 60.0) -> OpHandle:
-        args = {"yaw": yaw, "relative": relative}
+                timeout: float | None = 60.0, **kw) -> OpHandle:
+        args = {"yaw": yaw, "relative": relative, **kw}
         if tol_deg is not None:
             args["tol_deg"] = tol_deg
         return self.run("turn_to", args, wait, timeout)
@@ -266,6 +311,120 @@ class BodyClient:
     def stop(self, wait: bool = True, timeout: float = 10.0, arms: bool = False) -> OpHandle:
         """Planner IDLE (legs). arms=True also ends an active arm stream (blend back to SONIC's own arms)."""
         return self.run("stop", {"arms": True} if arms else {}, wait, timeout)
+
+    def approach(self, x: float, y: float, yaw: float | None = None, v: float | None = None,
+                 tol: tuple[float, float] | None = None, wait: bool = True, timeout: float | None = 60.0,
+                 **kw) -> OpHandle:
+        """Short strafing reposition (0.1-0.4 m; contract §3.13). tol = (pos_m, yaw_deg), default (0.05, 5)."""
+        args = {"x": x, "y": y, **kw}
+        if yaw is not None:
+            args["yaw"] = yaw
+        if v is not None:
+            args["v"] = v
+        if tol is not None:
+            args["tol"] = [float(tol[0]), float(tol[1])]
+        return self.run("approach", args, wait, timeout)
+
+    def recover(self, wait: bool = True, timeout: float | None = 90.0, **kw) -> OpHandle:
+        """Soft recovery after a fall in sim (PLAN §7.3.3 path A; contract §3.12)."""
+        return self.run("recover", kw, wait, timeout)
+
+    # -- halt lane, fences, leases, runtime sessions (contract §3.10-§3.12) ------------------------
+    def halt(self, epoch: int, timeout_s: float = 0.03, reason: str | None = None) -> dict:
+        """Fire-and-forget PUSH {op: halt, epoch, t_wall} on the halt lane (5612), then wait up to timeout_s for
+        body.halted{epoch} on 5611. Returns {acked, epoch, rtt_ms (send -> body.halted received by our SUB thread),
+        wait_ms (send -> return), body: <body.halted payload or None>}. Never command{stop}."""
+        epoch = int(epoch)
+        msg = {"op": "halt", "epoch": epoch, "t_wall": time.time()}
+        if reason:
+            msg["reason"] = reason
+        with self._halt_cv:
+            earlier = self._halted.pop(epoch, None)       # an ack of an earlier attempt of this epoch
+        t0 = time.perf_counter()
+        with self._halt_lock:
+            if self._halt_push is None:
+                raise RuntimeError("BodyClient.halt before connect()")
+            self._halt_push.send(dumps_json(msg), zmq.NOBLOCK)
+        got = self.wait_halted(epoch, timeout_s)
+        t1 = time.perf_counter()
+        body, t_recv = got if got is not None else (None, None)
+        out = {"acked": body is not None or earlier is not None, "epoch": epoch,
+               "rtt_ms": None if t_recv is None else round((t_recv - t0) * 1e3, 3),
+               "wait_ms": round((t1 - t0) * 1e3, 3), "body": body}
+        if body is None and earlier is not None:
+            out["body"], out["from_earlier_attempt"] = earlier[0], True
+        return out
+
+    def wait_halted(self, epoch: int, timeout_s: float):
+        """(body.halted payload, perf_counter at receipt) for `epoch` (received since the last halt() of that epoch),
+        or None after timeout_s. The body answers a re-send of a latched epoch with `kind: repeat`."""
+        t_end = time.perf_counter() + max(0.0, timeout_s)
+        with self._halt_cv:
+            while True:
+                got = self._halted.get(int(epoch))
+                if got is not None:
+                    return got
+                left = t_end - time.perf_counter()
+                if left <= 0:
+                    return None
+                self._halt_cv.wait(left)
+
+    def resume(self, epoch: int) -> dict:
+        """Clear the halt latch (ROUTER op; reply {ok, data: body.resumed payload} or error stale_command)."""
+        return self.request("resume", {"epoch": int(epoch)})
+
+    def set_fence(self, execution_id: str | None = None, generation: int | None = None,
+                  control_epoch: int | None = None) -> None:
+        """Default fence fields merged into every motion submitted from now on (None clears a field)."""
+        for k, v in (("execution_id", execution_id), ("generation", generation), ("control_epoch", control_epoch)):
+            if v is None:
+                self.fence.pop(k, None)
+            else:
+                self.fence[k] = v
+
+    def acquire(self, execution_id: str, generation: int, control_epoch: int, mode: str = "ANY") -> dict:
+        return self.request("acquire", {"execution_id": execution_id, "generation": int(generation),
+                                        "control_epoch": int(control_epoch), "mode": mode,
+                                        **({"session": self.session} if self.session else {})})
+
+    def release(self, execution_id: str) -> dict:
+        return self.request("release", {"execution_id": execution_id})
+
+    def hello(self, session: str | None = None, watchdog_s: float = 1.0, heartbeat_s: float | None = 0.25) -> dict:
+        """Register a runtime session: the body holds the robot if it hears no ping for watchdog_s while moving.
+        heartbeat_s starts a background ping thread (None: the caller pings with ping_session())."""
+        self.session = session or f"rt-{uuid.uuid4().hex[:8]}"
+        rep = self.request("hello", {"session": self.session, "watchdog_s": watchdog_s})
+        if heartbeat_s and self._hb_thread is None:
+            self._hb_thread = threading.Thread(target=self._heartbeat, args=(heartbeat_s,), name="body-hb",
+                                               daemon=True)
+            self._hb_thread.start()
+        return rep
+
+    def ping_session(self) -> dict:
+        return self.request("ping", {"session": self.session})
+
+    def _heartbeat(self, period: float) -> None:
+        s = self.ctx.socket(zmq.DEALER)            # own socket: the shared DEALER is not touched from this thread
+        s.setsockopt(zmq.LINGER, 0)
+        s.connect(ep(self.ports["body_ctl"], self.host))
+        try:
+            while self._running and self.session is not None:
+                s.send(dumps_json({"id": f"hb-{uuid.uuid4().hex[:6]}", "op": "ping",
+                                   "args": {"session": self.session}}))
+                t_end = time.monotonic() + period
+                while self._running and time.monotonic() < t_end:
+                    if s.poll(20):
+                        s.recv()
+        finally:
+            s.close(0)
+
+    def bye(self) -> dict | None:
+        sess, self.session = self.session, None
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=1.0)
+            self._hb_thread = None
+        return None if sess is None else self.request("bye", {"session": sess})
 
     def arm_stream(self, stream: str | None = None, **defaults) -> "ArmStream":
         """Stream arm/hand joint targets into SONIC (op `arm`, body/arm.py). defaults (watchdog_s, hold_s,

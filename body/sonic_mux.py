@@ -24,6 +24,10 @@ Semantics honoured (WBC @b042411):
   the arms. The overlay is NOT subject to the stale-command watchdog above: if the control loop stalls the arms keep
   their last target (the arm channel's own watchdog runs in that loop); if this process dies the deploy's 1 s
   planner timeout drops the override (:618-628).
+- Halt latch (M2b B.1, contract §3.10): latch(facing_w) makes every planner message IDLE, movement 0, at that facing,
+  whatever the motions set() afterwards, until unlatch(). It is set from the halt-lane thread and wakes the sender
+  thread, so the IDLE goes on the wire at once instead of at the next 20 ms keepalive. unlatch() leaves an IDLE hold
+  at the same facing as the current command, so a resume never replays a stale walk.
 """
 
 from __future__ import annotations
@@ -79,12 +83,15 @@ class SonicMux:
         self._upper: tuple | None = None             # (pos17, vel17, left7|None, right7|None), wire order
         self._upper_t = 0.0
         self._last_facing_w: float | None = None
+        self._latched: PlannerCmd | None = None      # halt latch: overrides every set() until unlatch()
+        self._latched_t = 0.0
+        self._kick = threading.Event()               # wakes the sender thread for an immediate send
         self.control_started = False
         self.control_stopped = False
         self.t_start_sent: float | None = None
         self.stats = {"planner_sent": 0, "command_start_sent": 0, "command_stop_sent": 0, "stale_holds": 0,
                       "frame_unknown_holds": 0, "replan_changes": 0, "upper_sent": 0, "hands_sent": 0,
-                      "by_mode": collections.Counter()}
+                      "latches": 0, "latched_sent": 0, "kicked_sends": 0, "by_mode": collections.Counter()}
         self._rate_ts: collections.deque[float] = collections.deque(maxlen=200)
         self.changes: collections.deque[dict] = collections.deque(maxlen=5000)  # command changes (evidence)
         self._cmd_log = open(cmd_log_path, "a", buffering=1) if cmd_log_path else None
@@ -146,6 +153,33 @@ class SonicMux:
     def hold(self, facing_w: float | None = None, owner: str = "") -> None:
         self.set(PlannerCmd(LocomotionMode.IDLE, (0.0, 0.0), facing_w, -1.0, -1.0, owner))
 
+    def latch(self, facing_w: float | None, owner: str = "halt") -> None:
+        """Halt latch: IDLE, movement 0, at facing_w on every message until unlatch(); set() cannot override it.
+        Thread safe; the sender thread sends the IDLE immediately (no wait for the next keepalive tick)."""
+        with self._lock:
+            if facing_w is None:
+                facing_w = self._last_facing_w
+            self._latched = PlannerCmd(LocomotionMode.IDLE, (0.0, 0.0), facing_w, -1.0, -1.0, owner)
+            self._latched_t = time.monotonic()
+            self.stats["latches"] += 1
+        self._kick.set()
+
+    def unlatch(self, owner: str = "resume") -> None:
+        """Clear the halt latch; the command becomes an IDLE hold at the latched facing (never a stale walk)."""
+        with self._lock:
+            lc, self._latched = self._latched, None
+            if lc is not None:
+                self._cmd = PlannerCmd(LocomotionMode.IDLE, (0.0, 0.0), lc.facing_w, -1.0, -1.0, owner)
+                self._cmd_t = time.monotonic()
+
+    @property
+    def latched(self) -> bool:
+        return self._latched is not None
+
+    def kick(self) -> None:
+        """Send the current command now (thread safe); the 50 Hz schedule restarts from this send."""
+        self._kick.set()
+
     def start_control(self, repeats: int = 3) -> None:
         """Queue command{start:1, stop:0, planner:1}. Repeats are harmless: start is only acted on while
         !operator_state.start (zmq_manager.hpp:525), and start/stop are OR-accumulated (:748-760)."""
@@ -195,6 +229,8 @@ class SonicMux:
             "control_stopped": self.control_stopped,
             "rate_hz": round(self.rate_hz(), 2),
             "cmd": None if cmd is None else {**asdict(cmd), "age_s": round(time.monotonic() - t, 3)},
+            "latched": None if self._latched is None else {**asdict(self._latched),
+                                                           "age_s": round(time.monotonic() - self._latched_t, 3)},
             "upper": None if self._upper is None else {"age_s": round(time.monotonic() - self._upper_t, 3),
                                                        "hands": [self._upper[2] is not None, self._upper[3] is not None]},
             "last_sent": self._last_sent,
@@ -206,7 +242,10 @@ class SonicMux:
     # -- sender thread -------------------------------------------------------------------------
     def _effective(self) -> PlannerCmd:
         with self._lock:
-            cmd, t = self._cmd, self._cmd_t
+            cmd, t, latched = self._cmd, self._cmd_t, self._latched
+        if latched is not None:
+            self.stats["latched_sent"] += 1
+            return latched
         now = time.monotonic()
         if cmd is None:
             return PlannerCmd(LocomotionMode.IDLE, (0.0, 0.0), self._last_facing_w, owner="default")
@@ -319,7 +358,10 @@ class SonicMux:
             nxt += self.period
             dt = nxt - time.monotonic()
             if dt > 0:
-                time.sleep(dt)
+                if self._kick.wait(dt):          # latch()/kick(): send now, then 50 Hz from here
+                    self._kick.clear()
+                    self.stats["kicked_sends"] += 1
+                    nxt = time.monotonic()
             else:
                 nxt = time.monotonic()
 

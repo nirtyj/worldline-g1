@@ -20,6 +20,7 @@ BASE_PORTS = {
     "sonic_debug": 5557,  # deploy PUB g1_debug (zmq_output_handler.hpp)
     "body_ctl": 5610,     # body ROUTER
     "body_evt": 5611,     # body PUB events/state
+    "body_halt": 5612,    # body PULL halt lane: {op: halt|resume, epoch, t_wall} (M2b B.1, contract §3.10)
     "fake_link": 5690,    # tools/fake_deploy.py -> tools/fake_p1.py twist link (mocks only)
     "nav_bridge": 5620,   # nav2/ros_bridge.py REP (go_to backend nav2: goto / cancel / status); ROS side
 }
@@ -110,6 +111,16 @@ class BodyConfig:
                                         # palm errors from 17-75 mm to 2-23 mm; ki 4 was no better and tilted more
     arm_servo_delay_s: float = 0.15     # error vs the target this long ago (SONIC's lag), so the loop ignores lag
     arm_servo_max: float = 0.4          # |correction| per joint [rad]
+    # M2b body wave (docs/contracts/m1.md §3.10-§3.14)
+    deploy_lost_s: float = 1.0          # g1_debug older than this while in control -> fault deploy_lost (PLAN §6.6 says
+                                        # 300 ms; 1.0 s = the existing deploy_stale watchdog, so a loaded box's jitter
+                                        # does not engage the band)
+    fault_band_on: bool = True          # on a fall or deploy_lost: P1 band{on} at once (sim; PLAN §7.3.3 path A step 1)
+    session_watchdog_s: float = 1.0     # default runtime-ping watchdog of a `hello` session (PLAN §6.6: 1.0 s)
+    approach_op_v: float = 0.2          # op approach: SLOW_WALK speed forward/back (its floor, keyboard_handler.hpp:267-272)
+    approach_op_v_lat: float = 0.3      # op approach: sideways (live: 0.2 m/s hardly steps sideways, body/approach.py)
+    approach_op_max_dist: float = 0.6   # op approach: longer moves are go_to's job (rejected too_far)
+    approach_op_t_stop: float = 0.4     # op approach: initial travel-after-IDLE time constant [s] per direction (learnt)
 
     @property
     def ports(self) -> dict:

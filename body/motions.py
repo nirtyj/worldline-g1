@@ -500,4 +500,105 @@ class StopMotion(Motion):
         return None
 
 
-MOTIONS = {m.op: m for m in (StandMotion, WalkMotion, TurnToMotion, StopMotion)}
+# ------------------------------------------------------------------------------------------------
+class RecoverMotion(Motion):
+    """Soft recovery after a fall in sim (PLAN §7.3.3 path A; M2b B.3; contract §3.12), labelled `sim_recovery`.
+
+    The deploy stays alive and in CONTROL throughout (planner IDLE at 50 Hz); command{stop} is never sent.
+      band_on:   P1 band{on} (the fault handler already engaged it; repeated here)
+      band_hold: band_hold_s (2 s) for the band to lift the pelvis to ~0.8 m and hold it upright
+      reset:     P1 reset_robot{x, y, yaw} (default: where the pelvis is now, current yaw): root teleport, joints to the
+                 default pose, band engaged at the new pose. Logged by P1 (root_writes).
+      stabilize: stable_s (2 s) continuously: deploy in control, not fallen, pelvis_z 0.70-0.90 m, |v| < 0.1 m/s
+                 (else `recovery_unstable` after 15 s)
+      release:   P1 band{on: false, ramp_s: 1.5}
+      watch:     ramp + watch_s (3 s): pelvis_z within [pelvis_z_min, pelvis_z_max], not fallen (else
+                 `recovery_fell`, band on again)
+    On success the service clears the fault (HOLD). If the deploy is not running this is path B (a P2 restart:
+    scripts/m1_down.sh + m1_up.sh), reported as `deploy_not_running`. `force: true` runs it without a fault (test)."""
+
+    op = "recover"
+    needs_control = False
+
+    def default_timeout(self) -> float:
+        return 60.0
+
+    def start(self, pose: Pose) -> dict:
+        super().start(pose)
+        a = self.args
+        svc = self.ctx.svc
+        if not svc.fault and not a.get("force"):
+            raise MotionError("no_fault", {"hint": "nothing to recover; force: true runs path A anyway"})
+        if not self.ctx.deploy.alive(5.0):
+            raise MotionError("deploy_not_running", {"hint": "path B: restart P2 (scripts/m1_down.sh, m1_up.sh)"})
+        self.x = _f(a, "x", pose.x)
+        self.y = _f(a, "y", pose.y)
+        self.yaw = wrap(_f(a, "yaw", pose.yaw))
+        self.band_hold_s = _f(a, "band_hold_s", 2.0, 0.0, 10.0)
+        self.stable_s = _f(a, "stable_s", 2.0, 0.5, 10.0)
+        self.ramp_s = _f(a, "release_ramp_s", 1.5, 0.0, 10.0)
+        self.watch_s = _f(a, "watch_s", 3.0, 0.5, 30.0)
+        self.fault0 = svc.fault
+        self.steps: list[dict] = []
+        self.t_stable: float | None = None
+        self.phase, self.t_phase = "band_on", time.monotonic()
+        self.hold(self.yaw)
+        return {"fault": self.fault0, "reset_to": [round(self.x, 3), round(self.y, 3), round(math.degrees(self.yaw), 1)],
+                "label": "sim_recovery"}
+
+    def _p1(self, op: str, **kw) -> dict | None:
+        rep = self.ctx.p1_call(op, **kw)
+        self.steps.append({"t": round(self.elapsed(), 3), "op": op, "args": kw,
+                           "ok": None if rep is None else rep.get("ok", True)})
+        return rep
+
+    def tick(self, pose: Pose, now: float):
+        self.track(pose)
+        self.hold(self.yaw)
+        if self.phase == "band_on":
+            rep = self._p1("band", on=True)
+            if rep is None or rep.get("ok") is False:
+                return "failed", {"reason": "band_failed", "steps": self.steps}
+            self.phase, self.t_phase = "band_hold", now
+            return None
+        if self.phase == "band_hold":
+            if now - self.t_phase >= self.band_hold_s:
+                rep = self._p1("reset_robot", x=self.x, y=self.y, yaw=self.yaw, band=True)
+                if rep is None or rep.get("ok") is False:
+                    return "failed", {"reason": "reset_failed", "reply": rep, "steps": self.steps}
+                self.ctx.emit(self.id, "progress", {"phase": "reset", "pose": pose.brief()})
+                self.phase, self.t_phase = "stabilize", now
+                self.t_stable = None
+            return None
+        if self.phase == "stabilize":
+            vx, vy, _ = self.ctx.velocity()
+            ok = (self.ctx.deploy.in_control() and not pose.fallen and 0.70 <= pose.pelvis_z <= 0.90
+                  and math.hypot(vx, vy) < 0.1)
+            if ok:
+                if self.t_stable is None:
+                    self.t_stable = now
+                if now - self.t_stable >= self.stable_s:
+                    rep = self._p1("band", on=False, ramp_s=self.ramp_s)
+                    if rep is None or rep.get("ok") is False:
+                        return "failed", {"reason": "band_release_failed", "steps": self.steps}
+                    self.phase, self.t_phase = "watch", now
+                    self.zmin, self.zmax = 1e9, -1e9
+            else:
+                self.t_stable = None
+                if now - self.t_phase > 15.0:
+                    return "failed", {"reason": "recovery_unstable", "pose": pose.brief(), "steps": self.steps,
+                                      "in_control": self.ctx.deploy.in_control()}
+            return None
+        if self.phase == "watch":
+            self.zmin, self.zmax = min(self.zmin, pose.pelvis_z), max(self.zmax, pose.pelvis_z)
+            if pose.fallen or not (self.cfg.pelvis_z_min <= pose.pelvis_z <= self.cfg.pelvis_z_max):
+                self._p1("band", on=True)
+                return "failed", {"reason": "recovery_fell", "pose": pose.brief(), "steps": self.steps}
+            if now - self.t_phase >= self.ramp_s + self.watch_s:
+                return "succeeded", {"label": "sim_recovery", "path": "A", "fault": self.fault0,
+                                     "pelvis_z_min": round(self.zmin, 4), "pelvis_z_max": round(self.zmax, 4),
+                                     "steps": self.steps, **self._summary(pose)}
+        return None
+
+
+MOTIONS = {m.op: m for m in (StandMotion, WalkMotion, TurnToMotion, StopMotion, RecoverMotion)}
