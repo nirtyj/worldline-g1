@@ -14,10 +14,14 @@ Checks, in THOR's order (thor/robot.py:434-459) so prompts and eval semantics ca
   7. in the reach window  forward reach_fwd_m and |lateral| <= reach_lat_max_m in the CURRENT pelvis frame, and
                           inside the skill's stance tolerance when it has one (GR00T skills):
        - no -> a stance within approach_max_m that satisfies both? -> needs_reposition (+ stance, world pose
-         and delta, suggest_location="reach_stance"); none -> too_far (+ suggest_location: the stand of the same
-         furniture from which it is in reach, else its surface)
+         and delta, suggest_location="reach_stance"); none -> the OUTLINE-WIDE search (find_far_stance, far_search):
+         a stance anywhere around the supporting furniture (e.g. the other side of a free-standing table), picked
+         by the shortest walk -> needs_reposition (+ stance with walk_m, side, via, reason; navigate(reach_stance)
+         walks there with A* go_to, then the approach); none anywhere -> too_far with a detail saying why and no
+         suggestion (far_search off, M2a: too_far + suggest_location: the stand of the same furniture from which it
+         is in reach, else its surface)
        - yes but the grasp point is outside the arm's sphere (below) -> needs_reposition when a nearby stance
-         reaches it, else out_of_workspace
+         (or a far one) reaches it, else out_of_workspace
        - neither, and no spot the robot can stand on (stance_clearance_m from every obstacle) lies within the arm's
          horizontal reach of the object -> beyond_reach (+ detail): no stand, stance or reposition can help (H15's
          apple, 0.44 m deep on a 0.59 m counter, 15 cm from the wall, is 0.64 m from any such spot vs 0.50 m)
@@ -37,9 +41,11 @@ grasp). Heights (step 6) stay on the object's centre, the numbers the planner pr
 
 Reach stances (`stance_via`): `approach` (the body's strafing reposition, B.6, R.2) stands the pelvis
 stance_clearance_m from the nearest obstacle (raw occupancy) on a straight segment from here; `go_to` (A*: the
-interim reposition) needs the planner's free space (body radius inflated); `two_step` (not wired in navigation yet: an
-A* go_to next to the stance, then the approach) drops the straight segment, so approach_max_m can grow (R.7 coverage:
-48 % of in-band household pickables reachable instead of 23 %, of a 54 % physical bound).
+interim reposition) needs the planner's free space (body radius inflated); `two_step` (an A* go_to next to the stance,
+then the approach) drops the straight segment, so approach_max_m can grow (R.7 coverage: 48 % of in-band household
+pickables reachable instead of 23 %, of a 54 % physical bound). A far stance (the outline-wide search) is always
+reached in two steps: navigate(reach_stance) goes to its `via` point with A* go_to, then approaches
+(services/navigation.py).
 """
 
 from __future__ import annotations
@@ -75,6 +81,14 @@ class G1Workspace:
     stance_margin_m: float = 0.02       # a reposition lands within a few cm: keep the stance inside the reach
     max_held: int = 1
     moving_speed_mps: float = 0.05
+    # the outline-wide search (find_far_stance): no stance within approach_max_m reaches the object
+    far_search: bool = True             # False: too_far + a stand of the same furniture (M2a)
+    far_stand_off_m: tuple[float, float] = (0.20, 0.45)   # pelvis this far out from an edge of the surface's outline
+    far_step_m: float = 0.05            # candidates every this along each edge and across the stand-off band
+    far_turn_max_deg: float = 45.0      # facing the edge normal, turned up to this (a corner reach) ...
+    far_turn_step_deg: float = 5.0      # ... in these steps
+    far_walk_max_m: float = 25.0        # a far stance at most this long a walk from here
+    far_staging_max_m: float = 0.45     # its A* go_to target (free space for the body) at most this far from it
     lite_world: tuple = ()              # INTERIM overrides for LiteWorld (config `workspace.lite_world`), see for_world
 
     @classmethod
@@ -92,6 +106,8 @@ class G1Workspace:
                 kw[f.name] = tuple(float(x) for x in v)
             elif isinstance(f.default, str):
                 kw[f.name] = str(v)
+            elif isinstance(f.default, bool):
+                kw[f.name] = bool(v)
             elif isinstance(f.default, int) and not isinstance(f.default, bool):
                 kw[f.name] = int(v)
             else:
@@ -215,10 +231,7 @@ class ReachabilityModel:
             # closer than that minus 5 cm on the way
             if grid.clearance(sx, sy) < ws.stance_clearance_m or grid.is_outside(sx, sy):
                 return False
-            n = max(2, int(math.hypot(sx - p.x, sy - p.y) / 0.02) + 1)
-            floor = min(ws.stance_clearance_m, grid.clearance(p.x, p.y)) - 0.05
-            return all(grid.clearance(p.x + (sx - p.x) * t, p.y + (sy - p.y) * t) >= floor
-                       for t in (k / (n - 1) for k in range(n)))
+            return self._approach_line_ok(grid, p.x, p.y, sx, sy)
         if ws.stance_via == "two_step":
             # A* go_to to a free spot next to the stance, then the approach (no straight line from here needed):
             # the stance as for `approach`, and a free cell of the robot's component within 0.3 m of it
@@ -237,6 +250,14 @@ class ReachabilityModel:
         if grid.nav.c_blocked[grid.nav._world_to_c(sx, sy)]:
             return False                      # the planner would snap this goal to another cell
         return bool(grid.segment_free((p.x, p.y), (sx, sy)))
+
+    def _approach_line_ok(self, grid: Any, ax: float, ay: float, sx: float, sy: float) -> bool:
+        """The approach's straight segment a -> stance: nothing closer than stance_clearance_m (or the start's own
+        clearance, if less) minus 5 cm on the way (raw occupancy)."""
+        n = max(2, int(math.hypot(sx - ax, sy - ay) / 0.02) + 1)
+        floor = min(self.ws.stance_clearance_m, grid.clearance(ax, ay)) - 0.05
+        return all(grid.clearance(ax + (sx - ax) * t, ay + (sy - ay) * t) >= floor
+                   for t in (k / (n - 1) for k in range(n)))
 
     def only_arm(self, skill: Any) -> str | None:
         """The one arm a skill has (GR00T's Arena checkpoint: left), None when it has both."""
@@ -367,6 +388,228 @@ class ReachabilityModel:
                                "object_fwd": round(f, 3), "object_left": round(l, 3)})
         return best[1] if best else None
 
+    # ------------------------------------------------------------------ the outline-wide search (far stances)
+    @staticmethod
+    def surface_label(m: Any, where: str) -> str:
+        """The furniture's name without the stretch letter: kitchen_dining_table_1a -> kitchen_dining_table_1."""
+        s = m.surfaces.get(where)
+        return where[:-len(s.part)] if s is not None and s.part and where.endswith(s.part) else where
+
+    @staticmethod
+    def _bounds(boxes: list) -> tuple[float, float, float, float]:
+        return (min(c[0] - h[0] for c, h in boxes), min(c[1] - h[1] for c, h in boxes),
+                max(c[0] + h[0] for c, h in boxes), max(c[1] + h[1] for c, h in boxes))
+
+    def _furniture_boxes(self, m: Any, where: str) -> list:
+        """The (centre, half) boxes of the furniture `where` belongs to: its stretches (the footprint-cut boxes; the
+        stands on other free sides share them)."""
+        s = m.surfaces.get(where)
+        if s is None:
+            return []
+        return [(x.center, x.half) for x in m.surfaces.values()
+                if x.furniture_id == s.furniture_id and not getattr(x, "extra_side", False)]
+
+    def outline_edges(self, m: Any, where: str, obj_xy: tuple[float, float]) -> list[tuple]:
+        """The edges a far stance may face: every edge of every stretch box of the supporting furniture, plus those
+        of free-standing furniture pushed against it (boxes within 0.10 m) when the object is within an arm's
+        reach of that furniture. [(a, b, outward normal, side, furniture label)]; an edge shared by two stretches
+        yields candidates inside the neighbour, which the free test drops."""
+        boxes = self._furniture_boxes(m, where)
+        if not boxes:
+            return []
+        label = self.surface_label(m, where)
+        groups = [(label, boxes)]
+        bx0, by0, bx1, by1 = self._bounds(boxes)
+        types = set(getattr(m.params, "free_standing_types", ()) or ())
+        near = self.ws.far_stand_off_m[1] + math.hypot(self.ws.reach_fwd_m[1], self.ws.reach_lat_max_m)
+        fid = m.surfaces[where].furniture_id
+        seen = {fid}
+        for x in m.surfaces.values():
+            if x.furniture_id in seen or x.thor_type not in types or getattr(x, "extra_side", False):
+                continue
+            ob = self._furniture_boxes(m, x.name)
+            ox0, oy0, ox1, oy1 = self._bounds(ob)
+            gap = max(ox0 - bx1, bx0 - ox1, oy0 - by1, by0 - oy1)
+            odist = math.hypot(max(ox0 - obj_xy[0], 0.0, obj_xy[0] - ox1), max(oy0 - obj_xy[1], 0.0, obj_xy[1] - oy1))
+            seen.add(x.furniture_id)
+            if gap <= 0.10 and odist <= near:
+                groups.append((self.surface_label(m, x.name), ob))
+        out = []
+        for lab, bs in groups:
+            for (cx, cy), (hx, hy) in bs:
+                x0, x1, y0, y1 = cx - hx, cx + hx, cy - hy, cy + hy
+                out += [((x0, y0), (x0, y1), (-1.0, 0.0), "-x", lab), ((x1, y0), (x1, y1), (1.0, 0.0), "+x", lab),
+                        ((x0, y0), (x1, y0), (0.0, -1.0), "-y", lab), ((x0, y1), (x1, y1), (0.0, 1.0), "+y", lab)]
+        return out
+
+    def _arm_ok(self, f: float, l: float, skill: Any, pose: Any, obj_xy: tuple[float, float], z: float | None,
+                one: str | None) -> bool:
+        """The object at (f, l) in a stance's pelvis frame: in the window (and the skill's stance), on the skill's
+        arm side, and (palm height z given) inside the arm's sphere with stance_margin_m to spare."""
+        if not self.in_window(f, l, skill, pose, obj_xy) or not self.side_ok(l, skill):
+            return False
+        return z is None or self.shoulder_dist(f, l, z, one) <= self.ws.arm_reach_m - self.ws.stance_margin_m
+
+    def _spot_free(self, grid: Any, sx: float, sy: float) -> bool:
+        """A far stance's spot, by the same free-space rule as _stance_ok (without its straight line from here)."""
+        ws = self.ws
+        if grid.clearance(sx, sy) < ws.stance_clearance_m or grid.is_outside(sx, sy):
+            return False
+        if ws.stance_via == "go_to":
+            return bool(grid.is_free(sx, sy)) and not grid.nav.c_blocked[grid.nav._world_to_c(sx, sy)]
+        return True
+
+    def staging_point(self, grid: Any, sx: float, sy: float, comp: int | None) -> tuple[float, float] | None:
+        """Where the A* go_to of a far reposition ends: a point of the planner's free space (body radius inflated,
+        not snapped by the planner) on the robot's component, at most far_staging_max_m from the stance, from which
+        the straight approach to the stance passes (_approach_line_ok). The stance itself when it is such a point
+        (stance_via go_to: always). Nearest ring first; on a ring the most clearance."""
+        ws = self.ws
+
+        def ok(qx: float, qy: float) -> bool:
+            if not grid.is_free(qx, qy) or grid.nav.c_blocked[grid.nav._world_to_c(qx, qy)]:
+                return False
+            return comp is None or grid.component(qx, qy) == comp
+
+        if ok(sx, sy):
+            return sx, sy
+        if ws.stance_via == "go_to":
+            return None
+        r = 0.10
+        while r <= ws.far_staging_max_m + 1e-9:
+            best = None
+            for k in range(16):
+                a = k * math.pi / 8
+                qx, qy = round(sx + r * math.cos(a), 3), round(sy + r * math.sin(a), 3)
+                if not ok(qx, qy) or not self._approach_line_ok(grid, qx, qy, sx, sy):
+                    continue
+                c = grid.clearance(qx, qy)
+                if best is None or c > best[0]:
+                    best = (c, qx, qy)
+            if best is not None:
+                return best[1], best[2]
+            r += 0.05
+        return None
+
+    @staticmethod
+    def side_of(bounds: tuple[float, float, float, float], x: float, y: float) -> str:
+        """Which side of a box (x0, y0, x1, y1) a point is on: the axis it sticks out furthest along."""
+        x0, y0, x1, y1 = bounds
+        return max((x0 - x, "-x"), (x - x1, "+x"), (y0 - y, "-y"), (y - y1, "+y"))[1]
+
+    def find_far_stance(self, obj_xy: tuple[float, float], where: str, skill: Any = None,
+                        z: float | None = None) -> dict | None:
+        """The outline-wide search, for when no stance within approach_max_m of here reaches the object (the robot
+        at a stand on the wrong side of a free-standing table).
+
+        Candidates: every far_step_m along every edge of the supporting furniture's outline (outline_edges), at
+        far_stand_off_m out from the edge, facing the edge normal, turned up to far_turn_max_deg (a reach across a
+        corner). Kept where the object is inside the arm's window and sphere (_arm_ok; the skill's stance and arm
+        when a skill is selected), the spot passes the stance free-space rule (_spot_free) and a staging point next
+        to it (staging_point: the A* go_to target, then the approach) is on the robot's component. Picked by the
+        shortest WALK: the geodesic on the planner's 0.10 m grid from here to the staging point (WorldGrid.distances,
+        one Dijkstra from the robot for all candidates: the MAP edges' method, within 2.7 % of the any-angle shortest
+        path; not a straight line) plus the approach leg, then the turn and the comfort terms of find_stance.
+
+        -> the stance dict of find_stance plus walk_m, side ("+x" | "-x" | "+y" | "-y" of the outline), via (the
+        staging point) and reason ("other side of <surface>" | "along the <side> side of <surface>"), or None."""
+        ws = self.ws
+        m = self.world.static_map()
+        grid = m.grid
+        p = self.world.robot_pose()
+        edges = self.outline_edges(m, where, obj_xy)
+        if not edges:
+            return None
+        one = self.only_arm(skill)
+        lo, hi = ws.reach_fwd_m
+        marg = ws.stance_margin_m
+        f_lo, f_hi = ws.stance_fwd_m
+        r_max = math.hypot(hi, ws.reach_lat_max_m)
+        d_lo, d_hi = ws.far_stand_off_m
+        n_d = max(1, int(round((d_hi - d_lo) / ws.far_step_m)))
+        offs = [d_lo + (d_hi - d_lo) * i / n_d for i in range(n_d + 1)]
+        k_t = int(round(ws.far_turn_max_deg / max(ws.far_turn_step_deg, 1e-6)))
+        turns = [math.radians(k * ws.far_turn_step_deg) for k in range(-k_t, k_t + 1)]
+
+        class _P:                                       # a pose for in_window's skill-stance check
+            __slots__ = ("x", "y", "yaw")
+
+            def __init__(self, x, y, yaw):
+                self.x, self.y, self.yaw = x, y, yaw
+
+        cands: dict[tuple[float, float], tuple] = {}
+        for (ax, ay), (bx, by), (nx, ny), side, lab in edges:
+            n = max(1, math.ceil(math.hypot(bx - ax, by - ay) / ws.far_step_m - 1e-9))
+            yaw_n = math.atan2(-ny, -nx)
+            for i in range(n + 1):
+                ex, ey = ax + (bx - ax) * i / n, ay + (by - ay) * i / n
+                for d in offs:
+                    sx, sy = round(ex + nx * d, 3), round(ey + ny * d, 3)
+                    r = math.hypot(obj_xy[0] - sx, obj_xy[1] - sy)
+                    if r > r_max + 1e-9 or r < lo - 1e-9:
+                        continue
+                    for t in turns:
+                        yaw = coords.wrap_pi(yaw_n + t)
+                        f, l = coords.world_to_body((sx, sy, yaw), *obj_xy)
+                        # stance_margin_m inside the window's edges too: the walk and the approach land within a
+                        # few cm, and the check from there must still agree
+                        if not (lo + marg <= f <= hi - marg and abs(l) <= ws.reach_lat_max_m - marg):
+                            continue
+                        if not self._arm_ok(f, l, skill, _P(sx, sy, yaw), obj_xy, z, one):
+                            continue
+                        cost = 0.3 * abs(t) + 0.2 * abs(l) + max(0.0, f - f_hi, f_lo - f)
+                        if (sx, sy) not in cands or cost < cands[(sx, sy)][0]:
+                            cands[(sx, sy)] = (cost, yaw, f, l, side, lab)
+        pts = [xy for xy in cands if self._spot_free(grid, *xy)]
+        if not pts:
+            return None
+        comp = grid.component(p.x, p.y)
+        # walk to the stance itself (snapped onto the planner's grid) orders the candidates; the staging point
+        # (a local search) is found for the nearest few, and their walks via it decide
+        est = grid.distances([(p.x, p.y)], pts)[0]
+        order = sorted((float(est[i]) + cands[xy][0], xy) for i, xy in enumerate(pts) if math.isfinite(est[i]))
+        picked = []
+        for _, xy in order:
+            q = self.staging_point(grid, xy[0], xy[1], comp)
+            if q is not None:
+                picked.append((xy, q))
+                if len(picked) >= 8:
+                    break
+        if not picked:
+            return None
+        walk = grid.distances([(p.x, p.y)], [q for _, q in picked])[0]
+        best = None
+        for (xy, q), w in zip(picked, walk):
+            if not math.isfinite(w):
+                continue
+            w = float(w) + math.hypot(xy[0] - q[0], xy[1] - q[1])
+            if w > ws.far_walk_max_m:
+                continue
+            if best is None or w + cands[xy][0] < best[0]:
+                best = (w + cands[xy][0], w, xy, q)
+        if best is None:
+            return None
+        _, w, (sx, sy), (qx, qy) = best
+        _, yaw, f, l, side, lab = cands[(sx, sy)]           # the yaw _arm_ok judged (a skill's yaw_to_object too)
+        here = self.side_of(self._bounds(self._furniture_boxes(m, where)), p.x, p.y)
+        reason = f"along the {side} side of {lab}" if side == here else f"other side of {lab}"
+        bf, bl = coords.world_to_body((p.x, p.y, p.yaw), sx, sy)
+        return {"x": sx, "y": sy, "yaw": round(yaw, 4), "dx": round(sx - p.x, 3), "dy": round(sy - p.y, 3),
+                "dyaw": round(coords.ang_diff(yaw, p.yaw), 4), "forward": round(bf, 3), "left": round(bl, 3),
+                "distance_m": round(math.hypot(sx - p.x, sy - p.y), 3), "object_fwd": round(f, 3),
+                "object_left": round(l, 3), "walk_m": round(w, 2), "side": side, "reason": reason,
+                "via": {"x": qx, "y": qy}}
+
+    def past_edge(self, m: Any, where: str, obj_xy: tuple[float, float]) -> tuple[float, str]:
+        """How far the object sits inside its furniture's outline from the nearest outer edge, and that edge's side."""
+        boxes = self._furniture_boxes(m, where)
+        if not boxes:
+            return 0.0, "?"
+        x0, y0, x1, y1 = self._bounds(boxes)
+        x, y = obj_xy
+        return max(0.0, min(x - x0, x1 - x, y - y0, y1 - y)), min(
+            (x - x0, "-x"), (x1 - x, "+x"), (y - y0, "-y"), (y1 - y, "+y"))[1]
+
     def nearest_stand_m(self, obj_xy: tuple[float, float], r_max: float = 1.2, step: float = 0.02) -> float | None:
         """Distance from the object to the nearest spot the pelvis may stand on for a reach (stance_clearance_m of
         raw clearance, inside the house; with stance_via go_to also the planner's free space in this component),
@@ -412,6 +655,19 @@ class ReachabilityModel:
             if best is None or key < best[0]:
                 best = (key, x.name)
         return best[1] if best else where
+
+    def _far(self, res: Any, obj_xy: tuple[float, float], where: str, skill: Any, gz: float, is_vis: bool,
+             oid: str, common: dict) -> ReachabilityResult | None:
+        """needs_reposition to a far stance (find_far_stance), when the search is on and finds one."""
+        if not self.ws.far_search:
+            return None
+        st = self.find_far_stance(obj_xy, where, skill, gz)
+        if st is None:
+            return None
+        where_txt = f"on the {st['reason']} ({st['side']} side)" if st["reason"].startswith("other") else st["reason"]
+        return res(reason="needs_reposition", visible=is_vis, oid=oid, suggest_location="reach_stance", stance=st,
+                   skill_id=getattr(skill, "skill_id", None),
+                   detail=f"reach stance {where_txt}, {st['walk_m']:.1f} m walk", **common)
 
     # ------------------------------------------------------------------ the check
     def check(self, object_type: str, object_id: str | None = None, *, candidates: Iterable[str] = (),
@@ -488,22 +744,49 @@ class ReachabilityModel:
             if stance is not None:
                 return res(reason="needs_reposition", visible=is_vis, oid=oid, suggest_location="reach_stance",
                            stance=stance, skill_id=getattr(skill, "skill_id", None), **common)
+            far = self._far(res, (x, y), o.where, skill, gz, is_vis, oid, common)
+            if far is not None:
+                return far
             gap = self.nearest_stand_m((x, y))
             reach = self.horizontal_reach(gz)
+            label = self.surface_label(m, o.where)
+            past, _ = self.past_edge(m, o.where, (x, y))
             if gap is not None and gap > reach + 0.02:
                 return res(reason="beyond_reach", visible=is_vis, oid=oid, detail=(
                     f"{oid} is {gap:.2f} m from the nearest spot the robot can stand; at {gz - m.floor_z:.2f} m the "
-                    f"arm reaches {reach:.2f} m"), **common)
+                    f"arm reaches {reach:.2f} m ({past:.2f} m past the nearest edge of {label})"), **common)
+            if self.ws.far_search:
+                # the outline-wide search found no stance anywhere: say why, and suggest nothing (no stand of this
+                # furniture reaches it either)
+                edge = max(0.0, reach - self.ws.stance_clearance_m)
+                hz = gz - m.floor_z
+                if past > edge + 0.01:
+                    why = (f"{oid} is {past:.2f} m past the nearest edge of {label}; the G1 reaches ~{edge:.2f} m "
+                           f"past an edge at {hz:.2f} m")
+                else:
+                    why = (f"{oid} is {past:.2f} m past the nearest edge of {label}, but no spot the robot can walk "
+                           f"to around {label} puts it inside the arm's reach")
+                    marg = self.ws.stance_margin_m
+                    if gap is not None and gap >= reach - marg - 0.005:
+                        why += (f" (the nearest spot it can stand is {gap:.2f} m from it; at {hz:.2f} m the arm "
+                                f"reaches {reach:.2f} m, and a stance keeps {marg:.2f} m of that in hand)")
+                    elif gap is not None:
+                        why += (f" (the nearest spot it can stand, {gap:.2f} m from it, is not one it can walk to and "
+                                f"reach from)")
+                return res(reason="too_far", visible=is_vis, oid=oid, detail=why, **common)
             sug = self.suggest_keypoint((x, y), z, o.where)
             return res(reason="too_far", visible=is_vis, oid=oid, suggest_location=sug if sug != at else None,
                        **common)
         if self.shoulder_dist(fwd, lat, gz, self.only_arm(skill)) > self.ws.arm_reach_m:
             # in the window but beyond the arm from here (a one-armed skill: that arm's sphere): a nearby stance may
-            # fix it (a reposition), else no pose near here can reach it
+            # fix it (a reposition), else one anywhere around the surface, else no pose can reach it
             stance = self.find_stance((x, y), skill, gz)
             if stance is not None:
                 return res(reason="needs_reposition", visible=is_vis, oid=oid, suggest_location="reach_stance",
                            stance=stance, skill_id=getattr(skill, "skill_id", None), **common)
+            far = self._far(res, (x, y), o.where, skill, gz, is_vis, oid, common)
+            if far is not None:
+                return far
             return res(reason="out_of_workspace", visible=is_vis, oid=oid, **common)
         # 8. hands
         held = [v for v in self.world.hands().values() if v]

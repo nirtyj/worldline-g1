@@ -29,6 +29,17 @@ workspace:                      # PLAN §6.4 G1Workspace (object positions in th
                                 # services/navigation.py checks it with the approach op's own map rule (0.12 m goal,
                                 # 0.05 m segment), which these stances (0.20 m goal, 0.15 m segment) always satisfy
   stance_margin_m: 0.02         # stances keep this much inside arm_reach_m (arrival error)
+  far_search: true              # no stance within approach_max_m reaches it: search the supporting furniture's whole
+                                # outline (services/reachability.py find_far_stance), shortest walk;
+                                # navigate(reach_stance) walks there (A* go_to to `via`, then the approach).
+                                # false: too_far + a stand of the same furniture (M2a)
+  far_stand_off_m: [0.20, 0.45] # far stance: pelvis this far out from an edge. From stance_clearance_m (the approach's
+                                # own rule, R.7), not mapgen's 0.27: H40's bottle_1 is reachable only from 0.20-0.22 m
+                                # (the table's -y end, between a chair and the table corner)
+  far_step_m: 0.05              # candidates every 5 cm along each edge and across the stand-off band
+  far_turn_max_deg: 45.0        # facing the edge normal, turned up to this toward a reach across a corner
+  far_walk_max_m: 25.0
+  far_staging_max_m: 0.45       # the A* go_to target at most this far from the stance (the approach op takes <= 0.6 m)
   max_held: 1                   # one object at a time (Worldline rule; two hands, one object)
   reach_fresh_s: 30.0
   lite_world:                   # INTERIM: a LiteWorld (the `lite` profile, the laptop test stacks) keeps M2a's optimistic
@@ -49,6 +60,7 @@ workspace:                      # PLAN §6.4 G1Workspace (object positions in th
     stance_clearance_m: 0.25
     stance_via: go_to
     stance_search: band
+    far_search: false           # M2a's too_far + a stand of the same furniture (no outline-wide search on lite)
 
 walking:
   cruise_mps: 0.45              # go_to's commanded speed (navigate). R.7 live: a straight SLOW_WALK runs faster than
@@ -142,6 +154,9 @@ mapgen:                         # world/mapgen.py MapParams (PLAN §7.1 table)
   max_reach_height_m: 1.20
   min_reach_height_m: 0.55
   user_surface_rule: placeable  # THOR's nearest-to-start rule among surfaces a G1 can place on from the stand
+  free_sides: true              # free-standing tables / islands (both long sides free at stand_off_m with clearance):
+                                # a stand on EVERY free side, new letters after the existing ones (existing stands
+                                # unchanged); wall runs keep one stand per stretch. false: one stand per stretch
   lite_world:                   # INTERIM: a LiteWorld keeps M2a's stands, with its M2a arm (workspace.lite_world); the
                                 # Isaac worlds build the R.7 stands above (world/mapgen.py MapParams.for_source)
     stand_off_m: [0.35, 0.50]

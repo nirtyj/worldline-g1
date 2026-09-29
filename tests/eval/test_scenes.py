@@ -327,7 +327,10 @@ def test_the_g1_alternative_for_other_side_goes_round_the_stove():
 
 
 def test_the_apple_is_beyond_a_g1s_reach_and_the_mugs_beyond_one_reposition():
-    """The evidence behind the scenario decisions, with the calibrated arm."""
+    """The evidence behind the scenario decisions, with the calibrated arm. Since the outline-wide search
+    (services/reachability.py find_far_stance) mug_1 is no longer out of reach: its stance is at the dresser's -x end
+    (0.73 m from the stand, past approach_max_m; a 1.2 m walk round the end), from which the check says reachable.
+    The `addition` binding (flag mugs_out_of_the_calibrated_arm) predates that; mug_2 is still not in view."""
     pytest.importorskip("scipy")
     from tests.services.conftest import run
     s = _g1_stack(BIND.scene("H15"))
@@ -342,12 +345,21 @@ def test_the_apple_is_beyond_a_g1s_reach_and_the_mugs_beyond_one_reposition():
     s = _g1_stack(BIND.scene("H40"))
 
     async def h40():
-        for oid in ("mug_1", "mug_2"):
-            o = s.world.object(oid)
-            _at(s, o.where)
-            await s.run("observe", {"mode": "scan"})
-            # mug_1: no stance within one reposition; mug_2 is not even in view from its stand's scan (1.45 m away)
-            assert s.robot.reach.check("mug", oid).reason in ("too_far", "beyond_reach", "not_seen_here"), oid
+        o = s.world.object("mug_1")
+        _at(s, o.where)
+        await s.run("observe", {"mode": "scan"})
+        # mug_1: no stance within one local reposition (approach_max_m); the far one round the dresser's end
+        r = s.robot.reach.check("mug", "mug_1")
+        assert r.reason == "needs_reposition" and r.stance["distance_m"] > s.robot.reach.ws.approach_max_m, r
+        assert r.stance["reason"] == "other side of bedroom_dresser_1" and r.stance["side"] == "-x", r.stance
+        st = r.stance
+        _at(s, o.where, (st["x"], st["y"], st["yaw"]))
+        assert s.robot.reach.check("mug", "mug_1").reachable
+        # mug_2 is not even in view from its stand's scan (1.45 m away)
+        o = s.world.object("mug_2")
+        _at(s, o.where)
+        await s.run("observe", {"mode": "scan"})
+        assert s.robot.reach.check("mug", "mug_2").reason in ("too_far", "beyond_reach", "not_seen_here")
     run(h40())
 
 

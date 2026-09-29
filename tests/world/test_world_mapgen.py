@@ -234,3 +234,112 @@ def test_footprints_off_is_thors_aabb_partition(lite38):
         (x0, y0, _), (x1, y1, _) = f.aabb
         along_x = (x1 - x0) >= (y1 - y0)
         assert (s.half[1] if along_x else s.half[0]) == pytest.approx(((y1 - y0) if along_x else (x1 - x0)) / 2)
+
+
+# ------------------------------------------------------------------ free sides (free-standing tables and islands)
+def _isaac_params(**over):
+    """config/g1.yaml mapgen as an Isaac world builds it (the R.7 stands, not mapgen.lite_world)."""
+    import dataclasses
+    from robot.profile import load_profile
+    from world.mapgen import MapParams
+    mp = MapParams.from_dict({k: v for k, v in load_profile("lite").g1["mapgen"].items() if k != "lite_world"})
+    return dataclasses.replace(mp, **over)
+
+
+def _synthetic(tmp_path, **over):
+    from tests.fakes import table_house
+    from world.lite_world import LiteWorld
+    return LiteWorld(table_house.write(tmp_path / "synthetic-table"), map_params=_isaac_params(**over))
+
+
+def test_a_free_standing_table_gets_a_stand_on_every_free_side_and_a_wall_counter_keeps_one(tmp_path):
+    w = _synthetic(tmp_path)
+    m = w.map
+    lo, hi = m.params.stand_off_m
+    table = {n: s for n, s in m.surfaces.items() if n.startswith("kitchen_dining_table_1")}
+    # its own stands (one per stretch, the sibling-side rule) first, then every other free side, lettered after them
+    assert {n: (s.side, s.extra_side) for n, s in table.items()} == {
+        "kitchen_dining_table_1a": ("+y", False), "kitchen_dining_table_1b": ("+y", False),
+        "kitchen_dining_table_1c": ("-y", True), "kitchen_dining_table_1d": ("-x", True),
+        "kitchen_dining_table_1e": ("-y", True), "kitchen_dining_table_1f": ("+x", True)}
+    for s in table.values():
+        assert not s.relaxed and lo - 1e-6 <= s.stand_off_m <= hi + 1e-6, s
+        assert m.grid.clearance(*s.stand) >= m.params.stand_clearance_m - 1e-6
+        ang = math.atan2(s.center[1] - s.stand[1], s.center[0] - s.stand[0])
+        assert abs(coords.ang_diff(ang, s.yaw)) <= math.radians(m.params.max_facing_err_deg) + 1e-6, s.name
+    pts = [m.keypoints[n] for n in table] + [m.keypoints[n] for n in ("kitchen_counter_1a", "kitchen_counter_1b")]
+    for i, a in enumerate(pts):
+        for b in pts[i + 1:]:
+            assert math.dist((a.x, a.y), (b.x, b.y)) >= m.params.stand_min_sep_m - 1e-6, (a.name, b.name)
+    # the counter against the south wall: its back has no room, so one stand per stretch, on its front
+    counter = {n: s.side for n, s in m.surfaces.items() if n.startswith("kitchen_counter_1")}
+    assert counter == {"kitchen_counter_1a": "+y", "kitchen_counter_1b": "+y"}
+    # objects keep the stretch's own name as their where; the user surface is never an added stand
+    assert w.objects()["bottle_1"].where == "kitchen_dining_table_1b" and not m.surfaces[m.user_surface].extra_side
+    # the flag off: the one-stand-per-stretch map
+    off = _synthetic(tmp_path / "off", free_sides=False).map
+    assert [n for n in off.surfaces if n.startswith("kitchen_dining_table")] == ["kitchen_dining_table_1a",
+                                                                                "kitchen_dining_table_1b"]
+
+
+@pytest.mark.parametrize("house", RECORDED)
+@pytest.mark.parametrize("params", ["default", "isaac"])
+def test_free_sides_keep_every_existing_stand_and_name(house, params):
+    """Every stand of the one-stand-per-stretch map (free_sides off) is in the new map under the same name, at the
+    same pose, facing the same stretch; the added ones come after them (the furniture's next letters), and the user
+    surface and the skipped list do not change. So eval bindings, memory and eval/scenes.yaml keep their names."""
+    import dataclasses
+    from tests.fakes.fixtures import _lite
+    from world.mapgen import EXTRA_LETTERS, MapParams, build_static_map
+    w = _lite(house)
+    mp = MapParams() if params == "default" else _isaac_params()
+    on = build_static_map(w.scene_data, w.grid, dataclasses.replace(mp, free_sides=True), scene_key=house)
+    off = build_static_map(w.scene_data, w.grid, dataclasses.replace(mp, free_sides=False), scene_key=house)
+    for n, s in off.surfaces.items():
+        t = on.surfaces[n]
+        assert (t.stand, t.yaw, t.side, t.center, t.half, t.stand_off_m, t.relaxed) == \
+            (s.stand, s.yaw, s.side, s.center, s.half, s.stand_off_m, s.relaxed), n
+        assert not t.extra_side
+    assert list(on.surfaces)[:len(off.surfaces)] == list(off.surfaces)
+    for n in set(on.surfaces) - set(off.surfaces):
+        t = on.surfaces[n]
+        own = [x.part for x in off.surfaces.values() if x.furniture_id == t.furniture_id]
+        assert t.extra_side and own and EXTRA_LETTERS.index(t.part) >= len(own), (n, own)   # after its own letters
+    assert on.user_surface == off.user_surface and on.skipped == off.skipped
+    assert {k: v.near for k, v in on.landmarks.items() if k.startswith("stove")} == \
+        {k: v.near for k, v in off.landmarks.items() if k.startswith("stove")}          # eval: stove_1 near counter_2a
+
+
+def test_h40_dining_table_has_one_free_side_the_chairs_block_the_rest():
+    """H40 (the owner's live bug): the dining table stands in the room, but its five chairs are pushed in: only the
+    -x side has room for a regular stand (0.27-0.45 m out, 0.25 m clear); the +x side's only spot is 0.47 m out at a
+    corner and the ends have none, so the table is not free-standing by the stand rule and keeps 1a (-x, 0.27 m) and
+    1b (-x, relaxed 0.62 m) as they were. What reaches its far objects is the reachability's outline-wide search
+    (tests/services/test_far_stance.py)."""
+    from tests.fakes.fixtures import _lite
+    from world.mapgen import _find_stand, build_static_map
+    w = _lite("procthor-train-40")
+    mp = _isaac_params()
+    m = build_static_map(w.scene_data, w.grid, mp, scene_key="procthor-train-40")
+    table = {n: (s.side, round(s.stand_off_m, 2), s.relaxed) for n, s in m.surfaces.items()
+             if n.startswith("kitchen_dining_table")}
+    assert table == {"kitchen_dining_table_1a": ("-x", 0.27, False), "kitchen_dining_table_1b": ("-x", 0.62, True)}
+    s = m.surfaces["kitchen_dining_table_1a"]
+    comp = w.grid.component(*w.scene_data.spawn[:2])
+    free = {f: _find_stand(w.scene_data, w.grid, mp, s.center, s.half, False, 0, 2, s.room, [], comp,
+                           only_sides=(f,), relaxed_ok=False, strict=True) is not None
+            for f in ("-x", "+x", "-y")}
+    assert free == {"-x": True, "+x": False, "-y": False}
+    loose = _find_stand(w.scene_data, w.grid, mp, s.center, s.half, False, 0, 2, s.room, [], comp,
+                        only_sides=("+x",), relaxed_ok=False)
+    assert loose is not None and loose[3] > mp.stand_off_m[1]                          # 0.47 m: past the range
+
+
+def test_h38_dining_table_gets_stands_across_from_its_own():
+    from tests.fakes.fixtures import _lite
+    from world.mapgen import build_static_map
+    w = _lite("procthor-train-38")
+    m = build_static_map(w.scene_data, w.grid, _isaac_params(), scene_key="procthor-train-38")
+    got = {n: (s.side, s.extra_side) for n, s in m.surfaces.items() if n.startswith("kitchen_dining_table")}
+    assert got == {"kitchen_dining_table_1a": ("-y", False), "kitchen_dining_table_1b": ("-y", False),
+                   "kitchen_dining_table_1c": ("+y", True), "kitchen_dining_table_1d": ("+y", True)}

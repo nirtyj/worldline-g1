@@ -146,7 +146,8 @@ class ReachabilityResult:            # doc 8.1 + [WL]
     object_type: str = ""
     object_id: str | None = None
     suggest_location: str | None = None     # a keypoint (too_far) or "reach_stance" (needs_reposition)
-    stance: dict[str, float] | None = None  # {x, y, yaw} world (REP-103) + {dx, dy, dyaw} from here
+    stance: dict[str, Any] | None = None    # {x, y, yaw} world (REP-103) + {dx, dy, dyaw} from here; a far stance
+                                            # (the outline-wide search) + {walk_m, side, reason, via: {x, y}}
     distance_m: float | None = None
     height_m: float | None = None
     skill_id: str | None = None

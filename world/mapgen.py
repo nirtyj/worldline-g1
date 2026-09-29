@@ -17,6 +17,9 @@ Naming (so the planner prompt and eval keep their words):
              (room, kind) in scene-id order, base = "counter" for counter tops else snake(THOR type):
              kitchen_counter_1a, living_room_tv_stand_1, bedroom_bed_1.
   keypoints  == surface names (one stand per stretch), plus `start` and one keypoint per room (its name).
+             Free-standing tables and islands (`free_sides`) also get a stand on every other free side: more
+             surfaces of the same stretches, lettered after the furniture's own (H38 kitchen_dining_table_1c/1d
+             across the table from 1a/1b); an object's `where` stays the stretch's own name (world/where.py).
   objects    pickupable things (fixed vocabulary), `snake(type)_n` numbered in scene-id order: alarm_clock_1.
   landmarks  non-pickupable LANDMARK_TYPES: fridge_1, stove_1 (all burners one), tv_1; `near` = the nearest
              keypoint IN THE SAME ROOM (THOR drift fixed, PLAN §4.4).
@@ -32,6 +35,12 @@ stove top (K10 counter_2b). A segment with (almost) nothing left is skipped (`sk
 Stand points (G1): `stand_off_m` from the stretch's front edge (config/g1.yaml: 0.27-0.45 m), facing the edge normal
 (so layout's 4-axis facing holds), `stand_clearance_m` from every obstacle (0.25: a keypoint is an A* go_to goal
 outside the body's 0.25 m inflation), in the furniture's room, reachable from the spawn, >= 0.5 m from other stands.
+Free sides (`free_sides`, on by default; False rebuilds the one-stand-per-stretch maps): a table or an island
+(`free_standing_types`) whose two long sides both have room for a regular stand is free-standing; after every
+furniture's own stands (which stay exactly as they were: names, letters, poses), each of its stretches gets a stand
+on every other side where one fits by the same rules (regular stand-off only, strictly inside the range), without
+the sibling-side preference. A run against a wall (its back has no room) keeps one stand per stretch, and the user
+surface is never one of the added stands.
 (PLAN §7.1 said 0.45-0.60. R.7 measured the arm: it reaches 0.37-0.41 m ahead of the pelvis at counter height and
 place never repositions, so a stand 0.35 m back reached no spot on any user surface; from 0.27 m a spot 6 cm past the
 edge is in reach; docs/calibration.md §4.) If nothing qualifies, a relaxed pass allows up to 1.0 m and 0.25 m
@@ -60,6 +69,7 @@ from .nav_grid import WorldGrid
 from .scene import Room, SceneData, SceneItem
 
 LETTERS = "abcdefgh"
+EXTRA_LETTERS = "abcdefghijklmnop"      # stands on the other free sides follow the stretches' letters
 
 
 @dataclass(frozen=True)
@@ -94,6 +104,9 @@ class MapParams:
     footprint_min_fill: float = 0.10        # a segment with less of its area left than this is skipped
     split_deep_m: float = 0.0               # split a stretch deeper than this (an L/U leg) along its depth; 0: off
     split_shaped_fill: float = 0.8          # ... only on furniture whose footprint fills less of its AABB than this
+    free_sides: bool = True                 # free-standing furniture: a stand on EVERY free side (new letters after
+                                            # the existing ones); False: one stand per stretch (the old maps)
+    free_standing_types: tuple = ("DiningTable", "CounterTop", "CoffeeTable", "SideTable", "Desk")   # tables, islands
     lite_world: tuple = ()                  # INTERIM overrides for a LiteWorld (config mapgen.lite_world), for_source
 
     @classmethod
@@ -140,6 +153,7 @@ class Surface:
     side: str                       # which face of the stretch the stand is at: "+x", "-x", "+y", "-y"
     stand_off_m: float              # stand distance from the front edge
     relaxed: bool = False
+    extra_side: bool = False        # a stand added on another free side of free-standing furniture (free_sides)
 
     def contains_xy(self, x: float, y: float, margin: float = 0.0) -> bool:
         return abs(x - self.center[0]) <= self.half[0] + margin and abs(y - self.center[1]) <= self.half[1] + margin
@@ -332,9 +346,11 @@ def build_static_map(scene: SceneData, grid: WorldGrid, params: MapParams | None
         # THOR's rule (the surface whose stand is nearest the start); with user_surface_rule "placeable" (the G1
         # profiles, config/g1.yaml) restricted to surfaces a G1 can place on from their stand
         user_surface = None
-        good = [s for s in surfaces.values() if not s.relaxed and s.stand_off_m <= p.user_max_stand_off_m + 1e-6
+        # (the stands added on other free sides never: the user stays where the one-stand-per-stretch map put them)
+        own = [s for s in surfaces.values() if not s.extra_side]
+        good = [s for s in own if not s.relaxed and s.stand_off_m <= p.user_max_stand_off_m + 1e-6
                 and p.min_reach_height_m <= s.height <= p.max_reach_height_m]
-        pool = (good if p.user_surface_rule == "placeable" else []) or list(surfaces.values())
+        pool = (good if p.user_surface_rule == "placeable" else []) or own
         if pool:
             user_surface = min(pool, key=lambda s: math.dist(s.stand, (sx, sy))).name
     return StaticMap(scene=scene_key or scene.house_id, house_id=scene.house_id, params=p, floor_z=scene.floor_z,
@@ -517,6 +533,7 @@ def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int 
                       and math.dist(scene.item(q).center[:2], o.center[:2]) < p.shelf_merge_m), None)   # type: ignore[union-attr]
         primary[o.scene_id] = below or o.scene_id
     out: dict[str, Surface] = {}
+    second: list[tuple[dict, dict[int, str]]] = []  # free-standing furniture for the free-sides pass
     for o in sorted(surf, key=lambda o: o.scene_id):
         if primary[o.scene_id] != o.scene_id:
             continue
@@ -551,30 +568,52 @@ def _layout_surfaces(scene: SceneData, grid: WorldGrid, p: MapParams, comp: int 
         boxes = boxes[:len(LETTERS)]
         n_parts = len(boxes)
         sibling_side = None
+        taken: dict[int, str] = {}                  # box index -> the side its stand is on
+        where = f" in the {scene.room(room).label}" if room and scene.room(room) else ""   # type: ignore[union-attr]
+        ctx = dict(o=o, boxes=boxes, base=base, kind=kind, num=num, room=room, where=where, z0=z0, z1=z1)
         for j, (seg, half, ax, i, n_i, deep) in enumerate(boxes):
             st = _find_stand(scene, grid, p, seg, half, ax, i, n_i, room, used, comp,
                              None if deep else sibling_side)
             if st is None:
                 skipped.append((o.scene_id + (f"#{LETTERS[j]}" if n_parts > 1 else ""), "no free stand in the room"))
                 continue
-            (px, py), yaw, side, d, relaxed = st
             if not deep:
-                sibling_side = sibling_side or side
-            used.append((px, py, yaw))
-            part = "" if n_parts == 1 else LETTERS[j]
-            name = base + part
-            where = f" in the {scene.room(room).label}" if room and scene.room(room) else ""   # type: ignore[union-attr]
-            desc = f"{kind} {num}{', part ' + part if part else ''}{where}"
-            out[name] = Surface(name=name, furniture_id=o.scene_id, thor_type=o.thor_type, kind=kind, num=num,
-                                part=part, room=room, desc=desc, center=seg, half=half, z_top=z1, z_bottom=z0,
-                                height=round(z1 - scene.floor_z, 2), stand=(px, py), yaw=yaw, side=side,
-                                stand_off_m=round(d, 3), relaxed=relaxed)
+                sibling_side = sibling_side or st[2]
+            taken[j] = st[2]
+            _add_surface(out, used, scene, ctx, j, "" if n_parts == 1 else LETTERS[j], st, False)
+        if p.free_sides and o.thor_type in p.free_standing_types and not shaped:
+            second.append((ctx, taken))
+    # free-standing furniture (a table or an island with free floor on both long sides): a stand on every free side.
+    # A second pass, after every furniture's stands above, so those are exactly what they were (names, letters and
+    # poses: eval bindings, memory and scenes.yaml keep working) and the new ones yield to them (spacing); they get
+    # the letters after the furniture's own. No sibling-side preference: each side is searched on its own, with every
+    # other stand rule (regular stand-off and clearance, facing, room, spawn component, spacing).
+    for ctx, taken in second:
+        boxes = ctx["boxes"]
+        for k, (j, st) in enumerate(_free_side_stands(scene, grid, p, boxes, taken, ctx["room"], used, comp)):
+            if len(boxes) + k >= len(EXTRA_LETTERS):
+                break
+            _add_surface(out, used, scene, ctx, j, EXTRA_LETTERS[len(boxes) + k], st, True)
     for sid, first in primary.items():
         if sid != first:
             home = next((s.name for s in out.values() if s.furniture_id == first), None)
             if home:
                 alias[sid] = home
     return out, alias, skipped
+
+
+def _add_surface(out: dict[str, Surface], used: list, scene: SceneData, ctx: dict, j: int, part: str, st,
+                 extra: bool) -> None:
+    """One stand of stretch `j` of a furniture -> a Surface named base + part (and its spot in `used`)."""
+    (px, py), yaw, side, d, relaxed = st
+    o, seg, half = ctx["o"], ctx["boxes"][j][0], ctx["boxes"][j][1]
+    used.append((px, py, yaw))
+    name = ctx["base"] + part
+    desc = f"{ctx['kind']} {ctx['num']}{', part ' + part if part else ''}{ctx['where']}"
+    out[name] = Surface(name=name, furniture_id=o.scene_id, thor_type=o.thor_type, kind=ctx["kind"], num=ctx["num"],
+                        part=part, room=ctx["room"], desc=desc, center=seg, half=half, z_top=ctx["z1"],
+                        z_bottom=ctx["z0"], height=round(ctx["z1"] - scene.floor_z, 2), stand=(px, py), yaw=yaw,
+                        side=side, stand_off_m=round(d, 3), relaxed=relaxed, extra_side=extra)
 
 
 def _split_deep(seg, half, along_x: bool, i: int, n: int, p: MapParams) -> list[tuple]:
@@ -602,9 +641,64 @@ def _split_deep(seg, half, along_x: bool, i: int, n: int, p: MapParams) -> list[
     return out
 
 
+def _side_name(nx: float, ny: float) -> str:
+    return ("+x" if nx > 0 else "-x") if nx else ("+y" if ny > 0 else "-y")
+
+
+def _faces(along_x: bool, i: int, n: int) -> tuple[list[str], list[str]]:
+    """A stretch's candidate faces: (the long sides, the ends it has: only at the ends of the furniture)."""
+    if along_x:
+        return ["+y", "-y"], (["-x"] if i == 0 else []) + (["+x"] if i == n - 1 else [])
+    return ["+x", "-x"], (["-y"] if i == 0 else []) + (["+y"] if i == n - 1 else [])
+
+
+def _free_side_stands(scene: SceneData, grid: WorldGrid, p: MapParams, boxes: list[tuple], taken: dict[int, str],
+                      room: str | None, used, comp) -> list[tuple[int, tuple]]:
+    """Stands on the other free sides of a free-standing furniture: [(box index, stand)] in box order, long sides
+    before ends.
+
+    A side is FREE when a regular stand fits in front of it (stand_off_m from the edge, stand_clearance_m from every
+    obstacle, within the stand-off range, facing it, in the room, on the spawn's component: the strip in front of it
+    has free floor), judged
+    without the other stands. The furniture is free-standing when BOTH its long sides are free for some stretch; a
+    run against a wall (its back is not free) keeps its one stand per stretch. Then every stretch gets a stand on
+    each free side its stand is not on already (the ends only at the ends of the furniture), >= stand_min_sep_m from
+    every other stand (the stands are placed in this order, so a later one yields). No relaxed stands here: a side
+    whose strip is blocked (chairs pushed in) is not free."""
+    parts = [(j, b) for j, b in enumerate(boxes) if not b[5]]          # deep (split) legs are not table sides
+    if not parts:
+        return []
+    free: dict[tuple[int, str], bool] = {}
+    for j, (seg, half, ax, i, n_i, _) in parts:
+        longs, ends = _faces(ax, i, n_i)
+        for f in longs + ends:
+            free[(j, f)] = _find_stand(scene, grid, p, seg, half, ax, i, n_i, room, [], comp,
+                                       only_sides=(f,), relaxed_ok=False, strict=True) is not None
+    longs0 = _faces(parts[0][1][2], 0, 1)[0]
+    if not all(any(free.get((j, f)) for j, _ in parts) for f in longs0):
+        return []
+    out: list[tuple[int, tuple]] = []
+    mine = list(used)
+    for j, (seg, half, ax, i, n_i, _) in parts:
+        longs, ends = _faces(ax, i, n_i)
+        for f in longs + ends:
+            if f == taken.get(j) or not free.get((j, f)):
+                continue
+            st = _find_stand(scene, grid, p, seg, half, ax, i, n_i, room, mine, comp, only_sides=(f,),
+                             relaxed_ok=False, strict=True)
+            if st is not None:
+                out.append((j, st))
+                mine.append((st[0][0], st[0][1], st[1]))
+    return out
+
+
 def _find_stand(scene: SceneData, grid: WorldGrid, p: MapParams, seg, half, along_x: bool, i: int, n: int,
-                room: str | None, used, comp, sibling_side: str | None = None):
-    """Best stand for one stretch: (xy, yaw, side, stand_off, relaxed) or None."""
+                room: str | None, used, comp, sibling_side: str | None = None, *,
+                only_sides: tuple[str, ...] | None = None, relaxed_ok: bool = True, strict: bool = False):
+    """Best stand for one stretch: (xy, yaw, side, stand_off, relaxed) or None. only_sides: search just these faces;
+    relaxed_ok=False: no relaxed pass; strict: no stand-off past the range's end (the 5 cm steps from its start can
+    overshoot it by up to a step: 0.27 + 4 x 0.05 = 0.47 > 0.45; kept for the one-stand-per-stretch pass, whose
+    stands must not move)."""
     hx, hy = half
     # candidate faces: the long sides always; the short ends only at the ends of the furniture
     if along_x:
@@ -621,7 +715,11 @@ def _find_stand(scene: SceneData, grid: WorldGrid, p: MapParams, seg, half, alon
             sides.append(((0, 1), True))
     square = abs(2 * hx - 2 * hy) < 0.1 * max(2 * hx, 2 * hy, 1e-6) and n == 1
     lo, hi = p.stand_off_m
+    if only_sides is not None:
+        sides = [sd for sd in sides if _side_name(*sd[0]) in only_sides]
     passes = [(lo, hi, p.stand_clearance_m, False), (lo, p.stand_off_relaxed_m, p.relaxed_clearance_m, True)]
+    if not relaxed_ok:
+        passes = passes[:1]
     max_err = math.radians(p.max_facing_err_deg)
     for d_lo, d_hi, clr, relaxed in passes:
         best, best_score = None, math.inf
@@ -638,11 +736,13 @@ def _find_stand(scene: SceneData, grid: WorldGrid, p: MapParams, seg, half, alon
                 lats += [k * p.lateral_step_m, -k * p.lateral_step_m]
                 k += 1
             penalty = 0.0 if (square or not is_end) else p.end_side_penalty
-            side_name = ("+x" if nx > 0 else "-x") if nx else ("+y" if ny > 0 else "-y")
+            side_name = _side_name(nx, ny)
             if sibling_side is not None and side_name != sibling_side:
                 penalty += p.sibling_side_penalty
             for j in range(n_d):
                 d = d_lo + j * p.stand_step_m
+                if strict and d > d_hi + 1e-9:
+                    continue
                 for lat in lats:
                     if math.atan2(abs(lat), d + depth) > max_err:
                         continue
