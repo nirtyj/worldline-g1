@@ -188,3 +188,21 @@ def test_on_the_lite_world_no_stance_reaches_the_mugs_or_the_spatula_but_the_alt
         r = await _check_from(s, "bowl_1", "counter_2c")
         assert r.reachable or r.reason == "needs_reposition", r.reason
     run(k10())
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "services/reachability.py _find_stance_band (the lite world's INTERIM band search) judges the unrounded stance "
+    "and hands on the rounded one: H15's dish sponge gets (0.552974, 11.599825) judged and (0.553, 11.600) handed on, "
+    "one 5 cm cell over, where its own go_to rule and navigate(reach_stance) refuse it (E-1 fetch_search: "
+    "stance_not_reached 3x). find_stance rounds first; the band search should too. Remove this mark with that fix."))
+def test_a_reach_stance_handed_on_passes_its_own_rule_on_the_lite_world():
+    from tests.services.conftest import run
+    s = _lite_stack("procthor-train-15")
+
+    async def main():
+        await s.run("navigate", {"location": "bathroom_sink_basin_1"})
+        await s.run("observe", {"mode": "scan"})
+        r = s.robot.reach.check("dish_sponge", "dish_sponge_1")
+        if r.reason == "needs_reposition":
+            assert s.robot.reach.stance_ok(r.stance["x"], r.stance["y"]), r.stance
+    run(main())
