@@ -177,7 +177,14 @@ class ManipulationService:
     def start(self, execution: Execution) -> ResultHandle:
         a = execution.args
         action = str(a.get("action") or execution.action or "pick")
-        skill, _ = self.capability(action, str(a.get("object_type")), a.get("arm"))
+        arm = a.get("arm")
+        if action == "pick" and arm not in ("left", "right"):
+            # no arm in the call: the skill is chosen for the arm the check named (PLAN 2.2 F1: pick with
+            # arm=preferred_arm), so a one-armed skill never runs on the other arm (full: GR00T is left-handed)
+            r = self.last_reachability(str(a.get("object_type")))
+            if r is not None and r.reachable and r.preferred_arm in ("left", "right"):
+                arm = r.preferred_arm
+        skill, _ = self.capability(action, str(a.get("object_type")), arm)
         work = self._pick if action == "pick" else self._place
         exe = self.executor_for(skill) if skill is not None else None
         name = getattr(exe, "name", None) or (skill.executor if skill else None)

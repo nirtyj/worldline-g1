@@ -169,9 +169,10 @@ class ReachabilityModel:
                     return False
         return True
 
-    def shoulder_dist(self, fwd: float, lat: float, z: float) -> float:
-        """Distance from the nearer arm's reach-sphere centre to a palm target (pelvis-frame fwd/lat, world z)."""
-        side = 1.0 if lat >= 0 else -1.0
+    def shoulder_dist(self, fwd: float, lat: float, z: float, arm: str | None = None) -> float:
+        """Distance from an arm's reach-sphere centre to a palm target (pelvis-frame fwd/lat, world z): `arm`'s
+        (left/right), else the nearer arm's."""
+        side = {"left": 1.0, "right": -1.0}.get(arm or "", 1.0 if lat >= 0 else -1.0)
         sz = self.world.static_map().floor_z + self.ws.shoulder_z_m
         return math.sqrt((fwd - self.ws.shoulder_fwd_m) ** 2 + (lat - side * self.ws.shoulder_lat_m) ** 2
                          + (z - sz) ** 2)
@@ -237,6 +238,20 @@ class ReachabilityModel:
             return False                      # the planner would snap this goal to another cell
         return bool(grid.segment_free((p.x, p.y), (sx, sy)))
 
+    def only_arm(self, skill: Any) -> str | None:
+        """The one arm a skill has (GR00T's Arena checkpoint: left), None when it has both."""
+        arms = tuple(getattr(skill, "arms", ("left", "right")) or ("left", "right"))
+        return arms[0] if len(set(arms)) == 1 and arms[0] in ("left", "right") else None
+
+    def side_ok(self, lat: float, skill: Any) -> bool:
+        """Is an object at pelvis-frame lateral `lat` on the side of the skill's arm (the dead band counts for both)?"""
+        arm = self.only_arm(skill)
+        if arm == "left":
+            return lat >= -self.ws.either_deadband_m
+        if arm == "right":
+            return lat <= self.ws.either_deadband_m
+        return True
+
     def preferred_arm(self, lat: float, skill: Any = None) -> str:
         if lat > self.ws.either_deadband_m:
             arm = "left"
@@ -265,12 +280,14 @@ class ReachabilityModel:
         for y in (to_obj, self._keypoint_yaw()):
             if y is not None and all(abs(coords.ang_diff(y, q)) > math.radians(3) for q in yaws):
                 yaws.append(y)
+        one = self.only_arm(skill)
+        lats = [l for l in lats if self.side_ok(l, skill)]
         best = None
         for yaw in yaws:
             c, s = math.cos(yaw), math.sin(yaw)
             for f in fwds:
                 for l in lats:
-                    if z is not None and self.shoulder_dist(f, l, z) > ws.arm_reach_m - ws.stance_margin_m:
+                    if z is not None and self.shoulder_dist(f, l, z, one) > ws.arm_reach_m - ws.stance_margin_m:
                         continue
                     sx = obj_xy[0] - (c * f - s * l)
                     sy = obj_xy[1] - (s * f + c * l)
@@ -298,8 +315,9 @@ class ReachabilityModel:
         direction around it (every 10 deg), so a deep object can sit diagonally on the reaching arm's side (the
         sphere is centred 0.14 m out on that side: the palm gets ~0.5 m from the pelvis there, ~0.43 m straight
         ahead). A skill with its own stance (GR00T: stand_off_m, lateral_m, yaw_to_object) keeps exactly that
-        offset. Cost: the walk, the turn, a lateral offset, and the distance outside the comfortable band
-        stance_fwd_m (tracking sags where the arm is nearly straight)."""
+        offset; a one-armed skill (GR00T's left-handed checkpoint) keeps the object on that arm's side and is judged
+        with that arm's sphere. Cost: the walk, the turn, a lateral offset, and the distance outside the comfortable
+        band stance_fwd_m (tracking sags where the arm is nearly straight)."""
         if self.ws.stance_search == "band":
             return self._find_stance_band(obj_xy, skill, z)
         p = self.world.robot_pose()
@@ -316,8 +334,11 @@ class ReachabilityModel:
             lat_in = ws.reach_lat_max_m - e
             cands = [(min(max(lo + i * 0.02, lo + e), hi - e), max(-lat_in, min(lat_in, j * 0.05)))
                      for i in range(n_f + 1) for j in range(-n_l, n_l + 1)]
+            cands = [(f, l) for f, l in cands if self.side_ok(l, skill)]
             if z is not None:
-                cands = [(f, l) for f, l in cands if self.shoulder_dist(f, l, z) <= ws.arm_reach_m - ws.stance_margin_m]
+                one = self.only_arm(skill)
+                cands = [(f, l) for f, l in cands
+                         if self.shoulder_dist(f, l, z, one) <= ws.arm_reach_m - ws.stance_margin_m]
         f_lo, f_hi = ws.stance_fwd_m
         yaw_obj = float(st.get("yaw_to_object", 0.0))
         best = None
@@ -453,6 +474,15 @@ class ReachabilityModel:
         skill = self.registry.select("pick", object_type, None) if self.registry is not None else None
         # 7. reach window from exactly here
         fwd, lat = self.in_body_frame(x, y, pose)
+        if not self.side_ok(lat, skill):
+            # a one-armed skill (GR00T's left-handed checkpoint) with the object on its other side: the first skill
+            # with the object's own arm answers when it reaches from exactly here; otherwise the one-armed skill's
+            # stance (its arm's side, find_stance) is the reposition
+            side = "left" if lat > 0 else "right"
+            alt = self.registry.select("pick", object_type, side)
+            if alt is not None and self.in_window(fwd, lat, alt, pose, (x, y)) and \
+                    self.shoulder_dist(fwd, lat, gz, side) <= self.ws.arm_reach_m:
+                skill = alt
         if not self.in_window(fwd, lat, skill, pose, (x, y)):
             stance = self.find_stance((x, y), skill, gz)
             if stance is not None:
@@ -467,9 +497,9 @@ class ReachabilityModel:
             sug = self.suggest_keypoint((x, y), z, o.where)
             return res(reason="too_far", visible=is_vis, oid=oid, suggest_location=sug if sug != at else None,
                        **common)
-        if self.shoulder_dist(fwd, lat, gz) > self.ws.arm_reach_m:
-            # in the window but beyond the arm from here: a nearby stance may fix it (a reposition), else no pose
-            # near here can reach it
+        if self.shoulder_dist(fwd, lat, gz, self.only_arm(skill)) > self.ws.arm_reach_m:
+            # in the window but beyond the arm from here (a one-armed skill: that arm's sphere): a nearby stance may
+            # fix it (a reposition), else no pose near here can reach it
             stance = self.find_stance((x, y), skill, gz)
             if stance is not None:
                 return res(reason="needs_reposition", visible=is_vis, oid=oid, suggest_location="reach_stance",
