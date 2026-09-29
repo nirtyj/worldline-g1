@@ -8,10 +8,11 @@ Tests (pass criteria in brackets; GT = gt.pose, independent of what the body rep
   goals        go_to through Nav2 to >= 3 goals in >= 2 rooms  [body succeeded, backend nav2, GT pos err <= 0.30 m,
                GT yaw err <= 15 deg when a yaw is given, no fall]
   unreachable  a free goal the robot cannot reach (a free pocket not connected at the robot radius) -> failed no_path
-               synchronously [reply within 5 s, no motion]; plus a goal inside furniture -> goal_in_obstacle
+               synchronously [reply within 5 s, no motion]; plus a goal inside furniture -> goal_in_obstacle or no_path
+               (Smac's goal tolerance > 0 reports NO_VALID_PATH, not GOAL_OCCUPIED)
   cancel       go_to far away, cancel (= body stop) after ~1 m  [go_to canceled, Nav2 goal canceled, no /cmd_vel
                forwarded after the cancel, GT speed < 0.05 m/s within 2.0 s]
-  watchdog     stream op velocity (vx 0.4 for 2 s, then pure wz 0.5 for 1.5 s), then stop sending  [planner goes IDLE
+  watchdog     stream op velocity (pure wz 0.5 for 1.5 s, then vx 0.4 for 2 s), then stop sending  [planner goes IDLE
                within watchdog_s + 60 ms of the last message, op succeeded ended_by=watchdog, robot stops]
 Artifacts: trajectory.png (all runs over the map + Nav2 plans), goal_<k>.png (per goal: map zoom + cmd_vel / planner /
 GT speed traces), watchdog.png, metrics.json, pose.csv, events.jsonl, phases.json (for the CPU split).
