@@ -1,0 +1,1485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worldline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --ground: #0b111b;
+    --panel: #111927;
+    --raised: #172133;
+    --line: #243049;
+    --text: #e2e8f2;
+    --muted: #8e9cb3;
+    --user: #c9a8ff;
+    --runtime: #72adff;
+    --brain: #f5a860;
+    --robot: #8fcfa4;
+    --world: #e6d27a;
+    --persona: #ff9fcf;
+    --memory: #6fd6c8;
+    --s1: #7fd8f0;
+    --bad: #ff7a7a;
+    --warn: #ffb86b;
+    --sans: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--ground); color: var(--text); font: 15px/1.5 var(--sans); }
+  button, select, input { font: inherit; color: inherit; }
+  .app { height: 100%; display: grid; grid-template-rows: auto 1fr; }
+
+  /* Header */
+  header { display: flex; flex-wrap: nowrap; align-items: center; gap: 14px; padding: 5px 12px;
+           border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
+  header > * { flex-shrink: 0; }
+  .brand { font: 700 17px var(--sans); letter-spacing: .01em; }
+  .brand span { color: var(--runtime); }
+  .clock { font: 600 14px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .clock b { color: var(--text); }
+  .controls { display: flex; flex-wrap: nowrap; gap: 8px; align-items: center; margin-left: auto; min-width: 0; flex-shrink: 1; }
+  .controls select { min-width: 90px; flex: 0 1 auto; }
+  .controls label { font: 600 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  select { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; max-width: 280px; }
+  .btn { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  header .btn { padding: 4px 12px; white-space: nowrap; }
+  .btn:hover { border-color: var(--runtime); }
+  .btn.primary { background: #1b3358; border-color: var(--runtime); color: #d6e7ff; }
+  .btn.stop { background: #4a1c1c; border-color: var(--bad); color: #ffd6d6; font-weight: 700; }
+  :focus-visible { outline: 2px solid var(--runtime); outline-offset: 2px; }
+
+  /* Main grid: two workspaces, the chat column in both.
+     World: chat | head camera over the overhead | the robot's map.
+     Brain: chat | live feed and model calls | now, state, memory, procedures. */
+  main { min-height: 0; display: grid; gap: 1px; background: var(--line); }
+  main[data-ws="world"] { grid-template-columns: minmax(280px, 330px) minmax(420px, min(48vw, calc((100vh - 56px) * .78))) minmax(320px, 1fr);
+                          grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  main[data-ws="brain"] { grid-template-columns: minmax(280px, 330px) minmax(0, 1.2fr) minmax(400px, .8fr);
+                          grid-template-rows: minmax(0, 1fr); }
+  .pane { background: var(--ground); min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+  .pane > h2 { margin: 0; padding: 8px 14px 6px; font: 600 11px var(--mono); letter-spacing: .1em;
+               text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .scroll { overflow-y: auto; min-height: 0; flex: 1; }
+  main > .chatpane { grid-column: 1; grid-row: 1 / -1; }
+  main > .campane { grid-column: 2; grid-row: 1; }
+  main > .toppane { grid-column: 2; grid-row: 2; }
+  main > .mappane { grid-column: 3; grid-row: 1 / -1; }
+  main > .feed-pane { grid-column: 2; grid-row: 1; }
+  main > .side { grid-column: 3; grid-row: 1; }
+  main[data-ws="world"] > [data-ws]:not([data-ws~="world"]),
+  main[data-ws="brain"] > [data-ws]:not([data-ws~="brain"]) { display: none; }
+  @media (max-width: 1100px) {
+    main[data-ws] { grid-template-columns: 1fr; grid-template-rows: auto; }
+    .pane { min-height: 360px; }
+    main > .pane { grid-column: auto; grid-row: auto; }
+  }
+
+  /* Banner */
+  .banner { margin: 10px 14px 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--bad);
+            background: #2a1414; color: #ffd6d6; font-size: 14px; white-space: pre-wrap; }
+  .banner code { font-family: var(--mono); background: #00000055; padding: 1px 5px; border-radius: 4px; }
+
+  /* Chat */
+  .world-card { margin: 0 14px 8px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px; display: grid; gap: 6px; }
+  .world-card .t { font-weight: 700; }
+  .world-card .d { color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-size: 12.5px; border: 1px solid #4a3d66; color: var(--user); background: #1c1629; border-radius: 999px; padding: 3px 10px; cursor: pointer; text-align: left; }
+  .chip:hover { border-color: var(--user); }
+  .fault { font: 600 11px var(--mono); color: var(--warn); }
+  .chat { padding: 4px 14px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 88%; padding: 8px 11px; border-radius: 10px; display: grid; gap: 4px; }
+  .msg .meta { font: 11px var(--mono); color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .msg.user { align-self: flex-end; background: #231a36; border: 1px solid #4a3d66; }
+  .msg.robot { align-self: flex-start; background: #122219; border: 1px solid #2c4a37; }
+  .msg.robot.cut { border-style: dashed; opacity: .75; }
+  .msg.robot.cut .body::after { content: " [cut off]"; color: var(--bad); font: 11px var(--mono); }
+  .kind { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 4px; background: #3a2a14; color: var(--brain); text-transform: uppercase; letter-spacing: .05em; }
+  .kind.correction, .kind.stop { background: #4a1c1c; color: var(--bad); }
+  .progress { align-self: flex-start; max-width: 92%; display: flex; gap: 7px; align-items: baseline; font: 12.5px/1.4 var(--sans);
+              color: #9fb0c8; padding: 1px 4px 1px 2px; }
+  .progress .pi { font: 600 11px var(--mono); color: var(--runtime); width: 12px; text-align: center; flex: none; }
+  .progress.p-found .pi, .progress.p-done .pi { color: var(--robot); }
+  .progress.p-found, .progress.p-done { color: #cfe8d6; }
+  .progress.p-problem .pi, .progress.p-stop .pi { color: var(--warn); }
+  .progress.p-memory .pi { color: var(--memory); }
+  .progress.p-own .pi { color: var(--persona); }
+  .chat.hide-progress .progress { display: none; }
+  .thinking { align-self: flex-start; font: 12px var(--mono); color: var(--brain); display: flex; gap: 6px; align-items: center; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1s infinite ease-in-out; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  form.say { display: grid; gap: 10px; padding: 10px 14px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+  form.say #msg { flex: 1; min-width: 0; background: var(--ground); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; }
+  form.say .btn { padding: 7px 12px; }
+  /* persona and step mode, on one line */
+  .knobs { display: flex; flex-wrap: nowrap; align-items: center; gap: 14px; min-height: 28px; }
+  .knob { display: inline-flex; align-items: center; gap: 7px; flex: none; }
+  .knob-l { font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); cursor: help; white-space: nowrap; }
+  .knob select { padding: 3px 4px; font-size: 13px; }
+  .knob select.on { border-color: var(--persona); color: var(--persona); }
+  .switch { position: relative; width: 32px; height: 18px; flex: none; }
+  .switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+  .switch i { position: absolute; inset: 0; background: var(--ground); border: 1px solid var(--line); border-radius: 999px; transition: background .2s, border-color .2s; }
+  .switch i::after { content: ""; position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted); transition: transform .2s, background .2s; }
+  .switch input:checked + i { background: #3a2a14; border-color: var(--warn); }
+  .switch input:checked + i::after { transform: translateX(14px); background: var(--warn); }
+  .switch input:focus-visible + i { outline: 2px solid var(--runtime); outline-offset: 2px; }
+
+  /* Map */
+  .mapwrap { flex: 1; min-height: 0; padding: 0 10px 6px; display: flex; }
+  .mapwrap svg { width: 100%; height: 100%; }
+  .toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; color: var(--text); }
+  #robot-g, #robot-label-g { transition: transform .2s linear; }
+  .presence-label { font: 700 12px var(--sans); }
+  .room-label { font: 700 13px var(--sans); letter-spacing: .12em; fill: #0b111b; stroke: #ffffffd9; stroke-width: 4px; paint-order: stroke; opacity: .85; }
+  .presence-sub { font: 400 10px var(--sans); }
+  @media (prefers-reduced-motion: reduce) { #robot-g, #robot-label-g { transition: none; } .dot { animation: none; } }
+
+  /* State */
+  .state { padding: 0 14px 14px; display: grid; gap: 14px; align-content: start; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill { font: 600 12px var(--mono); padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); display: inline-flex; gap: 6px; align-items: center; }
+  .pill.v { border-color: var(--runtime); color: var(--runtime); }
+  .pill.paused { border-color: var(--bad); color: var(--bad); }
+  .pill.think { border-color: var(--brain); color: var(--brain); }
+  .pill.rec { border-color: var(--warn); color: var(--warn); }
+  .block { display: grid; gap: 6px; }
+  .block h3 { margin: 0; font: 600 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  td { padding: 5px 6px; border-bottom: 1px solid #1a2438; vertical-align: top; }
+  td.id { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  td .sub { display: block; font: 11px var(--mono); color: var(--muted); }
+  tr.diff td { background: #2a1616; }
+  tr.unk td { background: #2a2012; }
+  .ok { color: var(--robot); } .bad { color: var(--bad); } .warn { color: var(--warn); } .muted { color: var(--muted); }
+  .list { display: grid; gap: 4px; font: 12.5px var(--mono); }
+  .list div { padding: 4px 8px; background: var(--panel); border-radius: 5px; border-left: 3px solid var(--line); }
+  .list .run { border-left-color: var(--runtime); }
+  .list .cxl { border-left-color: var(--bad); }
+  .list .late { border-left-color: var(--warn); }
+  .list .stale { border-left-color: var(--bad); color: var(--bad); }
+  .empty { color: var(--muted); font-size: 13px; }
+
+  /* Feed */
+  .filters { display: flex; gap: 12px; margin-left: 12px; text-transform: none; letter-spacing: 0; font: 12px var(--sans); }
+  .filters label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+  .feed { font: 12.5px/1.55 var(--mono); padding: 0 14px 10px; }
+  .row { display: grid; grid-template-columns: 58px 74px 1fr; gap: 8px; padding: 1px 0; }
+  .row .t { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .row .s { font-weight: 600; }
+  .src-user .s { color: var(--user); }
+  .src-runtime .s { color: var(--runtime); }
+  .src-brain .s { color: var(--brain); }
+  .src-robot .s { color: var(--robot); }
+  .src-world .s { color: var(--world); }
+  .src-persona .s, .persona-t { color: var(--persona); }
+  .src-s1 .s { color: var(--s1); }
+  .row.hot .m { color: var(--bad); }
+  .row.amber .m { color: var(--warn); }
+  .row.key { background: #16233a; }
+  .feed.hide-user .src-user, .feed.hide-runtime .src-runtime, .feed.hide-brain .src-brain,
+  .feed.hide-robot .src-robot, .feed.hide-world .src-world, .feed.hide-persona .src-persona,
+  .feed.hide-s1 .src-s1 { display: none; }
+  .mini { background: var(--raised); border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px;
+          font: 600 11px var(--mono); letter-spacing: .04em; text-transform: none; color: var(--muted); cursor: pointer; }
+  .mini:hover { color: var(--text); border-color: var(--runtime); }
+  .pane > h2 .right { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+  .maptools { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; text-transform: none; letter-spacing: 0; }
+  .maptools label { font: 12px var(--sans); color: var(--text); display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+  #map { cursor: grab; touch-action: none; }
+  #map.dragging { cursor: grabbing; }
+
+  /* feed pane and tabs */
+  .feed-pane { position: relative; }
+  .tabs { display: inline-flex; gap: 4px; }
+  .tab { background: none; border: 1px solid transparent; border-radius: 6px; padding: 3px 10px; cursor: pointer;
+         font: 600 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .tab[aria-selected="true"] { color: var(--text); border-color: var(--line); background: var(--raised); }
+  .row.link { cursor: pointer; }
+  .row.link .m { text-decoration: underline dotted #6a5a44; text-underline-offset: 3px; }
+  .row.link:hover { background: #1f1a12; }
+
+  /* model calls list */
+  .calls { font: 12.5px/1.5 var(--mono); padding: 0 14px 10px; display: grid; gap: 3px; }
+  .callrow { display: grid; grid-template-columns: 40px 58px 170px minmax(0, 1fr) auto; gap: 10px; padding: 5px 8px; border-radius: 6px;
+             background: var(--panel); border-left: 3px solid var(--brain); cursor: pointer; text-align: left; width: 100%;
+             border-top: 0; border-right: 0; border-bottom: 0; }
+  .callrow:hover { background: var(--raised); }
+  .callrow.rule { border-left-color: var(--muted); }
+  .callrow.error { border-left-color: var(--bad); }
+  .callrow.pending { border-left-color: var(--warn); }
+  .callrow .n { color: var(--muted); }
+  .callrow .p { color: var(--brain); }
+  .callrow .r { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .callrow .x { color: var(--muted); white-space: nowrap; }
+  .badge { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
+  .badge.stale { background: #4a1c1c; color: var(--bad); }
+  .badge.rule { background: #222b3d; color: var(--muted); }
+  .callsnote { color: var(--muted); font: 12px var(--sans); padding: 0 14px 6px; }
+  .callsnote code { font-family: var(--mono); color: var(--text); }
+
+  /* a model call, opened over the feed pane */
+  .drawer { position: absolute; inset: 0; z-index: 4; background: var(--ground); display: flex; flex-direction: column; }
+  .drawer header { background: var(--panel); }
+  .drawer h3 { margin: 0; font: 700 17px var(--sans); }
+  .dbody { overflow-y: auto; padding: 16px 20px 40px; display: grid; gap: 18px; align-content: start; }
+  .facts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sec { display: grid; gap: 6px; }
+  .sec h4 { margin: 0; font: 600 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .sec p { margin: 0; color: var(--muted); font-size: 13.5px; max-width: 80ch; }
+  .sec pre { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px;
+             font: 12.5px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--text); }
+  .sec pre .hd { color: var(--runtime); font-weight: 600; }
+  .sec pre .flag { color: var(--warn); }
+  .answer { font: 600 16px var(--mono); color: var(--brain); background: #22190f; border: 1px solid #5a4020; border-radius: 8px; padding: 12px 14px; white-space: pre-wrap; word-break: break-word; }
+  details > summary { cursor: pointer; color: var(--text); font: 600 12px var(--mono); }
+  .explain { background: #16233a; border: 1px solid #27406a; border-radius: 8px; padding: 10px 12px; font-size: 13.5px; color: #cfe0ff; }
+
+  /* World: head camera, overhead, each filling its pane; labels and tools float on top */
+  .viewbox { position: relative; flex: 1; min-height: 0; margin: 4px; background: #05080d; border-radius: 8px; overflow: hidden; }
+  .viewbox img, .viewbox svg { width: 100%; height: 100%; display: block; object-fit: contain; }
+  .viewbox #cam { object-fit: cover; }            /* fill the pane: a little off the top and bottom rather than bars */
+  .viewlabel { position: absolute; left: 8px; top: 6px; z-index: 3; font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
+               color: #d6e2f5; background: #0b111bcc; padding: 2px 7px; border-radius: 4px; pointer-events: none; }
+  .viewlabel .muted { text-transform: none; letter-spacing: 0; }
+  .vtools { position: absolute; right: 8px; bottom: 6px; z-index: 3; display: flex; gap: 4px; align-items: center; background: #0b111bcc;
+            padding: 3px 6px; border-radius: 6px; font: 12px var(--sans); }
+  .vtools label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; color: var(--text); margin-left: 4px; }
+  .loading { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5; background: #05080dd9; color: var(--muted); font: 600 14px var(--mono); }
+  .holding { position: absolute; left: 8px; top: 30px; z-index: 3; font: 600 12px var(--mono); color: #0b111b; background: var(--robot); padding: 3px 8px; border-radius: 4px; }
+  /* what the robot is doing, over the camera: fades in, fades out */
+  .hud { position: absolute; right: 8px; top: 6px; z-index: 3; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 70%; pointer-events: none; }
+  .hudchip { font: 600 12px var(--mono); padding: 3px 9px; border-radius: 6px; background: #0b111be0; border: 1px solid var(--c, var(--line));
+             color: var(--c, var(--text)); display: inline-flex; gap: 6px; align-items: center; animation: hudin .25s ease-out;
+             transition: opacity .4s, transform .4s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .hudchip b { color: var(--text); font-weight: 600; }
+  .hudchip.out { opacity: 0; transform: translateX(10px); }
+  @keyframes hudin { from { opacity: 0; transform: translateX(10px); } }
+  .subtitle { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 3; width: max-content; max-width: 88%; text-align: center;
+              font: 600 13px/1.35 var(--sans); color: #f2fff6; background: #0b1a12e0; border: 1px solid #2c4a37; padding: 4px 10px; border-radius: 7px;
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; transition: opacity .4s; pointer-events: none; }
+  .subtitle.off { opacity: 0; }
+  @media (prefers-reduced-motion: reduce) { .hudchip { animation: none; transition: none; } }
+
+  .sayrow { display: flex; gap: 6px; width: 100%; align-items: center; }
+  .opt { font: 12px var(--sans); color: var(--muted); display: inline-flex; gap: 5px; align-items: center; margin-left: auto; }
+
+  /* header: workspace tabs */
+  .wstabs { display: inline-flex; gap: 2px; background: var(--ground); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+  .wstabs button { background: none; border: 0; border-radius: 6px; padding: 4px 12px; cursor: pointer; font: 700 13px var(--sans); color: var(--muted); }
+  .wstabs button[aria-selected="true"] { background: var(--raised); color: var(--text); }
+  .wstabs kbd { font: 10px var(--mono); color: var(--muted); margin-left: 5px; }
+  .btn.ghost { background: none; }
+
+  /* How it works: a full-screen picture of the system */
+  .howto { position: fixed; inset: 0; z-index: 30; background: var(--ground); display: flex; flex-direction: column; }
+  .howto > header { background: var(--panel); }
+  .howto h3 { margin: 0; font: 700 17px var(--sans); }
+  .howto .sub { color: var(--muted); font-size: 13px; }
+  .diagram { flex: 1; min-height: 0; padding: 10px 16px 14px; display: flex; }
+  .diagram svg { width: 100%; height: 100%; }
+  .d-group { fill: color-mix(in srgb, var(--c) 5%, transparent); stroke: color-mix(in srgb, var(--c) 45%, transparent); stroke-width: 1.5; stroke-dasharray: 6 5; }
+  .d-glabel { font: 600 12px var(--mono); letter-spacing: .12em; fill: var(--c); }
+  .d-box { fill: color-mix(in srgb, var(--c) 9%, var(--panel)); stroke: var(--c); stroke-width: 1.6; }
+  .d-title { font: 700 17px var(--sans); fill: var(--c); }
+  .d-tag { font: 600 11.5px var(--mono); fill: var(--muted); }
+  .d-sub { font: 13px var(--sans); fill: var(--text); opacity: .9; }
+  .d-line { font: 13px var(--sans); fill: var(--muted); }
+  .d-line tspan.k { fill: var(--text); font-weight: 700; }
+  .d-edge { fill: none; stroke: #6a7894; stroke-width: 1.8; }
+  .d-elabel { font: 12px var(--mono); fill: #aab6cc; paint-order: stroke; stroke: var(--ground); stroke-width: 5px; }
+  .stepwait { border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px; background: #1f170b; }
+  pre.preview { max-height: 48vh; overflow: auto; margin: 6px 0 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+                padding: 8px 10px; font: 11.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
+  form.say .btn.stepbtn { padding: 2px 10px; font-size: 13px; white-space: nowrap; }
+  .btn.stepbtn:not(:disabled) { border-color: var(--warn); color: var(--warn); font-weight: 700; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* Memory: belief floor plan */
+  .colbox { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .sw { display: inline-block; width: 14px; height: 11px; border-radius: 6px; vertical-align: -1px; margin-right: 3px; border: 1.5px solid; }
+  .sw.seen { background: #1d3a28; border-color: var(--robot); }
+  .sw.mem { background: #16243a; border-color: var(--runtime); border-style: dashed; }
+  .sw.skill { background: #33260f; border-color: var(--warn); }
+  .sw.gone { background: #3a1818; border-color: var(--bad); border-style: dashed; }
+  .sw.fogsw { background: repeating-linear-gradient(45deg, #0d1420 0 3px, #2a3650 3px 5px); border-color: #3a4a68; border-radius: 3px; }
+  .planwrap { position: relative; flex: 1; min-height: 0; margin: 4px; display: flex; border-radius: 8px; overflow: hidden; }
+  .planwrap svg { width: 100%; height: 100%; background: #070b12; cursor: grab; touch-action: none; }
+  /* the belief map's key, bottom left, and its layers menu, bottom right, over the map */
+  .maplegend { position: absolute; left: 8px; bottom: 6px; z-index: 3; display: flex; flex-wrap: wrap; gap: 3px 10px; align-items: center;
+               max-width: calc(100% - 250px); padding: 4px 9px; border-radius: 6px; background: #0b111bcc; font: 11.5px var(--sans); color: #b3bfd3; }
+  .maplegend span { display: inline-flex; align-items: center; white-space: nowrap; }
+  .maplegend .bad { font-weight: 700; }
+  .layerpop { position: absolute; right: 8px; bottom: 40px; z-index: 4; display: grid; gap: 5px; min-width: 210px; padding: 9px 12px;
+              background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px #000a; font: 13px var(--sans); }
+  .layerpop h4 { margin: 0 0 2px; font: 600 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .layerpop label { display: flex; gap: 7px; align-items: center; cursor: pointer; }
+  .layerpop .muted { font-size: 11.5px; }
+  .mini[aria-expanded="true"] { color: var(--text); border-color: var(--runtime); }
+  .p-room { fill: none; stroke: #4a5a78; stroke-width: 1.5; stroke-dasharray: 6 4; }
+  #plan-grid rect { fill: #111b2b; }
+  #plan-explored rect { fill: #173847; }
+  #plan-trail { fill: none; stroke: var(--runtime); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; opacity: .85; }
+  #plan-route { fill: none; stroke: var(--warn); stroke-width: 2; stroke-dasharray: 5 4; }
+  .p-found line { stroke: var(--world); stroke-width: 1; stroke-dasharray: 2 3; }
+  .p-found path { fill: var(--world); stroke: #070b12; stroke-width: 1; }
+  .sw.exsw { background: #173847; border-color: #2a5566; border-radius: 3px; }
+  .p-roomlabel { font: 700 12px var(--sans); letter-spacing: .14em; fill: #6a7ea6; paint-order: stroke; stroke: #070b12; stroke-width: 3px; opacity: .8; }
+  .p-spot rect { fill: #1b2a40; stroke: var(--robot); stroke-width: 1.5; }
+  .p-spot text { font: 600 8.5px var(--mono); fill: #a8b8cf; paint-order: stroke; stroke: #070b12; stroke-width: 2.5px; }
+  .p-spot.fog rect { fill: url(#fog); stroke: #4a5a78; stroke-dasharray: 3 2; }
+  .p-spot.fog text { fill: #5f6d86; }
+  .p-spot.user rect { stroke: var(--user); stroke-width: 2.5; }
+  .p-landmark rect { fill: var(--world); }
+  .p-landmark text { font: 8.5px var(--mono); fill: var(--world); paint-order: stroke; stroke: #070b12; stroke-width: 2.5px; }
+  .p-chip rect { stroke-width: 1.3; }
+  .p-chip text { font: 600 8px var(--mono); fill: var(--text); }
+  .p-chip.seen rect { fill: #1d3a28; stroke: var(--robot); }
+  .p-chip.mem rect { fill: #16243a; stroke: var(--runtime); stroke-dasharray: 3 2; }
+  .p-chip.skill rect { fill: #33260f; stroke: var(--warn); }
+  .p-chip.gone rect { fill: #3a1818; stroke: var(--bad); stroke-dasharray: 3 2; }
+  .p-chip.ghost rect { fill: #070b12; stroke: #8e9cb3; stroke-dasharray: 2 2; } .p-chip.ghost text { fill: #8e9cb3; }
+  .p-chip.fresh rect { stroke-width: 2.6; filter: drop-shadow(0 0 5px #ffffffaa); }
+  .p-diff { stroke: #8e9cb3; stroke-dasharray: 2 3; }
+  .p-lead { stroke: #4a5a78; stroke-width: 1; }
+  .p-more { font: 8px var(--mono); fill: var(--muted); }
+  .p-robot circle { fill: #0d1d35; stroke: var(--runtime); stroke-width: 2.5; }
+  .p-robot path { fill: none; stroke: var(--runtime); stroke-width: 2.5; stroke-linecap: round; }
+  .p-human circle { fill: #120d1d; stroke: var(--user); stroke-width: 2.5; }
+  .p-human text { font: 700 7.5px var(--sans); fill: var(--user); }
+
+  /* Memory: inspector and procedure graph */
+  .subtabs { display: flex; gap: 4px; padding: 0 14px 8px; flex-wrap: wrap; position: sticky; top: 0; background: var(--ground); z-index: 1; }
+  .cnt { color: var(--muted); font-weight: 400; }
+  .hint { margin: 0; color: var(--muted); font-size: 12.5px; }
+  .hint code, .empty code { font-family: var(--mono); color: var(--text); }
+  .spot { margin: 2px 0 6px; padding-left: 8px; border-left: 2px solid var(--line); display: grid; gap: 3px; }
+  .spotname { font: 600 12px var(--mono); color: var(--robot); }
+  .mrow { font-size: 12.5px; padding: 4px 7px; border-radius: 5px; background: var(--panel); }
+  .mrow b { font-family: var(--mono); font-weight: 600; }
+  .trail { font: 11.5px var(--mono); margin-top: 2px; }
+  .tag { font: 600 10px var(--mono); padding: 0 5px; border-radius: 4px; background: #222b3d; color: var(--muted); }
+  .tag.st-seen, .tag.st-kept { background: #173022; color: var(--robot); }
+  .tag.st-missed, .tag.st-trial, .tag.st-candidate { background: #3a2a14; color: var(--warn); }
+  .tag.st-moved, .tag.st-rejected { background: #4a1c1c; color: var(--bad); }
+  .tag.st-held { background: #16243a; color: var(--runtime); }
+  .flash { animation: flash 3.5s ease-out; }
+  @keyframes flash { 0%, 35% { background: #1f3d2a; box-shadow: 0 0 0 1px var(--robot); } }
+  pre.ans { margin: 4px 0 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+            font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
+  .graphwrap { flex: 1; min-height: 0; overflow: auto; padding: 0 10px; }
+  .graphwrap svg { width: 100%; height: auto; }
+  .g-edge { fill: none; opacity: .35; }
+  .g-edge.hot { opacity: 1; filter: drop-shadow(0 0 4px #ffffffaa); }
+  .g-node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+  .g-node.done rect { stroke: var(--runtime); }
+  .g-node.cur rect { stroke: var(--brain); stroke-width: 3; animation: pulse 1.2s infinite ease-in-out; }
+  .g-node .gn { font: 600 12px var(--mono); fill: var(--text); }
+  .g-node .gc { font: 10.5px var(--sans); fill: var(--muted); }
+  .guide { padding: 10px 14px 12px; font-size: 13px; border-top: 1px solid var(--line); max-height: 30%; overflow: auto; }
+
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--raised); border: 1px solid var(--bad); padding: 8px 14px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">World<span>line</span></div>
+    <div class="clock">sim <b id="simt">0.0</b> s</div>
+    <nav class="wstabs" role="tablist" aria-label="Workspace">
+      <button type="button" role="tab" data-go="world" aria-selected="true" title="The camera, the house from above, and the robot's internal belief map (key 1)">World<kbd>1</kbd></button>
+      <button type="button" role="tab" data-go="brain" aria-selected="false" title="The live feed, every model call, state and memory (key 2)">Brain<kbd>2</kbd></button>
+    </nav>
+    <button class="btn ghost" id="btn-how" type="button" title="A picture of the whole system (H)">How it works</button>
+    <div class="controls">
+      <label for="sel-scene">Room</label><select id="sel-scene"></select>
+      <label for="sel-model">Model</label><select id="sel-model"></select>
+      <button class="btn primary" id="btn-reset" type="button">Start new session</button>
+      <button class="btn" id="btn-forget" type="button" title="Start a new session in this room with spatial memory wiped: no remembered objects, landmarks, looks or notes">Forget room</button>
+    </div>
+  </header>
+
+  <main id="main" data-ws="world">
+    <section class="pane chatpane">
+      <h2>Chat <span class="right"><label class="opt" style="margin:0;text-transform:none;letter-spacing:0" title="Show the runtime's progress lines (heading to…, passing…, found…) between messages"><input type="checkbox" id="chk-progress" checked> progress</label>
+        <button class="mini" type="button" id="btn-clear-chat" title="Clears this view only; the robot keeps its memory">Clear</button></span></h2>
+      <div class="scroll" id="chat-scroll">
+        <div id="banner-slot"></div>
+        <div class="world-card" id="world-card"></div>
+        <div class="chat" id="chat"></div>
+      </div>
+      <form class="say" id="say-form" autocomplete="off">
+        <div class="sayrow">
+          <input id="msg" placeholder="Type to the robot…" aria-label="Message to the robot">
+          <button class="btn primary" type="submit">Send</button>
+          <button class="btn stop" type="button" id="btn-stop" title="Sends the word “stop”, which takes the runtime's no-model path">Stop</button>
+        </div>
+        <div class="knobs">
+          <label class="knob" title="How much the robot does on its own when nobody needs anything. Off: nothing. Quiet: only remembers what you tell it. Medium: also looks around from where it stands. Optimize: asks once, then explores the room and comes back to you.">
+            <span class="knob-l">Persona</span>
+            <select id="sel-persona">
+              <option value="off" selected>off</option>
+              <option value="quiet">quiet</option>
+              <option value="medium">medium</option>
+              <option value="optimize">optimize</option>
+            </select></label>
+          <span class="knob" title="The runtime waits before every planner call until you press Step. The robot finishes what it is doing meanwhile, and Stop still works.">
+            <span class="knob-l">Step</span>
+            <label class="switch"><input type="checkbox" id="chk-step" aria-label="Step mode"><i></i></label>
+            <button class="btn stepbtn" type="button" id="btn-step" disabled hidden>Step ▶</button>
+          </span>
+        </div>
+      </form>
+    </section>
+
+    <section class="pane campane" data-ws="world">
+      <div class="viewbox" id="cam-box">
+        <img id="cam" alt="The robot's head camera">
+        <span class="viewlabel">Head camera</span>
+        <span class="holding" id="holding" hidden></span>
+        <div class="hud" id="hud" aria-live="polite"></div>
+        <div class="subtitle off" id="subtitle"></div>
+        <div class="loading" id="loading" hidden>Loading the room…</div>
+      </div>
+    </section>
+
+    <section class="pane toppane" data-ws="world">
+      <div class="viewbox" id="top-box">
+        <svg id="map" viewBox="0 0 640 480" role="img" aria-label="The house from above: the robot, where you are, and rings where the runtime believes objects are"></svg>
+        <span class="viewlabel">Overhead <span class="muted">· reality</span></span>
+        <span class="vtools">
+          <button class="mini" type="button" id="z-in" title="Zoom in (or scroll)">+</button>
+          <button class="mini" type="button" id="z-out" title="Zoom out">−</button>
+          <button class="mini" type="button" id="z-fit" title="Show the whole house">Fit</button>
+          <label title="Keep the robot in the middle"><input type="checkbox" id="chk-follow"> follow</label>
+          <label title="Dashed rings where the runtime believes an object is. Red: it isn't there."><input type="checkbox" id="chk-belief" checked> belief rings</label>
+        </span>
+      </div>
+    </section>
+
+    <section class="pane mappane" data-ws="world">
+      <div class="colbox" id="plan-box"></div>
+    </section>
+
+    <section class="pane feed-pane" data-ws="brain">
+      <h2>
+        <span class="tabs" role="tablist">
+          <button class="tab" role="tab" aria-selected="true" id="tab-feed" type="button">Live feed</button>
+          <button class="tab" role="tab" aria-selected="false" id="tab-calls" type="button">Model calls <span id="calls-count">0</span></button>
+        </span>
+        <span class="filters" id="filters">
+          <label><input type="checkbox" data-src="user" checked> <span style="color:var(--user)">User</span></label>
+          <label><input type="checkbox" data-src="s1" checked> <span style="color:var(--s1)">System 1</span></label>
+          <label><input type="checkbox" data-src="brain" checked> <span style="color:var(--brain)">Brain</span></label>
+          <label><input type="checkbox" data-src="runtime" checked> <span style="color:var(--runtime)">Runtime</span></label>
+          <label><input type="checkbox" data-src="robot" checked> <span style="color:var(--robot)">Robot</span></label>
+          <label><input type="checkbox" data-src="world" checked> <span style="color:var(--world)">World</span></label>
+          <label><input type="checkbox" data-src="persona" checked> <span style="color:var(--persona)">Persona</span></label>
+        </span>
+        <span class="right"><button class="mini" type="button" id="btn-clear-bottom" title="Clears this view only">Clear</button></span>
+      </h2>
+      <div class="scroll" id="feed-scroll"><div class="feed" id="feed"></div></div>
+      <div class="scroll" id="calls-scroll" hidden>
+        <div class="callsnote" id="calls-note"></div>
+        <div class="calls" id="calls"></div>
+      </div>
+      <aside class="drawer" id="drawer" hidden aria-label="Model call details">
+        <header><button class="btn" type="button" id="d-close" title="Back to the list (Esc)">← Back</button><h3 id="d-title">Model call</h3>
+          <div class="controls"><button class="btn" type="button" id="d-copy">Copy as text</button></div>
+        </header>
+        <div class="dbody" id="d-body"></div>
+      </aside>
+    </section>
+
+    <section class="pane side" data-ws="brain">
+      <h2><span class="tabs" role="tablist" id="rtabs">
+        <button class="tab" role="tab" type="button" data-rtab="now" aria-selected="true" title="What System 1, the planner and the robot are doing right now">Now</button>
+        <button class="tab" role="tab" type="button" data-rtab="state" aria-selected="false" title="Truth vs belief: hands, objects, what's running, speech, recent actions">State</button>
+        <button class="tab" role="tab" type="button" data-rtab="memory" aria-selected="false" title="What it stored: places, noticed things, notes, recalls, sessions, rules">Memory</button>
+        <button class="tab" role="tab" type="button" data-rtab="proc" aria-selected="false" title="Which step usually follows which, learned from past tasks">Procedures</button>
+      </span></h2>
+      <div class="scroll" data-rpane="now" id="now"><div class="state"><div id="now-step"></div><div id="now-main" class="state" style="padding:0"></div></div></div>
+      <div class="scroll" data-rpane="state" hidden><div class="state" id="state"></div></div>
+      <div class="scroll" data-rpane="memory" id="mem-box" hidden></div>
+      <div class="colbox" data-rpane="proc" hidden><div class="graphwrap" id="proc-graph"></div><div class="guide" id="proc-guide"></div></div>
+    </section>
+  </main>
+</div>
+
+<div class="howto" id="howto" hidden role="dialog" aria-label="How it works">
+  <header><h3>How Worldline works</h3><span class="sub">what runs where, and what each part talks to</span>
+    <div class="controls"><button class="btn" type="button" id="how-close" title="Close (Esc)">Close</button></div>
+  </header>
+  <div class="diagram" id="diagram"></div>
+</div>
+
+<script src="/views/diagram.js"></script>
+<script src="/views/plan.js"></script>
+<script src="/views/memory.js"></script>
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const args = (a) => Object.entries(a || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+  const nice = (s) => String(s ?? "").replace(/_/g, " ");
+
+  const S = { meta: null, map: null, config: null, lastEv: -1, lastTr: -1, state: null,
+              chatByUid: {}, lastRobotMsg: {}, showBelief: true, ws: null,
+              calls: {}, traceAll: [], callsCleared: 0, callsLog: null, follow: false, tab: "feed", openCall: null,
+              layout: null, space: "world", rtab: "now", hud: { label: null, noticed: null } };
+  const FULL = { x: 0, y: 0, w: 640, h: 480 };
+  const wsSend = (o) => { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(o)); };
+  const setHTML = (el, html) => { if (el && el.__h !== html) { el.innerHTML = html; el.__h = html; } };
+  // the views in ui/views/: they get the page's helpers, and the state through ingest()
+  const api = { esc, args, nice, uv: (x, z) => uv(x, z), send: wsSend, rerender: () => renderSpace() };
+  const V = { diagram: window.RobotViews.diagram(api), plan: window.RobotViews.plan(api), memory: window.RobotViews.memory(api) };
+  let VB = { ...FULL };
+
+  // ------------------------------------------------------------------ views: head camera + overhead
+  // Overhead pixels from room coordinates (metres): an orthographic camera looking down.
+  function uv(x, z) {
+    const t = S.layout.topdown, k = t.h / (2 * t.size);
+    return [t.w / 2 + (x - t.cx) * k, t.h / 2 - (z - t.cz) * k];
+  }
+  function drawStatic() {
+    const lay = S.layout, svg = $("map");
+    let h = `<image id="top-img" x="0" y="0" width="640" height="480" preserveAspectRatio="none"/>`;
+    for (const r of Object.values(lay.rooms || {})) {            // a ProcTHOR house: name each room
+      const [u, v] = uv(r.x, r.z);
+      h += `<text x="${u}" y="${v}" text-anchor="middle" class="room-label">${esc(r.label.toUpperCase())}</text>`;
+    }
+    for (const [name, k] of Object.entries(lay.keypoints)) {
+      const [u, v] = uv(k.x, k.z);
+      const respondHere = lay.human && lay.human.keypoint === name;
+      h += `<circle cx="${u}" cy="${v}" r="5" fill="#0b111bcc" stroke="${name === "start" ? "var(--muted)" : "var(--robot)"}" stroke-width="2"><title>${esc(name)}</title></circle>
+            ${respondHere ? "" : `<text x="${u + 7}" y="${v + 4}" fill="#0b111b" stroke="#ffffffcc" stroke-width="3" paint-order="stroke" font-size="10.5" font-weight="700" font-family="var(--mono)">${esc(name)}</text>`}`;
+    }
+    if (lay.human) {
+      const [u, v] = uv(lay.human.x, lay.human.z);
+      h += `<g id="human-g" data-role="human-response-point" transform="translate(${u} ${v})">
+        <g id="human-marker">
+          <line x1="0" y1="-22" x2="0" y2="-29" stroke="var(--user)" stroke-width="2"/>
+          <rect x="-56" y="-58" width="112" height="30" rx="6" fill="#120d1dcc" stroke="var(--user)" stroke-width="1.5"/>
+          <text class="presence-label" x="0" y="-45" text-anchor="middle" fill="#f1e9ff">Human</text>
+          <text class="presence-sub" x="0" y="-34" text-anchor="middle" fill="var(--user)">respond here</text>
+          <circle r="22" fill="#120d1dcc" stroke="var(--user)" stroke-width="3"/>
+          <circle cy="-7" r="5" fill="var(--user)"/>
+          <path d="M-10 12c1-9 5-13 10-13s9 4 10 13" fill="none" stroke="var(--user)" stroke-width="5" stroke-linecap="round"/>
+          <circle r="28" fill="none" stroke="var(--user)" stroke-width="1.5" stroke-dasharray="3 4" opacity=".75"/>
+          <title>Human response point at ${esc(lay.human.keypoint)}</title>
+        </g>
+      </g>`;
+    }
+    h += `<g id="dyn-ghosts"></g>
+          <g id="robot-g" data-role="robot-position">
+            <g id="robot-marker">
+              <circle r="15" fill="#0d1d35e8" stroke="var(--runtime)" stroke-width="3"/>
+              <line id="robot-dir" x1="0" y1="-14" x2="0" y2="-27" stroke="var(--runtime)" stroke-width="3" stroke-linecap="round"/>
+              <path d="M-5 -22L0 -28L5 -22" fill="none" stroke="var(--runtime)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              <rect x="-8" y="-6" width="16" height="13" rx="3" fill="none" stroke="#d6e7ff" stroke-width="2"/>
+              <circle cx="-3" cy="-1" r="1.5" fill="#d6e7ff"/><circle cx="3" cy="-1" r="1.5" fill="#d6e7ff"/>
+              <line x1="-5" y1="4" x2="5" y2="4" stroke="#d6e7ff" stroke-width="1.5" stroke-linecap="round"/>
+              <circle id="robot-halo" r="23" fill="none" stroke="var(--runtime)" stroke-width="1.5" opacity="0"/>
+              <title>Robot position and heading</title>
+            </g>
+          </g>
+          <g id="robot-label-g">
+            <g id="robot-label-marker">
+              <rect x="20" y="-13" width="55" height="26" rx="6" fill="#0d1d35e8" stroke="var(--runtime)" stroke-width="1.5"/>
+              <text class="presence-label" x="47.5" y="4" text-anchor="middle" fill="#d6e7ff">Robot</text>
+            </g>
+          </g>`;
+    svg.innerHTML = h;
+    applyVB();
+  }
+  function drawDynamic() {
+    const st = S.state; if (!st || !S.layout) return;
+    const tr = st.truth, rt = st.runtime;
+    const [u, v] = uv(tr.robot.x, tr.robot.z);
+    $("robot-g").setAttribute("transform", `translate(${u} ${v}) rotate(${tr.robot.yaw})`);
+    $("robot-label-g").setAttribute("transform", `translate(${u} ${v})`);
+    $("robot-halo").setAttribute("opacity", tr.robot.moving ? "0.9" : "0");
+    if (S.follow) { VB.x = u - VB.w / 2; VB.y = v - VB.h / 2; applyVB(); }
+    const held = Object.entries(tr.arms).find(([, a]) => a.holding);
+    const hb = $("holding");
+    hb.hidden = !held;
+    if (held) hb.textContent = `holding ${held[1].holding}`;
+    let ghosts = "";
+    if (S.showBelief && rt && rt.belief && rt.belief.objects) {
+      const perSurface = {};
+      for (const [id, b] of Object.entries(rt.belief.objects)) {
+        const w = b.where, t = tr.objects[id];
+        const surf = S.layout.surfaces[w];
+        if (!surf) continue;
+        let x, z;
+        if (t && t.where === w) { x = t.x; z = t.z; }          // belief agrees: ring on the object
+        else { const i = (perSurface[w] = (perSurface[w] || 0) + 1); x = surf.x + (i - 1) * 0.12; z = surf.z; }
+        const [gu, gv] = uv(x, z);
+        const dash = b.verified ? "4 3" : "2 3";
+        const wrong = !t || t.where !== w;
+        ghosts += `<circle cx="${gu}" cy="${gv}" r="8" fill="none" stroke="${wrong ? "var(--bad)" : "var(--runtime)"}" stroke-width="2" stroke-dasharray="${dash}"><title>belief: ${esc(id)} on ${esc(w)} (${b.verified ? "seen" : esc(b.source)})${wrong ? " — not there" : ""}</title></circle>`;
+      }
+    }
+    $("dyn-ghosts").innerHTML = ghosts;
+  }
+  function setCamera(which, b64) {
+    const url = "data:image/jpeg;base64," + b64;
+    if (which === "head") $("cam").src = url;
+    else { const img = $("top-img"); if (img) img.setAttribute("href", url); }
+  }
+
+  // What the robot is doing, over the head camera: the planner, the steps running, System 1's
+  // latest label and what it noticed (for a few seconds each), and what it is saying.
+  const HUD_S = 6;
+  function hudChips(items) {
+    const box = $("hud"), keep = new Set(items.map((it) => it.k));
+    for (const el of [...box.children]) {
+      if (!keep.has(el.dataset.k) && !el.classList.contains("out")) { el.classList.add("out"); setTimeout(() => el.remove(), 400); }
+    }
+    items.forEach((it, i) => {
+      let el = [...box.children].find((c) => c.dataset.k === it.k && !c.classList.contains("out"));
+      if (!el) { el = document.createElement("div"); el.dataset.k = it.k; box.appendChild(el); }
+      el.className = "hudchip"; el.style.order = i; el.style.setProperty("--c", `var(--${it.c})`);
+      if (el.__h !== it.html) { el.innerHTML = it.html; el.__h = it.html; }
+    });
+  }
+  function renderHud() {
+    const st = S.state, rt = st && st.runtime, items = [];
+    if (rt) {
+      const step = rt.step || {}, t = st.t;
+      if (rt.paused) items.push({ k: "paused", c: "bad", html: "paused by stop" });
+      if (step.waiting) items.push({ k: "step", c: "warn", html: "planner waiting for Step ▶" });
+      else if (rt.thinking) items.push({ k: "think", c: "brain", html: `<span class="dot"></span>planner thinking` });
+      for (const e of (rt.active || []).filter((e) => e.tool !== "say").slice(0, 2)) {
+        const a = e.args || {}, what = a.to || a.object || a.at || a.surface || "";
+        items.push({ k: "act" + e.id, c: e.cancel_requested ? "bad" : "runtime",
+                     html: `${esc(e.tool)}${what ? ` → <b>${esc(nice(what))}</b>` : ""}${e.source === "persona" ? " · own goal" : ""}` });
+      }
+      const lab = S.hud.label;
+      if (lab && t - lab.t < HUD_S) {
+        const d = lab.directive || {}, obj = d.target && d.target.object;
+        const by = d.source === "system1" ? `System 1 · ${esc(lab.kind)} ${Number(d.confidence ?? 0).toFixed(2)}` : `label · ${esc(lab.kind)}`;
+        items.push({ k: "lab" + lab.i, c: lab.kind === "stop" || lab.kind === "correction" ? "bad" : "s1",
+                     html: `${by}${obj ? ` → <b>${esc(nice(obj))}</b>` : ""}` });
+      }
+      const ob = S.hud.noticed;
+      if (ob && t - ob.t < HUD_S) items.push({ k: "obs" + ob.i, c: "memory", html: `noticed <b>${esc(ob.text)}</b>` });
+    }
+    hudChips(items);
+    const sp = rt && rt.speech && rt.speech.current, sub = $("subtitle");
+    if (sp) { if (sub.__t !== sp.text) { sub.textContent = `“${sp.text}”`; sub.__t = sp.text; } sub.classList.remove("off"); }
+    else sub.classList.add("off");
+  }
+
+  // ------------------------------------------------------------------ feed formatting
+  function fmtEvent(e) {
+    const obj = e.object ? ` (${e.object})` : "";
+    switch (e.type) {
+      case "utterance": return ["user", `"${e.text}"`, "key"];
+      case "utterance_started": return null;
+      case "speech_started": return ["robot", `says "${e.text}"`];
+      case "speech_cut": return ["robot", `speech cut off after ${Math.round(100 * (e.played || 0))}%: "${e.text}"`, "hot"];
+      case "speech_overlap": return ["robot", `talks over itself: "${e.text || ""}"`, "hot"];
+      case "goal_accepted":
+        if (e.skill === "say" || e.skill === "chunk") return null;
+        return ["robot", `#${e.goal} ${e.skill}(${args(e.args)}) started`];
+      case "goal_done": {
+        if (e.skill === "say" || e.skill === "chunk") return null;
+        const d = e.data || {};
+        let brief;
+        if (e.skill === "look") {
+          const seen = Object.entries(d.surfaces || {}).map(([s, os]) => `${s}: [${os.map((o) => o.id).join(", ")}]`).join("; ");
+          brief = `at ${d.at} sees ${seen || "nothing"}; hands ${JSON.stringify(d.hands || {})}`;
+        } else {
+          const keys = ["reason", "at", "between", "reachable", "arm", "suggest", "holding", "chunks", "blocked_edge"];
+          brief = keys.filter((k) => k in d).map((k) => `${k}=${JSON.stringify(d[k])}`).join(" ");
+        }
+        const hot = e.status !== "SUCCEEDED";
+        return ["robot", `#${e.goal} ${e.skill} → ${e.status} ${brief}`, hot ? "amber" : ""];
+      }
+      case "goal_rejected": return ["robot", `robot rejected ${e.skill}(${args(e.args)}): ${e.reason}`, "hot"];
+      case "cancel_requested": return ["robot", `#${e.goal} ${e.skill}: cancel requested (it stops at its next safe point)`, "amber"];
+      case "halted": return ["robot", "HALT: hardware stop, motion frozen", "hot"];
+      case "chunk_started": return ["robot", `${e.arm} arm: ${e.phase}${obj}`];
+      case "chunk_aborted": return ["robot", `${e.arm} arm chunk aborted: ${e.reason || ""}`, "amber"];
+      case "base_moving": return ["robot", `base moving${e.to ? " toward " + e.to : ""}`];
+      case "base_stopped": return ["robot", `base stopped${e.at ? " at " + e.at : ""}${e.between ? " between " + e.between.join(" and ") : ""}`];
+      case "grasp_closed": return ["world", `grasp closed on ${e.object} (${e.arm})`];
+      case "grasp_missed": return ["world", `grasp missed ${e.object || ""} (${e.arm})`, "hot"];
+      case "object_slipped": return ["world", `${e.object} slipped out of the ${e.arm} gripper`, "hot"];
+      case "object_placed": return ["world", `${e.object} placed on ${e.surface}`];
+      case "object_fell": return ["world", `${e.object} fell to the floor`, "hot"];
+      case "safety_stop": return ["world", `safety stop${obj} ${e.reason || ""}`, "hot"];
+      case "path_blocked": return ["world", `path blocked on ${JSON.stringify(e.edge)}`, "hot"];
+      case "camera_flushed": return ["world", `camera buffer flushed${e.camera ? " (" + e.camera + ")" : ""}`];
+      case "internal_error": return ["world", `SIM ERROR ${e.error}`, "hot"];
+      case "slow_sim_call": return ["world", `simulator call ${e.call} was slow: waited ${e.queued_s} s in the queue, ran ${e.ran_s} s`, "amber"];
+      default: return ["world", `${e.type} ${JSON.stringify(Object.fromEntries(Object.entries(e).filter(([k]) => !["t", "type", "i"].includes(k))))}`];
+    }
+  }
+
+  function fmtTrace(r) {
+    switch (r.type) {
+      case "heard": return r.kind ? ["brain", `${r.id} classified as ${r.kind}`] : null;
+      case "classified": {
+        const d = r.directive || {}, hot = r.kind === "correction" || r.kind === "stop" ? "key" : "";
+        if (d.source === "system1") {
+          const tgt = d.target && d.target.object ? `, target ${d.target.object}` : "";
+          return ["s1", `${r.id} labelled ${r.kind}${tgt} (${Math.round((d.confidence || 0) * 100)}%)${d.reply ? ", says " + d.reply : ""}`, hot];
+        }
+        return ["brain", `${r.id} classified as ${r.kind}`, hot];
+      }
+      case "observation": return ["s1", `noticed${r.where ? " at " + r.where : ""}: ${r.text} (${Math.round((r.confidence || 0) * 100)}%, unverified)`];
+      case "goal_check": return ["runtime", `goal check "${r.goal}": ${r.ok ? "ok" : r.ok === false ? "FAILED" : "can't check"}, ${r.why}`, r.ok ? "" : "hot"];
+      case "observation_dropped": return ["s1", `ignored "${r.text}": ${r.why} (the robot's own doing)`, "amber"];
+      case "classify_bad_kind": case "classify_timeout": case "classify_error":
+        return ["brain", `classification failed for ${r.id}: ${r.type}${r.error ? " " + r.error : ""} (keyword fallback used)`, "hot"];
+      case "decision": return ["brain", `next step: ${r.tool}(${args(r.args)})  for v${r.version ?? "?"}${r.latency != null ? "  · " + r.latency.toFixed(1) + " s" : ""}`];
+      case "brain_timeout": return ["brain", "model call timed out", "hot"];
+      case "brain_error": return ["brain", `model call failed: ${r.error}`, "hot"];
+      case "brain_malformed": return ["brain", `model reply was not a tool call: ${r.got}`, "hot"];
+      case "say_queued": return ["runtime", `queues speech for v${r.version}: "${r.text}"`];
+      case "started": return ["runtime", `starts ${r.tool}(${args(r.args)}) for v${r.version}`];
+      case "rejected": return ["runtime", `rejects ${r.tool}(${args(r.args)}): ${r.why}`, "hot"];
+      case "correction": return ["runtime", `CORRECTION → v${r.version}. cancels [${(r.canceled || []).join(", ")}], drops speech [${(r.dropped || []).join(" | ")}]`, "key"];
+      case "stop": return ["runtime", `STOP without asking the model: halt(), cancels [${(r.canceled || []).join(", ")}], cuts [${(r.cut || []).join(" | ")}]`, "hot"];
+      case "reconcile_start": return ["runtime", `waits for cancelled [${(r.actions || []).join(", ")}] to finish; only speech may start meanwhile`, "amber"];
+      case "reconcile_done": return ["runtime", `reconciled. hands: ${Object.entries(r.belief || {}).map(([a, h]) => `${a}=${h.holding ?? "empty"}${h.verified ? "" : "?"}`).join(", ")}`];
+      case "held_for_reconcile": return ["runtime", `holds ${r.tool}(${args(r.args)}) until the cancelled action settles`, "amber"];
+      case "stale_decision": return ["runtime", `drops stale decision ${r.tool}(${args(r.args)}), made for v${r.made_for}`, "amber"];
+      case "result": {
+        const d = r.data || {};
+        const saw = r.skill === "look" && d.saw ? `  · saw ${d.saw.length ? d.saw.join(", ") : "nothing"}${d.landmarks && d.landmarks.length ? " · landmarks " + d.landmarks.join(", ") : ""}` : "";
+        return ["runtime", `result: ${r.skill} ${r.status}${r.late ? "  LATE (updates belief, not the plan)" : ""}${saw}`, r.late ? "amber" : ""];
+      }
+      case "persona_goal": return ["persona", `own goal (${r.drive}): ${r.text}`, "persona"];
+      case "persona_goal_end": return ["persona", `own goal ${r.drive} ${r.target}: ${{ done: "done", gave_up: "gave up", dropped: "dropped, the user comes first", off: "switched off" }[r.outcome] || r.outcome}`, r.outcome === "done" ? "persona" : "amber"];
+      case "persona_quiet": return ["persona", `keeps quiet on its own goal (dropped "${r.text}")`, "amber"];
+      case "persona_level": return ["persona", `persona level: ${r.level}`, "persona"];
+      case "note_saved": return ["persona", `noted: "${r.text}"${r.about ? " (about the " + r.about + ")" : ""}`, "persona"];
+      case "memory_saved": return ["runtime", `spatial memory saved: ${r.objects} objects`];
+      case "rejection_limit": case "decision_limit": return ["runtime", r.type.replace("_", " ") + " reached", "hot"];
+      case "chunk": case "final_belief": return null;
+      case "recall": return ["runtime", `recall("${r.query}") → ${String(r.answer || "").split("\n").slice(0, 2).join(" · ")}`, "persona"];
+      case "place_learned": return ["runtime", `belief: ${r.object} ${r.place === "UNKNOWN" ? "not where expected" : "→ " + r.place} (${r.source})`];
+      case "delivered": return ["runtime", `delivered ${r.object} to ${r.surface} (verified by a look)`, "ok"];
+      case "session_start": case "narrate": return null;
+      case "unprompted_say_dropped": return ["runtime", `drops "${r.text}": nobody has spoken yet and no own goal asks it to talk`, "amber"];
+      case "repeat_say_dropped": return ["runtime", `drops a repeated line ("${r.text}") and waits: nothing new was heard since it was said`, "amber"];
+      default: {
+        const rest = Object.fromEntries(Object.entries(r).filter(([k]) => !["t", "type", "i"].includes(k)));
+        return ["runtime", `${r.type} ${JSON.stringify(rest)}`];
+      }
+    }
+  }
+
+  const LABEL = { s1: "SYSTEM 1", user: "USER", brain: "BRAIN", runtime: "RUNTIME", robot: "ROBOT", world: "WORLD", persona: "PERSONA" };
+  const EXPLAIN = {
+    observation: "System 1 watches the head camera and notices what the object list can't hold: a door left open, a spill, what a room looks like. It enters belief and memory as an unverified hint, and the planner sees it under NOTICED.",
+    persona_goal: "The persona is the robot's own goal-setter. When nothing has happened for a while, it picks the most useful thing to do for itself (look at a spot it has never checked, or go back to you) and hands it to the planner as an OWN GOAL.",
+    persona_goal_end: "An own goal ends when it's done, when it stalls, or the moment you say anything: the user always comes first.",
+    persona_quiet: "On its own goals the robot may say one short line; further narration is dropped.",
+    recall: "The planner asked memory instead of carrying everything in its prompt. Answers come from spatial memory, your notes and the episode log, instantly, with no model call.",
+    place_learned: "Belief learned where something is (or that it wasn't where expected). Episodes record these, and spatial memory keeps a short history per object.",
+    delivered: "A place was verified by a look on your surface. The procedural graph counts the task as a success.",
+    note_saved: "Things you tell the robot about the home (Gemini labels them observation) are kept word for word in runs/memory/<scene>.json and shown to the planner as NOTES in later sessions.",
+    memory_saved: "Verified places are written to runs/memory/<scene>.json, and the next session starts from them as unverified hints.",
+    utterance: "What you typed or said. The runtime gets it through user.next(), like any utterance.",
+    classified: "The brain labelled what you said (request, correction, question…). The runtime decides what each kind does. Click to see the model call.",
+    heard: "The brain labelled what you said. Click to see the model call.",
+    decision: "The model's answer to next_action: exactly one tool call. Click to see its full input and output.",
+    say_queued: "Speech goes into a first-in-first-out queue, tagged with the request version it serves, so a correction can drop lines that are now wrong.",
+    started: "navigate, pick and place run as background tasks, so the runtime keeps listening and thinking while the robot moves.",
+    rejected: "Every tool call is checked against the runtime's rules before it runs. The reason is sent back to the model as a NOTE on its next turn.",
+    correction: "Only a correction cancels anything. The request version goes up, every action made for an older version is cancelled, old queued speech is dropped, and any hand a cancelled arm used becomes UNKNOWN.",
+    stop: "“Stop” is caught by a keyword match before any model call: halt() freezes the robot in about 0.1 s, speech is cut, and the runtime pauses until you say to continue.",
+    reconcile_start: "cancel() is only a request: a pick still finishes its current ~1 s chunk. Until every cancelled action has ended, only speech is allowed to start.",
+    reconcile_done: "The cancelled actions have ended and the runtime has looked, so it knows what the hands hold again.",
+    held_for_reconcile: "The model asked for a new action while a cancelled one was still moving, so the runtime holds it back.",
+    stale_decision: "The request version changed while the model was thinking. This answer was for the old request, so it is thrown away.",
+    result: "A background action finished. “Late” means it belonged to an older request: it updates belief but never counts as progress.",
+    brain_error: "The model call failed. The runtime retries a few times, then carries on.",
+    speech_started: "The robot starts speaking a queued line.",
+    speech_cut: "A line was cut off, usually because a correction made it wrong or you said stop.",
+    goal_accepted: "The runtime sent a goal to the robot API (send_goal).",
+    goal_done: "The robot reports a goal's result: SUCCEEDED, ABORTED or CANCELED, plus data. The runtime doesn't simply trust SUCCEEDED; it looks after every pick and place.",
+    cancel_requested: "cancel() was called. It returns at once; the skill stops at its next safe point.",
+    halted: "Hardware stop: base and arms freeze within about 0.1 s, even mid-chunk.",
+    chunk_started: "pick and place run as timed chunks (about 1 s each) on the THOR robot. A chunk always runs to its end; cancel is honoured only between chunks.",
+    grasp_closed: "Ground truth: the gripper really closed on this object. The runtime doesn't see this event; it has to find out by looking.",
+    object_slipped: "Ground truth: the object fell out of the gripper. The pick may still report success, which is why the runtime looks afterwards.",
+    object_placed: "Ground truth: the object is now on this surface.",
+    path_blocked: "Ground truth: an obstacle blocks this edge. The robot reports it in the navigate result.",
+  };
+  function findCall(purpose, t, uid) {
+    if (uid) { const g = Object.values(S.calls).find((c) => c.utterance === uid); if (g) return g; }
+    let best = null;
+    for (const c of Object.values(S.calls)) {
+      if (c.purpose !== purpose || c.t_end == null || c.t_end > t + 0.05) continue;
+      if (!best || c.t_end > best.t_end) best = c;
+    }
+    return best;
+  }
+  function appendFeed(items) {
+    const box = $("feed-scroll"), feed = $("feed");
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    const frag = document.createDocumentFragment();
+    for (const it of items) {
+      const div = document.createElement("div");
+      const linkPurpose = { decision: "next_action", classified: "classify", heard: "classify" }[it.key];
+      div.className = `row src-${it.src} ${it.cls || ""}${linkPurpose ? " link" : ""}`;
+      if (EXPLAIN[it.key]) div.title = EXPLAIN[it.key];
+      div.innerHTML = `<span class="t">${it.t.toFixed(2)}</span><span class="s">${LABEL[it.src]}</span><span class="m">${esc(it.text)}</span>`;
+      if (linkPurpose) div.addEventListener("click", () => { const c = findCall(linkPurpose, it.t, it.uid); if (c) openCall(c.n); else toast("No model call found for this row"); });
+      frag.appendChild(div);
+    }
+    feed.appendChild(frag);
+    if (stick) box.scrollTop = box.scrollHeight;
+  }
+
+  // ------------------------------------------------------------------ chat
+  function addChat(kind, text, meta, uid) {
+    const box = $("chat-scroll"), chat = $("chat");
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    const div = document.createElement("div");
+    div.className = `msg ${kind}`;
+    div.innerHTML = `<div class="meta">${esc(meta)}</div><div class="body">${esc(text)}</div>`;
+    const think = $("thinking");
+    chat.insertBefore(div, think || null);
+    if (uid) S.chatByUid[uid] = div;
+    if (stick) box.scrollTop = box.scrollHeight;
+    return div;
+  }
+  function tagKind(uid, kind, note) {
+    const div = S.chatByUid[uid]; if (!div || div.querySelector(".kind")) return;
+    const k = document.createElement("span");
+    k.className = `kind ${kind}`;
+    k.textContent = note ? `${kind} · ${note}` : kind;
+    div.querySelector(".meta").appendChild(k);
+  }
+  function chatFromEvent(e) {
+    if (e.type === "utterance") addChat("user", e.text, `you · ${e.t.toFixed(1)} s`, e.id);
+    else if (e.type === "speech_started") S.lastRobotMsg[e.text] = addChat("robot", e.text, `robot · ${e.t.toFixed(1)} s`);
+    else if (e.type === "speech_cut" && S.lastRobotMsg[e.text]) S.lastRobotMsg[e.text].classList.add("cut");
+  }
+  function chatFromTrace(r) {
+    if (r.type === "classified") tagKind(r.id, r.kind, (r.directive || {}).source === "system1" ? "System 1" : "planner");
+    else if (r.type === "heard" && r.kind) tagKind(r.id, r.kind);
+    else if (r.type === "stop") tagKind(r.id, "stop", "no model");
+    else if (r.type === "narrate") addProgress(r);
+  }
+  // The runtime's progress lines (agent/narrator.py): status, not speech.
+  const PROGRESS_ICON = { task: "◆", move: "➜", look: "◎", found: "★", arm: "✋", memory: "▤", problem: "!", done: "✓", stop: "■", own: "◇", think: "…" };
+  function addProgress(r) {
+    const box = $("chat-scroll");
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    const div = document.createElement("div");
+    div.className = `progress p-${r.kind}`;
+    div.title = `t=${r.t.toFixed(1)} s · from the runtime's narrator (agent/narrator.py): a status line, not something the robot said`;
+    div.innerHTML = `<span class="pi">${PROGRESS_ICON[r.kind] || "·"}</span><span>${esc(r.text)}</span>`;
+    $("chat").insertBefore(div, $("thinking") || null);
+    if (stick) box.scrollTop = box.scrollHeight;
+  }
+  function setThinking(on) {
+    let el = $("thinking");
+    if (on && !el) {
+      el = document.createElement("div"); el.id = "thinking"; el.className = "thinking";
+      el.innerHTML = `<span class="dot"></span> the planner is deciding the next step…`;
+      $("chat").appendChild(el);
+    } else if (!on && el) el.remove();
+  }
+
+  // ------------------------------------------------------------------ state panel
+  function handLabel(h) {
+    if (h === null || h === undefined) return "empty";
+    return h;
+  }
+  function renderState() {
+    const st = S.state; if (!st) return;
+    const tr = st.truth, rt = st.runtime;
+    let h = "";
+    if (!rt) { $("state").innerHTML = `<div class="empty">No runtime is running. See the message in the chat pane.</div>`; return; }
+    const stats = rt.stats || {};
+    const fused = rt.fused || {};
+    const sensor = fused.robot || {};
+    const perception = fused.world || {};
+    const task = fused.task || {};
+    h += `<div class="pills">
+      <span class="pill v" title="Bumped by every correction">request v${rt.version}</span>
+      <span class="pill" title="Invalidates planner output made before a stop, correction, resume, or new constraint">control e${rt.control_epoch ?? task.control_epoch ?? 0}</span>
+      ${fused.revision != null ? `<span class="pill" title="Changes only when fused robot or world state changes">fused r${fused.revision} · frame ${fused.observation_seq ?? "?"}</span>` : ""}
+      ${rt.paused ? `<span class="pill paused">paused by stop</span>` : ""}
+      ${rt.thinking ? `<span class="pill think"><span class="dot"></span>thinking</span>` : ""}
+      ${rt.reconciling ? `<span class="pill rec">reconciling a cancel</span>` : ""}
+      <span class="pill" title="Model calls so far">${stats.calls ?? 0} model calls${stats.latency_ms_p50 ? " · p50 " + (stats.latency_ms_p50 / 1000).toFixed(1) + " s" : ""}${stats.errors ? ` · <span class="bad">${stats.errors} errors</span>` : ""}</span>
+    </div>`;
+    if (rt.crashed) h += `<div class="banner">The runtime crashed:\n${esc(rt.crashed.slice(-1200))}</div>`;
+
+    // The persona: the robot's own goals, only when nobody needs anything.
+    const per = rt.persona;
+    if (per) {
+      const g = per.goal;
+      const LEVEL = { off: "off", quiet: "quiet: only remembers what you tell it", medium: "medium: looks around from where it stands",
+                      optimize: `optimize: explores the room · permission ${per.permission}` };
+      h += `<div class="block"><h3>Persona · own goals <span class="muted" style="text-transform:none;letter-spacing:0">${esc(LEVEL[per.level] || per.level)}</span></h3><div class="list">
+        <div><span class="id">goal</span> ${g ? `<span class="persona-t">${esc(g.drive)} → ${esc(g.target)}</span> · ${g.age_s} s · ${esc(g.text)}` : `<span class="muted">none${per.enabled ? " (waiting for a quiet moment)" : ""}</span>`}</div>
+        ${per.drives.length ? `<div><span class="id">drives</span> ${per.drives.map((d) => `${esc(d.drive)} ${esc(d.target)} <span class="muted">${d.score}</span>`).join(" · ")}</div>` : ""}
+        ${per.history.length ? `<div><span class="id">recent</span> ${per.history.slice(0, 5).map((e) => e.drive === "answer" ? `you answered <span class="${e.outcome === "yes" ? "ok" : "warn"}">${esc(e.outcome)}</span> <span class="muted">(read by ${esc(e.by)})</span>` : `${esc(e.drive)} ${esc(e.target)}: ${e.outcome === "done" ? '<span class="ok">done</span>' : `<span class="warn">${esc(e.outcome.replace("_", " "))}</span>`} (${e.took_s} s)`).join(" · ")}</div>` : ""}
+      </div></div>`;
+    }
+
+    // Latest fused observation. THOR fills the same adapter boundary that a
+    // hardware telemetry + perception stack would fill later.
+    if (fused.revision != null) {
+      const pose = sensor.pose || {};
+      const velocity = sensor.velocity || {};
+      const objects = Object.entries(perception.objects || {});
+      const visible = objects.filter(([, o]) => o.visible).length;
+      const nearest = objects
+        .filter(([, o]) => Number.isFinite(o.distance_m))
+        .sort((a, b) => a[1].distance_m - b[1].distance_m)
+        .slice(0, 5);
+      const directive = task.current_directive;
+      const at = pose.at || (pose.between ? "between " + pose.between.join(" and ") :
+        (pose.x != null && pose.z != null ? `(${pose.x}, ${pose.z})` : "unknown"));
+      h += `<div class="block"><h3>Fused observation <span class="muted" style="text-transform:none;letter-spacing:0">sensor adapter → runtime → Gemini</span></h3><div class="list">
+        <div><span class="id">robot</span> ${sensor.moving ? "moving" : "stationary"} at ${esc(at)} · velocity ${velocity.linear_mps ?? "?"} m/s · health ${sensor.health && sensor.health.ok ? '<span class="ok">ok</span>' : '<span class="warn">unknown</span>'}</div>
+        <div><span class="id">perception</span> ${objects.length} objects · ${visible} visible · ${esc(perception.source || "adapter")}${perception.observed_at != null ? ` · sampled t=${perception.observed_at}` : ""}</div>
+        ${nearest.length ? `<div><span class="id">nearest</span> ${nearest.map(([id, o]) => `${esc(id)} ${o.distance_m}m${o.visible ? " visible" : ""} (${Math.round((o.confidence ?? 0) * 100)}%)`).join(" · ")}</div>` : ""}
+        <div><span class="id">task</span> ${task.paused ? '<span class="warn">paused</span>' : "active"}${task.goal ? ` · goal: ${esc(task.goal)}` : " · no goal"}</div>
+        ${directive ? `<div><span class="id">System 1</span> ${esc(directive.kind)} · “${esc(directive.text)}” · ${Math.round((directive.confidence ?? 0) * 100)}%${Object.keys(directive.target || {}).length ? ` · target ${esc(JSON.stringify(directive.target))}` : ""}</div>` : ""}
+      </div></div>`;
+    }
+
+    // hands
+    h += `<div class="block"><h3>Robot</h3><div class="list"><div>truth: ${tr.robot.moving ? "moving" : "at " + esc(tr.robot.at || "?")}${tr.robot.between ? " (between " + esc(tr.robot.between.join(" and ")) + ")" : ""} · belief: ${esc(rt.belief.robot ? (rt.belief.robot.at || (rt.belief.robot.between ? "between " + rt.belief.robot.between.join(" and ") : "unknown")) : "?")}</div></div></div>`;
+    h += `<div class="block"><h3>Hands · truth vs belief <span class="muted" style="text-transform:none;letter-spacing:0">(one object at a time)</span></h3><table><tr><th>Arm</th><th>Truth</th><th>Runtime believes</th></tr>`;
+    for (const arm of ["left", "right"]) {
+      const t = tr.arms[arm], b = (rt.belief.hands || {})[arm] || {};
+      const bh = b.holding === undefined ? null : b.holding;
+      const cls = bh === "UNKNOWN" ? "unk" : (bh !== t.holding ? "diff" : "");
+      h += `<tr class="${cls}"><td class="id">${arm}</td>
+        <td>${esc(handLabel(t.holding))}<span class="sub">${esc(t.phase)}</span></td>
+        <td class="${bh === "UNKNOWN" ? "warn" : ""}">${esc(handLabel(bh))}<span class="sub">${b.verified ? '<span class="ok">verified</span>' : '<span class="warn">unverified</span>'} · ${esc(b.source || "")}${b.hint ? " · " + esc(b.hint) : ""}</span></td></tr>`;
+    }
+    h += `</table></div>`;
+
+    // running
+    h += `<div class="block"><h3>Running now</h3><div class="list">`;
+    const act = rt.active.filter((e) => e.tool !== "say");
+    if (!act.length && !tr.goals.filter((g) => g.skill !== "say").length) h += `<div class="empty" style="border:0;background:none;padding:0">nothing</div>`;
+    for (const e of act) {
+      const stale = e.v < rt.version;
+      h += `<div class="${e.cancel_requested ? "cxl" : stale ? "stale" : "run"}">#${e.id} ${esc(e.tool)}(${esc(args(e.args))}) · for v${e.v} · ${esc(e.status)}${e.cancel_requested ? " · cancel requested" : ""}${e.source === "harness" ? " · harness" : e.source === "persona" ? " · own goal" : ""}</div>`;
+    }
+    for (const g of tr.goals.filter((g) => g.skill !== "say")) {
+      h += `<div class="${g.status === "CANCELING" ? "cxl" : ""}"><span class="muted">robot goal</span> #${g.id} ${esc(g.skill)}(${esc(args(g.args))}) · ${esc(g.status)}</div>`;
+    }
+    h += `</div></div>`;
+
+    // speech
+    if (rt.speech) {
+      h += `<div class="block"><h3>Speech queue</h3><div class="list">`;
+      if (!rt.speech.current && !rt.speech.queued.length) h += `<div class="empty" style="border:0;background:none;padding:0">silent</div>`;
+      if (rt.speech.current) h += `<div class="${rt.speech.current.version < rt.version ? "stale" : "run"}">▶ v${rt.speech.current.version} "${esc(rt.speech.current.text)}"</div>`;
+      for (const q of rt.speech.queued) h += `<div class="${q.version < rt.version ? "stale" : ""}">v${q.version} "${esc(q.text)}"</div>`;
+      h += `</div></div>`;
+    }
+
+    // objects
+    h += `<div class="block"><h3>Objects · truth vs belief</h3><table><tr><th>Object</th><th>Truth</th><th>Runtime believes</th></tr>`;
+    const heldBy = {};
+    for (const [arm, a] of Object.entries(tr.arms)) if (a.holding) heldBy[a.holding] = arm;
+    const ids = new Set(Object.keys(rt.belief.objects || {}));
+    for (const id of Object.keys(heldBy)) ids.add(id);
+    for (const id of [...ids].sort()) {
+      const t = tr.objects[id], b = (rt.belief.objects || {})[id];
+      const tw = t ? (t.where === "hand" ? "hand:" + (heldBy[id] || "?") : t.where) : "—";
+      const bw = b ? b.where : "not known";
+      const cls = !b ? "" : (bw === "UNKNOWN" ? "unk" : (bw !== tw ? "diff" : ""));
+      h += `<tr class="${cls}"><td class="id">${esc(id)}<span class="sub">${esc(t ? t.label : b.label)}</span></td>
+            <td>${esc(nice(tw))}</td>
+            <td>${esc(nice(bw))}${b ? `<span class="sub">${b.verified ? '<span class="ok">seen</span>' : esc(b.source)} · t=${b.t}</span>` : ""}</td></tr>`;
+    }
+    h += `</table></div>`;
+
+    // landmarks and where the robot has looked
+    const lms = Object.entries(rt.belief.landmarks || {});
+    const looked = rt.belief.looked || {};
+    const spots = Object.keys((S.layout && S.layout.surfaces) || {});
+    h += `<div class="block"><h3>Landmarks and looks <span class="muted" style="text-transform:none;letter-spacing:0">fixed things seen · spots checked</span></h3><div class="list">
+      <div><span class="id">landmarks</span> ${lms.length ? lms.map(([id, l]) => `${esc(id)} near ${esc(l.near)}${l.source === "memory" ? ' <span class="muted">(remembered)</span>' : ""}`).join(" · ") : '<span class="muted">none seen yet</span>'}</div>
+      <div><span class="id">looked at</span> ${spots.filter((k) => looked[k]).map((k) => `${esc(k)} <span class="muted">t=${looked[k].t}${looked[k].source === "memory" ? ", remembered" : ""}</span>`).join(" · ") || '<span class="muted">nothing yet</span>'}</div>
+      ${spots.filter((k) => !looked[k]).length ? `<div><span class="id">never</span> ${spots.filter((k) => !looked[k]).map(esc).join(", ")}</div>` : ""}
+    </div></div>`;
+
+    // recent actions
+    h += `<div class="block"><h3>Recent actions (history the brain sees)</h3><div class="list">`;
+    const rec = rt.recent.slice().reverse();
+    if (!rec.length) h += `<div class="empty" style="border:0;background:none;padding:0">none yet</div>`;
+    for (const e of rec) {
+      const cls = e.late ? "late" : (["CANCELED", "ABORTED", "REJECTED", "TIMEOUT", "FAILED"].includes(e.status) ? "cxl" : (e.status === "running" ? "run" : ""));
+      h += `<div class="${cls}">${e.t.toFixed(1)} · v${e.v} ${esc(e.tool)}(${esc(args(e.args))}) → ${esc(e.status)}${e.late ? " · late" : ""}${e.source === "harness" ? " · harness" : e.source === "persona" ? " · own goal" : ""}</div>`;
+    }
+    h += `</div></div>`;
+
+    if (fused.recent_events && fused.recent_events.length) {
+      h += `<div class="block"><h3>Fused event history <span class="muted" style="text-transform:none;letter-spacing:0">semantic deltas, not frame copies</span></h3><div class="list">`;
+      for (const e of fused.recent_events.slice(-8).reverse()) {
+        const detail = e.data && e.data.directive ? `${e.data.directive.kind}: “${e.data.directive.text}”` :
+          e.data && e.data.components ? e.data.components.join(" + ") :
+          e.data && e.data.reason ? e.data.reason : "";
+        h += `<div class="${e.priority === 0 ? "cxl" : ""}">${Number(e.t).toFixed(1)} · p${e.priority} ${esc(e.type)}${detail ? " · " + esc(detail) : ""}</div>`;
+      }
+      h += `</div></div>`;
+    }
+    setHTML($("state"), h);
+  }
+
+  // ------------------------------------------------------------------ workspaces
+  // Every frame: what is visible in all workspaces (clock, persona and step controls).
+  function renderAlways(msg) {
+    $("simt").textContent = msg.t.toFixed(1);
+    const rt = msg.runtime;
+    const per = rt && rt.persona, sel = $("sel-persona");
+    if (per && document.activeElement !== sel && sel.value !== per.level) sel.value = per.level;
+    sel.classList.toggle("on", sel.value !== "off");
+    const step = (rt && rt.step) || {};
+    const chk = $("chk-step"), btn = $("btn-step");
+    if (document.activeElement !== chk) chk.checked = !!step.on;
+    btn.hidden = !step.on;
+    btn.disabled = !step.waiting;
+    btn.title = step.waiting ? "The planner is waiting: let it make its next call (N)" : "Waits before each planner call; lights up when one is ready";
+  }
+  // Only the visible workspace is drawn.
+  function renderSpace() {
+    if (!S.state) return;
+    if (S.space === "world") { drawDynamic(); renderHud(); V.plan.render(S.state); }
+    else if (S.rtab === "now") renderNow();
+    else if (S.rtab === "state") renderState();
+    else if (S.rtab === "proc") V.memory.renderGraph(S.state);
+  }
+  const remember = (k, v) => { try { localStorage.setItem("worldline." + k, v); } catch { /* private window: fine */ } };
+  function setSpace(space) {
+    S.space = space;
+    $("main").dataset.ws = space;
+    for (const b of document.querySelectorAll(".wstabs [data-go]")) b.setAttribute("aria-selected", String(b.dataset.go === space));
+    remember("space", space);
+    if (space === "world") requestAnimationFrame(refit);
+    renderSpace();
+  }
+  // Brain workspace, right column: now, state, memory, procedures.
+  function setRtab(tab) {
+    S.rtab = tab;
+    for (const b of document.querySelectorAll("#rtabs [data-rtab]")) b.setAttribute("aria-selected", String(b.dataset.rtab === tab));
+    for (const el of document.querySelectorAll("[data-rpane]")) el.hidden = el.dataset.rpane !== tab;
+    remember("rtab", tab);
+    renderSpace();
+  }
+  // Brain workspace, the Now tab: what is going on right now.
+  function renderNow() {
+    const st = S.state, rt = st && st.runtime;
+    if (!rt) { setHTML($("now-main"), `<div class="empty">No runtime is running.</div>`); return; }
+    const step = rt.step || {}, fused = rt.fused || {}, task = fused.task || {}, dir = task.current_directive;
+    let s = "";
+    if (step.waiting) {
+      s = `<div class="block stepwait"><h3 style="color:var(--warn)">Step mode · the planner is waiting</h3>
+        <div style="font-size:13.5px">It calls the model when you press Step (or N). Stop works without it.</div>
+        <div><button class="btn primary" type="button" data-act="step">Step ▶</button> <span class="muted" style="font:12px var(--mono)">since t=${step.waiting.since} · for v${step.waiting.version}</span></div>
+        ${step.waiting.preview ? `<details open><summary>What the planner will see (rebuilt when you press Step)</summary><pre class="preview">${esc(step.waiting.preview)}</pre></details>` : ""}</div>`;
+    } else if (step.on) {
+      s = `<div class="block"><h3>Step mode on</h3><div class="empty">The planner will wait before its next call.</div></div>`;
+    }
+    setHTML($("now-step"), s);
+    const stats = rt.stats || {};
+    const lastDec = S.traceAll.slice().reverse().find((r) => r.type === "decision");
+    const proc = rt.procedure || { steps: [], guidance: "" };
+    let h = `<div class="pills">
+      <span class="pill v" title="Bumped by every correction">request v${rt.version}</span>
+      <span class="pill" title="Invalidates planner output made before a stop, correction, resume, or new constraint">control e${rt.control_epoch ?? 0}</span>
+      ${rt.paused ? `<span class="pill paused">paused by stop</span>` : ""}
+      ${rt.thinking ? `<span class="pill think"><span class="dot"></span>thinking</span>` : ""}
+      ${rt.reconciling ? `<span class="pill rec">reconciling a cancel</span>` : ""}
+      <span class="pill">${stats.calls ?? 0} model calls${stats.latency_ms_p50 ? " · p50 " + (stats.latency_ms_p50 / 1000).toFixed(1) + " s" : ""}</span></div>`;
+    const s1 = S.s1 || { status: "off" };
+    const lastLabel = S.traceAll.slice().reverse().find((r) => r.type === "classified");
+    const noticed = S.traceAll.filter((r) => r.type === "observation").slice(-3).reverse();
+    h += `<div class="block"><h3>System 1 <span class="muted" style="text-transform:none;letter-spacing:0">${esc(s1.status)}${s1.status !== "ready" && s1.detail ? " · " + esc(s1.detail) : ""}</span></h3><div class="list">
+      ${lastLabel ? `<div>last label: ${esc(lastLabel.kind)} <span class="muted">by ${(lastLabel.directive || {}).source === "system1" ? "System 1" : "the planner"}</span></div>` : ""}
+      ${noticed.map((o) => `<div class="run">noticed: ${esc(o.text)} <span class="muted">${o.where ? "at " + esc(o.where) : ""}</span></div>`).join("")}
+      ${!lastLabel && !noticed.length ? '<div class="empty" style="border:0;background:none;padding:0">nothing yet</div>' : ""}</div></div>`;
+    h += `<div class="block"><h3>Request</h3><div class="list"><div>${dir ? `<span class="kind">${esc(dir.kind)}</span> “${esc(dir.text)}”` : '<span class="muted">none yet</span>'}</div>
+      ${task.goal ? `<div><span class="muted">goal</span> ${esc(task.goal)}</div>` : ""}</div></div>`;
+    h += `<div class="block"><h3>Planner</h3><div class="list"><div>${rt.thinking ? '<span style="color:var(--brain)">thinking…</span>' : step.waiting ? '<span class="warn">waiting for Step</span>' : '<span class="muted">idle</span>'}</div>
+      ${lastDec ? `<div><span class="muted">last</span> ${esc(lastDec.tool)}(${esc(args(lastDec.args))})${lastDec.latency != null ? ` <span class="muted">· ${lastDec.latency.toFixed(1)} s · t=${lastDec.t.toFixed(1)}</span>` : ""}</div>` : ""}</div></div>`;
+    const act = (rt.active || []).filter((e) => e.tool !== "say");
+    h += `<div class="block"><h3>Running now</h3><div class="list">${act.length ? act.map((e) => `<div class="${e.cancel_requested ? "cxl" : "run"}">#${e.id} ${esc(e.tool)}(${esc(args(e.args))}) · for v${e.v}${e.source === "persona" ? " · own goal" : ""}</div>`).join("") : '<div class="empty" style="border:0;background:none;padding:0">nothing</div>'}</div></div>`;
+    if (rt.speech) {
+      const sp = rt.speech;
+      h += `<div class="block"><h3>Speech queue</h3><div class="list">${!sp.current && !sp.queued.length ? '<div class="empty" style="border:0;background:none;padding:0">silent</div>' : ""}
+        ${sp.current ? `<div class="run">▶ "${esc(sp.current.text)}"</div>` : ""}${sp.queued.map((q) => `<div>"${esc(q.text)}"</div>`).join("")}</div></div>`;
+    }
+    h += `<div class="block"><h3>Procedure <span class="muted" style="text-transform:none;letter-spacing:0">this task, as steps</span></h3><div class="list">
+      <div>${proc.steps.length ? ["start", ...proc.steps].map(esc).join(" → ") : '<span class="muted">no request in progress</span>'}</div>
+      ${proc.guidance ? `<div class="run">${esc(proc.guidance).replace(/\n/g, "<br>")}</div>` : ""}</div></div>`;
+    setHTML($("now-main"), h);
+  }
+
+  // ------------------------------------------------------------------ controls
+  function fillControls() {
+    const m = S.meta, c = S.config;
+    const opt = (v, label, sel) => `<option value="${esc(v)}"${v === sel ? " selected" : ""}>${esc(label)}</option>`;
+    $("sel-scene").innerHTML = m.scenes.map(([v, l]) => opt(v, `${l} (${v})`, c.scene)).join("");
+    $("sel-model").innerHTML = m.models.map(([v, l]) => opt(v, l, c.model)).join("");
+    renderWorldCard();
+  }
+  function renderWorldCard(preview) {
+    const m = S.meta, lay = S.layout, st = S.state;
+    const scene = preview || S.config.scene;
+    const label = (m.scenes.find(([v]) => v === scene) || [scene, scene])[1];
+    if (preview && preview !== S.config.scene) {
+      $("world-card").innerHTML = `<div class="t">${esc(label)}</div><div class="warn" style="font-size:13px">Press <b>Start new session</b> to load this room.</div>`;
+      return;
+    }
+    if (!lay || !st) { $("world-card").innerHTML = ""; return; }
+    const onSurf = Object.entries(st.truth.objects).filter(([, o]) => lay.surfaces[o.where]);
+    const pick = (i) => onSurf.length ? onSurf[i % onSurf.length] : null;
+    const a = pick(0), b = pick(3), surfNames = Object.keys(lay.surfaces);
+    const other = surfNames.find((n) => a && n !== a[1].where) || surfNames[0];
+    const lines = [];
+    if (a) lines.push(`Bring me the ${a[1].label}.`);
+    if (b) lines.push(`Wait, the ${b[1].label} instead.`);
+    if (a && other) lines.push(`Put the ${a[1].label} on ${lay.surfaces[other].desc}.`);
+    if (surfNames.length) lines.push(`What's on ${lay.surfaces[surfNames[0]].desc}?`);
+    lines.push("How long will that take?");
+    $("world-card").innerHTML = `<div class="t">${esc(label)}</div>
+      <div class="d">${Object.keys(lay.keypoints).length} named spots, ${onSurf.length} objects on surfaces. You are at <b>${esc(lay.human ? lay.human.keypoint : "start")}</b>. Type to the robot.</div>
+      <div class="chips">${lines.map((l) => `<button type="button" class="chip">${esc(l)}</button>`).join("")}</div>`;
+    for (const c of $("world-card").querySelectorAll(".chip")) c.addEventListener("click", () => send(c.textContent));
+  }
+  function banner() {
+    const slot = $("banner-slot");
+    const msgs = [];
+    if (S.meta && !S.meta.gemini_key) msgs.push("GEMINI_API_KEY is missing from .env, so the Gemini planner can't run.");
+    if (S.error) msgs.push(S.error);
+    slot.innerHTML = msgs.length ? `<div class="banner">${msgs.map(esc).join("\n")}</div>` : "";
+  }
+  function toast(text) {
+    const t = document.createElement("div"); t.className = "toast"; t.textContent = text;
+    document.body.appendChild(t); setTimeout(() => t.remove(), 3500);
+  }
+
+  // ------------------------------------------------------------------ messages
+  function ingest(msg) {
+    const evs = (msg.events || []).filter((e) => e.i > S.lastEv);
+    const trs = (msg.trace || []).filter((r) => r.i > S.lastTr);
+    if (evs.length) S.lastEv = evs[evs.length - 1].i;
+    if (trs.length) S.lastTr = trs[trs.length - 1].i;
+    for (const e of evs) chatFromEvent(e);
+    for (const r of trs) chatFromTrace(r);
+    const items = [];
+    for (const e of evs) { const f = fmtEvent(e); if (f) items.push({ t: e.t, src: f[0], text: f[1], cls: f[2], o: 0, key: e.type }); }
+    for (const r of trs) { const f = fmtTrace(r); if (f) items.push({ t: r.t, src: f[0], text: f[1], cls: f[2], o: 1, key: r.type, uid: r.id }); }
+    S.traceAll.push(...trs);
+    for (const r of trs) {
+      if (r.type === "classified") S.hud.label = r;
+      else if (r.type === "observation") S.hud.noticed = r;
+    }
+    let callsChanged = false;
+    for (const c of msg.calls || []) { S.calls[c.n] = c; callsChanged = true; }
+    const pending = Object.values(S.calls).some((c) => c.status === "pending");
+    if (callsChanged || pending) renderCalls();
+    if (S.openCall && callsChanged && (msg.calls || []).some((c) => c.n === S.openCall)) openCall(S.openCall);
+    items.sort((a, b) => a.t - b.t || a.o - b.o);
+    if (items.length) appendFeed(items);
+    S.state = msg;
+    setThinking(!!(msg.runtime && msg.runtime.thinking));
+    V.memory.rows(trs);
+    if (msg.system1) S.s1 = msg.system1;
+    renderAlways(msg);
+    renderSpace();
+  }
+  function onMessage(ev) {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "init") {
+      S.meta = msg.meta || S.meta; S.map = msg.map; if (S.meta && S.meta.system1) S.s1 = S.meta.system1; S.layout = msg.layout; S.config = msg.config; S.error = msg.error;
+      S.lastEv = -1; S.lastTr = -1; S.chatByUid = {}; S.lastRobotMsg = {};
+      S.calls = {}; S.traceAll = []; S.callsCleared = 0; S.callsLog = msg.calls_log; S.hud = { label: null, noticed: null }; closeDrawer();
+      $("chat").innerHTML = ""; $("feed").innerHTML = ""; $("calls").innerHTML = "";
+      $("loading").hidden = true;
+      VB = { ...FULL }; S.fitted = true;
+      drawStatic(); requestAnimationFrame(refit); V.plan.reset(msg.layout); V.plan.robotMap(msg.robot_map, true); V.memory.reset();
+      ingest(msg); fillControls(); banner();
+    } else if (msg.type === "frame") {
+      if (S.layout) { V.plan.robotMap(msg.robot_map, false); ingest(msg); }
+    } else if (msg.type === "camera") {
+      setCamera(msg.which, msg.jpeg);
+    } else if (msg.type === "loading") {
+      if (msg.meta) { S.meta = msg.meta; }
+      $("loading").hidden = false; $("loading").textContent = `Loading ${msg.scene}…`;
+    } else if (msg.type === "system1") {
+      S.s1 = { status: msg.status, detail: msg.detail };
+      if (msg.status === "error") toast("System 1: " + (msg.detail || "error"));
+    } else if (msg.type === "memory") {
+      V.memory.memory(msg);
+      if (S.space === "brain") renderSpace();
+    } else if (msg.type === "notice") toast(msg.text);
+  }
+
+  // ------------------------------------------------------------------ model calls
+  const PURPOSE = { classify: "classify", next_action: "next step", route: "System 1 label", observe: "System 1 notice" };
+  function callSummary(c) {
+    if (c.status === "pending") return `waiting for the model… ${S.state ? Math.max(0, S.state.t - c.t_start).toFixed(1) : ""} s`;
+    if (c.status === "error") return `ERROR ${c.error}`;
+    const r = c.response || {};
+    if (c.purpose === "route") return r.args ? `${c.input.replace(/^USER: /, "")} → ${r.args.kind} (${Math.round((r.args.confidence || 0) * 100)}%)` : `${c.input.replace(/^USER: /, "")} → no label in time: the planner classifies`;
+    if (c.purpose === "observe") { const it = (r.args || {}).items || []; return it.length ? it.map((o) => o.what).join(" · ") : "nothing new"; }
+    if (c.purpose === "classify") return `"${lastUtterance(c.input)}" → ${r.args ? r.args.kind : "?"}`;
+    return `${r.tool}(${args(r.args)})`;
+  }
+  function lastUtterance(input) {
+    const m = input.match(/LATEST UTTERANCE\n([^\n]*)/);
+    return m ? m[1] : "";
+  }
+  function renderCalls() {
+    const list = Object.values(S.calls).filter((c) => c.n > S.callsCleared).sort((a, b) => a.n - b.n);
+    $("calls-count").textContent = Object.keys(S.calls).length;
+    $("calls-note").innerHTML = `Every time the runtime asks the brain something, it shows up here. Click a row to see the exact text the model received and what it answered.` +
+      (S.callsLog ? ` Also saved as plain text in <code>${esc(S.callsLog)}</code>.` : "");
+    const box = $("calls-scroll");
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    $("calls").innerHTML = list.map((c) => {
+      const stale = c.version_end != null && c.version_end !== c.version_start;
+      const cls = c.via === "rule" ? "rule" : c.status;
+      const x = c.via === "rule" ? "no model call" :
+        (c.latency_s != null ? `${c.latency_s.toFixed(1)} s · ${(c.tokens_in || 0).toLocaleString()} in / ${c.tokens_out || 0} out` : "");
+      return `<button type="button" class="callrow ${cls}" data-n="${c.n}">
+        <span class="n">#${c.n}</span><span class="n">${c.t_start.toFixed(1)} s</span>
+        <span class="p">${PURPOSE[c.purpose]} · v${c.version_start}${c.via === "rule" ? '<span class="badge rule">rule</span>' : ""}</span>
+        <span class="r">${esc(callSummary(c))}${stale ? '<span class="badge stale">stale on return</span>' : ""}</span>
+        <span class="x">${esc(x)}</span></button>`;
+    }).join("") || `<div class="empty">No model calls yet. Say something to the robot.</div>`;
+    for (const b of $("calls").querySelectorAll(".callrow")) b.addEventListener("click", () => openCall(+b.dataset.n));
+    if (stick) box.scrollTop = box.scrollHeight;
+  }
+  function highlightInput(text) {
+    return esc(text).split("\n").map((line) =>
+      /^[A-Z]{2,}( [A-Z]+)*( \(.*\))?$/.test(line.trim()) ? `<span class="hd">${line}</span>` :
+      line.replace(/(&lt;- not replied to yet|\(late: from an earlier request\)|UNKNOWN \(look first\)|\(unverified\))/g, '<span class="flag">$1</span>')
+    ).join("\n");
+  }
+  function afterAnswer(c) {
+    if (c.t_end == null) return [];
+    const keep = new Set(["decision", "stale_decision", "held_for_reconcile", "rejected", "started", "say_queued",
+                          "classified", "correction", "stop", "reconcile_start"]);
+    return S.traceAll.filter((r) => r.t >= c.t_end - 0.01 && r.t <= c.t_end + 0.3 && keep.has(r.type)).slice(0, 5);
+  }
+  function openCall(n) {
+    const c = S.calls[n]; if (!c) return;
+    S.openCall = n;
+    const stale = c.version_end != null && c.version_end !== c.version_start;
+    const title = c.via === "rule" ? `#${c.n} · classified by a rule, no model call` :
+      c.via === "system1" ? `#${c.n} · System 1: ${c.purpose === "route" ? "label a message" : "notice what the camera shows"}` :
+      `#${c.n} · ${c.purpose === "classify" ? "classify what you said" : "choose the next step"}`;
+    $("d-title").textContent = title;
+    let h = `<div class="facts">
+      <span class="pill">sim ${c.t_start.toFixed(2)} → ${c.t_end != null ? c.t_end.toFixed(2) : "…"} s</span>
+      ${c.latency_s != null && c.via !== "rule" ? `<span class="pill">${c.latency_s.toFixed(2)} s wall time</span>` : ""}
+      ${c.tokens_in ? `<span class="pill">${c.tokens_in.toLocaleString()} tokens in · ${c.tokens_out} out</span>` : ""}
+      <span class="pill v">request v${c.version_start}${stale ? " → v" + c.version_end : ""}</span>
+      ${stale ? `<span class="pill paused">stale on return</span>` : ""}
+    </div>`;
+    if (c.via === "rule") h += `<div class="explain">agent/model.py labels some messages with a simple rule instead of asking the model, which saves a 1–2 s round trip: "stop", "go ahead" while paused, and short answers right after the robot asked a question.</div>`;
+    if (stale) h += `<div class="explain">You changed the request while this call was in flight (v${c.version_start} → v${c.version_end}). The runtime checks the version when an answer comes back and throws this one away, because it was decided for the old request. That check is <code>_stale</code> in agent/harness.py.</div>`;
+    h += `<div class="sec"><h4>The answer</h4>`;
+    if (c.status === "pending") h += `<div class="answer">waiting for the model…</div>`;
+    else if (c.status === "error") h += `<div class="answer" style="color:var(--bad)">${esc(c.error)}</div>`;
+    else {
+      const r = c.response;
+      h += `<div class="answer">${esc(r.tool)}(${esc(Object.entries(r.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", "))})</div>`;
+      if (r.text) h += `<p>Text the model wrote next to the tool call: “${esc(r.text)}”</p>`;
+      h += `<p>${c.purpose === "classify" ? "The model can only answer by calling the classify tool, so the answer is always one of the kinds." : "The model is forced to call exactly one tool. The runtime then checks it against its rules before anything moves."}</p>`;
+    }
+    h += `</div>`;
+    const after = afterAnswer(c);
+    if (after.length) {
+      h += `<div class="sec"><h4>What the runtime did with it</h4><pre>${after.map((r) => { const f = fmtTrace(r); return `${r.t.toFixed(2)}  ${f ? f[1] : r.type}`; }).map(esc).join("\n")}</pre></div>`;
+    }
+    h += `<div class="sec"><h4>Input: the text the runtime built for this call</h4>
+      <p>${c.via === "rule" ? "Only the utterance text was examined." : "The runtime renders its BrainInput (map, conversation, belief, recent actions, what's running, any NOTE) into this text on every call. Apart from the system prompt below, this is everything the model knows. It never sees the simulator's ground truth."}</p>
+      <pre>${highlightInput(c.input)}</pre></div>`;
+    if (c.system) h += `<div class="sec"><details><summary>System prompt (the same on every ${c.purpose === "classify" ? "classify" : "next-step"} call)</summary><pre>${esc(c.system)}</pre></details></div>`;
+    if (c.tool_schemas && c.tool_schemas.length) h += `<div class="sec"><details><summary>Tools offered: ${esc(c.tools.join(", "))}</summary><pre>${esc(JSON.stringify(c.tool_schemas, null, 2))}</pre></details></div>`;
+    $("d-body").innerHTML = h;
+    $("drawer").hidden = false; $("d-body").scrollTop = 0;
+  }
+  function closeDrawer() { $("drawer").hidden = true; S.openCall = null; }
+  function callAsText(c) {
+    const r = c.response || {};
+    return [`#${c.n} ${c.purpose}${c.via === "rule" ? " (by rule)" : ""}  sim ${c.t_start}->${c.t_end} s  request v${c.version_start}${c.version_end !== c.version_start ? " -> v" + c.version_end : ""}`,
+      "---- SYSTEM PROMPT", c.system || "(none)", "---- INPUT", c.input, "---- TOOLS OFFERED: " + (c.tools || []).join(", "),
+      "---- RESPONSE", c.error ? "ERROR " + c.error : `${r.tool}(${JSON.stringify(r.args || {})})${r.text ? "\ntext: " + r.text : ""}`].join("\n");
+  }
+
+  // ------------------------------------------------------------------ map zoom and pan
+  function applyVB() {
+    const svg = $("map");
+    svg.setAttribute("viewBox", `${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
+    const box = svg.getBoundingClientRect();
+    const scale = box.width > 0 && box.height > 0 ? Math.max(VB.w / box.width, VB.h / box.height) : 1;
+    for (const id of ["human-marker", "robot-marker", "robot-label-marker"]) {
+      const marker = $(id);
+      if (marker) marker.setAttribute("transform", `scale(${scale})`);
+    }
+  }
+  function toSvg(cx, cy) { const svg = $("map"), pt = svg.createSVGPoint(); pt.x = cx; pt.y = cy; return pt.matrixTransform(svg.getScreenCTM().inverse()); }
+  function zoomAt(x, y, f) {
+    const w = Math.min(Math.max(VB.w * f, 80), 1000), k = w / VB.w;
+    VB = { x: x - (x - VB.x) * k, y: y - (y - VB.y) * k, w, h: VB.h * k };
+    S.fitted = false;
+    applyVB();
+  }
+  // The house as big as the pane allows: its rooms, spots and you, padded, stretched to the pane's shape.
+  function fitHouse() {
+    const box = $("map").getBoundingClientRect(), lay = S.layout, pts = [];
+    S.fitted = true;
+    if (lay) {
+      for (const r of Object.values(lay.rooms || {})) for (const [x, z] of r.polygon || []) pts.push(uv(x, z));
+      for (const k of Object.values(lay.keypoints || {})) pts.push(uv(k.x, k.z));
+      if (lay.human) pts.push(uv(lay.human.x, lay.human.z));
+    }
+    if (!pts.length || !box.width || !box.height) { VB = { ...FULL }; applyVB(); return; }
+    const pad = 28, xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    let x = Math.min(...xs) - pad, y = Math.min(...ys) - pad - 30, w = Math.max(...xs) + pad - x, h = Math.max(...ys) + pad - y;
+    const ar = box.width / box.height;
+    if (w / h < ar) { const nw = h * ar; x -= (nw - w) / 2; w = nw; } else { const nh = w / ar; y -= (nh - h) / 2; h = nh; }
+    const inside = (v, len, max) => (len <= max ? Math.min(Math.max(v, 0), max - len) : (max - len) / 2);   // no dark strip past the render
+    VB = { x: inside(x, w, FULL.w), y: inside(y, h, FULL.h), w, h };
+    applyVB();
+  }
+  const refit = () => (S.fitted ? fitHouse() : applyVB());
+  function zoomCenter(f) { zoomAt(VB.x + VB.w / 2, VB.y + VB.h / 2, f); }
+  (() => {
+    const svg = $("map");
+    svg.addEventListener("wheel", (e) => { e.preventDefault(); const p = toSvg(e.clientX, e.clientY); zoomAt(p.x, p.y, Math.exp(e.deltaY * 0.0015)); }, { passive: false });
+    let drag = null;
+    svg.addEventListener("pointerdown", (e) => { drag = { cx: e.clientX, cy: e.clientY, vb: { ...VB }, a: svg.getScreenCTM().a }; svg.setPointerCapture(e.pointerId); svg.classList.add("dragging"); });
+    svg.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      if (S.follow) { S.follow = false; $("chk-follow").checked = false; }
+      VB.x = drag.vb.x - (e.clientX - drag.cx) / drag.a; VB.y = drag.vb.y - (e.clientY - drag.cy) / drag.a; S.fitted = false; applyVB();
+    });
+    const end = () => { drag = null; svg.classList.remove("dragging"); };
+    svg.addEventListener("pointerup", end); svg.addEventListener("pointercancel", end);
+  })();
+
+  // ------------------------------------------------------------------ feed pane: tabs, clear
+  function setTab(tab) {
+    S.tab = tab;
+    $("tab-feed").setAttribute("aria-selected", String(tab === "feed"));
+    $("tab-calls").setAttribute("aria-selected", String(tab === "calls"));
+    $("feed-scroll").hidden = tab !== "feed"; $("calls-scroll").hidden = tab !== "calls";
+    $("filters").hidden = tab !== "feed";
+    if (tab === "calls") renderCalls();
+  }
+
+  function connect() {
+    const ws = new WebSocket(`ws://${location.host}/ws`);
+    S.ws = ws;
+    ws.onmessage = onMessage;
+    ws.onopen = () => {
+      banner();
+      setTimeout(() => { if (!S.layout && ws.readyState === 1) ws.send(JSON.stringify({ type: "hello" })); }, 2500);
+    };
+    ws.onclose = () => {
+      $("banner-slot").innerHTML = `<div class="banner">Lost the connection to the server. Retrying… (is <code>python ui/server.py</code> still running?)</div>`;
+      setTimeout(connect, 2000);
+    };
+  }
+  $("sel-persona").addEventListener("change", (e) => {
+    e.target.classList.toggle("on", e.target.value !== "off");
+    wsSend({ type: "persona", level: e.target.value });
+  });
+
+  function send(text) {
+    text = (text || "").trim();
+    if (!text || !S.ws || S.ws.readyState !== 1) return;
+    S.ws.send(JSON.stringify({ type: "say", text }));
+  }
+
+  $("say-form").addEventListener("submit", (e) => { e.preventDefault(); send($("msg").value); $("msg").value = ""; $("msg").focus(); });
+  $("btn-stop").addEventListener("click", () => send("stop"));
+  $("btn-forget").addEventListener("click", () => {
+    if (!S.ws || S.ws.readyState !== 1) return;
+    S.ws.send(JSON.stringify({ type: "reset", forget: true, scene: $("sel-scene").value, model: $("sel-model").value }));
+  });
+  $("btn-reset").addEventListener("click", () => {
+    if (!S.ws || S.ws.readyState !== 1) return;
+    S.ws.send(JSON.stringify({ type: "reset", scene: $("sel-scene").value, model: $("sel-model").value }));
+  });
+  $("sel-scene").addEventListener("change", () => { if (S.meta) renderWorldCard($("sel-scene").value); });
+  window.addEventListener("resize", refit);
+  $("chk-belief").addEventListener("change", (e) => { S.showBelief = e.target.checked; drawDynamic(); });
+  $("z-in").addEventListener("click", () => zoomCenter(0.7));
+  $("z-out").addEventListener("click", () => zoomCenter(1 / 0.7));
+  $("z-fit").addEventListener("click", () => { S.follow = false; $("chk-follow").checked = false; fitHouse(); });
+  $("chk-follow").addEventListener("change", (e) => { S.follow = e.target.checked; if (S.follow) { S.fitted = false; if (VB.w > 400) zoomCenter(0.5); } drawDynamic(); });
+  $("tab-feed").addEventListener("click", () => setTab("feed"));
+  $("tab-calls").addEventListener("click", () => setTab("calls"));
+  $("chk-progress").addEventListener("change", (e) => $("chat").classList.toggle("hide-progress", !e.target.checked));
+  $("btn-clear-chat").addEventListener("click", () => { $("chat").innerHTML = ""; S.chatByUid = {}; S.lastRobotMsg = {}; });
+  $("btn-clear-bottom").addEventListener("click", () => {
+    if (S.tab === "feed") $("feed").innerHTML = "";
+    else { S.callsCleared = Math.max(0, ...Object.keys(S.calls).map(Number)); renderCalls(); }
+  });
+  $("d-close").addEventListener("click", closeDrawer);
+  // How it works: a static picture of the system, full screen
+  function showHow(on) {
+    $("howto").hidden = !on;
+    if (on) V.diagram.render($("diagram"), { planner: ((S.meta && S.meta.models) || []).find(([v]) => S.config && v === S.config.model), system1: S.s1 });
+  }
+  $("btn-how").addEventListener("click", () => showHow($("howto").hidden));
+  $("how-close").addEventListener("click", () => showHow(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("howto").hidden) showHow(false); else closeDrawer();
+  });
+  $("d-copy").addEventListener("click", async () => {
+    const c = S.calls[S.openCall]; if (!c) return;
+    try { await navigator.clipboard.writeText(callAsText(c)); toast("Copied"); } catch { toast("Copy failed; select the text instead"); }
+  });
+  for (const cb of $("filters").querySelectorAll("input")) {
+    cb.addEventListener("change", () => $("feed").classList.toggle("hide-" + cb.dataset.src, !cb.checked));
+  }
+  // workspaces and step mode
+  V.plan.mount($("plan-box"));
+  V.memory.mount($("mem-box"), $("proc-graph"), $("proc-guide"));
+  for (const b of document.querySelectorAll(".wstabs [data-go]")) b.addEventListener("click", () => setSpace(b.dataset.go));
+  $("rtabs").addEventListener("click", (e) => { const b = e.target.closest("[data-rtab]"); if (b) setRtab(b.dataset.rtab); });
+  $("chk-step").addEventListener("change", (e) => wsSend({ type: "step", mode: e.target.checked ? "on" : "off" }));
+  $("btn-step").addEventListener("click", () => wsSend({ type: "step", mode: "next" }));
+  $("now").addEventListener("click", (e) => { if (e.target.closest("[data-act=step]")) wsSend({ type: "step", mode: "next" }); });
+  document.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+    const go = { "1": "world", "2": "brain" }[e.key];
+    if (go) { e.preventDefault(); setSpace(go); }
+    if (e.key === "h" || e.key === "H") showHow($("howto").hidden);
+    if (e.key === "n" || e.key === "N") { const st = S.state && S.state.runtime && S.state.runtime.step; if (st && st.waiting) wsSend({ type: "step", mode: "next" }); }
+  });
+  let saved = {};
+  try { saved = { space: localStorage.getItem("worldline.space"), rtab: localStorage.getItem("worldline.rtab") }; } catch { /* private window: fine */ }
+  setRtab(["now", "state", "memory", "proc"].includes(saved.rtab) ? saved.rtab : "now");
+  setSpace(saved.space === "brain" ? "brain" : "world");
+  connect();
+})();
+</script>
+</body>
+</html>
