@@ -114,9 +114,9 @@ svg.bd { display: block; width: 100%; min-width: 820px; height: auto; color: var
   <h1>Worldline G1 Architecture</h1>
   <p class="lede">How GEAR-SONIC, Isaac Sim, the ProcTHOR house and our drive API fit together to make a simulated Unitree G1 walk through a home, and where Worldline and GR00T plug in next.</p>
   <div class="meta">
-    <span>Revision <b>r4</b></span>
+    <span>Revision <b>r5</b></span>
     <span>Updated <b>2026-09-28</b></span>
-    <span>Milestone <b>M1 · SONIC G1 walking in a house</b></span>
+    <span>Milestone <b>M1 verified · M2 in progress</b></span>
     <span>Box <b>Brev ludo-g1-brev2 · 1× L40S</b></span>
   </div>
 </header>
@@ -308,7 +308,7 @@ flowchart TB
         <li>Real-time pacer, lowstate heartbeat, elastic band for hand-over</li>
         <li>Ground-truth server and head/chase cameras</li>
       </ul>
-      <span class="pill ok">Working alone · RTF 0.97–1.0</span>
+      <span class="pill ok">Verified · RTF 0.99 mean</span>
     </article>
     <article class="proc" style="--c:var(--p2)">
       <h3>P2 · gear_sonic_deploy</h3>
@@ -318,7 +318,7 @@ flowchart TB
         <li>Kinematic planner (10 Hz) plus SONIC encoder/decoder policy (50 Hz)</li>
         <li>Runs on wall-clock time; exits if lowstate is absent for 500 ms</li>
       </ul>
-      <span class="pill ok">Walks on a quiet box · 3/3 reference runs</span>
+      <span class="pill ok">Walks in the house · 0 falls in 9 runs</span>
     </article>
     <article class="proc" style="--c:var(--p3)">
       <h3>P3 · wl-body</h3>
@@ -328,7 +328,7 @@ flowchart TB
         <li>A* on the 5 cm occupancy grid, pure pursuit, stuck and arrival detection</li>
         <li>SonicMux: byte-exact port of upstream message framing; converts world directions to SONIC's planner frame</li>
       </ul>
-      <span class="pill ok">Written · tested on fakes</span>
+      <span class="pill ok">Verified · go_to 27/27 legs</span>
     </article>
     <article class="proc" style="--c:var(--p1)">
       <h3>Scene · ProcTHOR houses</h3>
@@ -348,7 +348,7 @@ flowchart TB
         <li>Recorder: per-view mp4, 2×2 composite with overlays, contact sheet, telemetry</li>
         <li>Browser console with live views, telemetry and drive buttons, through the SSH tunnel</li>
       </ul>
-      <span class="pill todo">Building</span>
+      <span class="pill ok">Built · hooked with --viz</span>
     </article>
     <article class="proc" style="--c:var(--future)">
       <h3>Next · Worldline + GR00T</h3>
@@ -358,7 +358,7 @@ flowchart TB
         <li>GR00T N1.7 sends SONIC motion tokens through the same SonicMux</li>
         <li>System 1 reads the head camera stream</li>
       </ul>
-      <span class="pill todo">After M1</span>
+      <span class="pill warn">M2a porting now</span>
     </article>
   </div>
 </section>
@@ -454,7 +454,7 @@ sequenceDiagram
         <tr><td>Planner resend</td><td class="num">50 Hz</td><td>P3</td><td>unchanged commands reuse identical values to avoid re-plans</td></tr>
         <tr><td><code>gt.pose</code></td><td class="num">≥50 Hz</td><td>P1</td><td>stale after 0.5 s: active op fails <code>pose_stale</code></td></tr>
         <tr><td>Head camera</td><td class="num">30 Hz</td><td>P1</td><td>640×480, gear_sonic sensor_server format</td></tr>
-        <tr><td>Real-time factor</td><td class="num">0.97–1.0</td><td>P1</td><td>measured: empty scene, camera on; house + stack not yet measured</td></tr>
+        <tr><td>Real-time factor</td><td class="num">0.99</td><td>P1</td><td>full stack in the house with cameras; worst 1 s window 0.74–0.83 under light load</td></tr>
       </tbody>
     </table>
   </div>
@@ -483,6 +483,7 @@ sequenceDiagram
 <section>
   <h2>Status log</h2>
   <div class="log">
+    <div class="entry"><time>2026-09-29</time><p><b>r5. M1 verified.</b> Independent verification from a clean state passed E1–E7 and adversarial checks. Across 9 integrated runs: 0 falls, go_to 27/27 legs through kitchen, bedroom and living room (position error 3–16 cm, heading 0.4–4.9°), walk 3.3–3.6 m, strafe 1.5–1.7 m, stop 0.9–1.2 s, 90° turns within 0.5–5°. Proof of SONIC walking: rt/lowcmd 499 Hz with leg targets changing at 50 Hz, planner mode in the deploy log, alternating single support, no root-pose writes. Up in 58 s, down in 6 s. Next: M2 (Worldline on this stack) and Nav2 as the go_to backend.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r4.</b> Walking diagnosis: SONIC walks in its MuJoCo reference on a quiet box (3/3 runs, all checks: 2.7 m forward at ~0.45 m/s, heading error 2–3°, no falls). Falls came from CPU/GPU contention by other agents' Isaac jobs, plus harness bugs (measuring across fall-reset teleports, commands from measured yaw, one 90° turn step). Fixed in the body layer: zero-movement commands go IDLE and turns step at most 30° from the commanded facing. Official NVIDIA G1 GR00T checkpoints (Arena, with navigation) found; an Arena spike runs on a second L40S box; Nav2 is being added as the navigation backend.</p></div>
     <div class="entry"><time>2026-09-28</time><p><b>r3.</b> Added Navigation and Models sections. SONIC reference run after the band hand-over fix: stand 15 s, strafe 1.1 m, turn in place and stop mid-walk pass with no falls; walking forward still falls after 0.4 m, heading drifts 22°, and the planner-timeout-to-IDLE check fails. An independent diagnosis is running.</p></div>
     <div class="entry"><time>2026-09-28</time><p><b>r2.</b> Added the block diagram. Clarified MuJoCo's role: NVIDIA's own SONIC simulator, used only as a test stand-in for Isaac so controller bugs and Isaac-bridge bugs can be told apart. It is not part of the M1 stack.</p></div>
