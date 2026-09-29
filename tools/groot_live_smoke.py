@@ -28,6 +28,7 @@ import asyncio
 import json
 import math
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -38,14 +39,35 @@ SAVE_FRAMES = (1, 6, 11)
 
 
 class ChainRecorder:
-    """Wraps groot_arms' helpers: every observation (frame + state) and every chunk that leaves groot/."""
+    """Wraps groot_arms' helpers: every observation (frame + state) and every chunk that leaves groot/.
 
-    def __init__(self, out: Path, save_frames: tuple[int, ...] = SAVE_FRAMES):
-        self.out, self.save_frames = out, save_frames
+    Frames: without `session`, observations number 1, 2, ... and `save_frames` picks which to save (frame_NN.png).
+    With `session` set (G2 mode), each session numbers its own and every `every`-th one from its first is saved as
+    frames/<session>_obsNN.png. The executor's warm-up observation is never counted (it uses build_obs_warmup)."""
+
+    def __init__(self, out: Path, save_frames: tuple[int, ...] = SAVE_FRAMES, every: int = 5):
+        self.out, self.save_frames, self.every = out, save_frames, every
         self.n_obs = 0
+        self.session: str | None = None
+        self.n_sess: dict[str, int] = {}
         self.obs: list[dict] = []
         self.chunks: list[dict] = []
         self.frames: list[str] = []
+
+    def _save_frame(self, frame) -> None:
+        from PIL import Image
+        if self.session is None:
+            if self.n_obs not in self.save_frames:
+                return
+            p = self.out / f"frame_{self.n_obs:02d}.png"
+        else:
+            k = self.n_sess[self.session]
+            if (k - 1) % self.every:
+                return
+            (self.out / "frames").mkdir(exist_ok=True)
+            p = self.out / "frames" / f"{self.session}_obs{k:02d}.png"
+        Image.fromarray(np.asarray(frame, dtype=np.uint8)).save(p)
+        self.frames.append(str(p.relative_to(self.out)))
 
     def wrap(self, h: dict) -> dict:
         build, to_chunk = h["build_obs"], h["to_chunk"]
@@ -53,26 +75,28 @@ class ChainRecorder:
         def build_obs(frame, body_q, lh, rh, prompt, **kw):
             self.n_obs += 1
             n = self.n_obs
-            if n in self.save_frames:
-                from PIL import Image
-                p = self.out / f"frame_{n:02d}.png"
-                Image.fromarray(np.asarray(frame, dtype=np.uint8)).save(p)
-                self.frames.append(p.name)
-            self.obs.append({"n": n, "t": time.monotonic(), "body_q": [round(float(v), 4) for v in body_q],
+            if self.session is not None:
+                self.n_sess[self.session] = self.n_sess.get(self.session, 0) + 1
+            self._save_frame(frame)
+            self.obs.append({"n": n, "session": self.session, "t": time.monotonic(),
+                             "body_q": [round(float(v), 4) for v in body_q],
                              "left_hand_q": [round(float(v), 4) for v in lh],
-                             "right_hand_q": [round(float(v), 4) for v in rh]})
+                             "right_hand_q": [round(float(v), 4) for v in rh], "prompt": prompt})
             return build(frame, body_q, lh, rh, prompt, **kw)
 
         def chunk(action, t0_mono, **kw):
             c = to_chunk(action, t0_mono=t0_mono, **kw)
             self.chunks.append({"t0": float(t0_mono), "t_rx": time.monotonic(), "n_obs": self.n_obs,
+                                "session": self.session or "",
                                 "raw": {k: np.asarray(v, dtype=np.float32)[0] for k, v in action.items()},
                                 "upper_body": np.asarray(c.upper_body, dtype=np.float32),
                                 "left_hand": np.asarray(c.left_hand, dtype=np.float32),
                                 "right_hand": np.asarray(c.right_hand, dtype=np.float32)})
             return c
 
-        return {**h, "build_obs": build_obs, "to_chunk": chunk}
+        # the executor's warm-up get_action (a black frame at zero state) builds its observation with the
+        # unwrapped function: it is not evidence (wave 1's frame_01 was that black frame)
+        return {**h, "build_obs": build_obs, "build_obs_warmup": build, "to_chunk": chunk}
 
     def save(self) -> dict:
         if not self.chunks:
@@ -80,6 +104,7 @@ class ChainRecorder:
         keys = sorted(self.chunks[0]["raw"])
         arr = {f"raw_{k}": np.stack([c["raw"][k] for c in self.chunks]) for k in keys}
         arr.update(t0=np.array([c["t0"] for c in self.chunks]), t_rx=np.array([c["t_rx"] for c in self.chunks]),
+                   session=np.array([c["session"] for c in self.chunks]),
                    upper_body_wire=np.stack([c["upper_body"] for c in self.chunks]),
                    left_hand=np.stack([c["left_hand"] for c in self.chunks]),
                    right_hand=np.stack([c["right_hand"] for c in self.chunks]))
@@ -219,8 +244,8 @@ async def main_async(a: argparse.Namespace) -> dict:
         receipt = robot.halt()
         o2 = await task
         s2 = exe.last_session
-        after = [m["t"] for m in (ref_body.log if ref_body is not None else [])
-                 if m["kind"] == "chunk" and m["session_id"] == "man-smoke-halt" and m["reply"].get("ok")
+        after = [m["t"] for m in (ref_body.log if ref_body is not None else [])       # every chunk SENT after the
+                 if m["kind"] == "chunk" and m["session_id"] == "man-smoke-halt"         # ack, whatever the reply
                  and s2 is not None and s2.t_ack is not None and m["t"] > s2.t_ack]
         rep["halted_session"] = {"status": o2.status, "reason": o2.reason, "receipt": receipt,
                                  "terminal_after_halt_s": round(time.monotonic() - t_h, 3),
@@ -265,6 +290,420 @@ async def main_async(a: argparse.Namespace) -> dict:
     return rep
 
 
+# ================================================================================================ G2 (M2b wave 2)
+G2_PLAN = "NCNHNCHNCH"          # 10 sessions: N runs to its end, C is cancelled, H is halted on the body's lane
+N_ARM = 14                      # the arm joints of the 17-D upper body (waist excluded)
+
+
+class RecordingArm:
+    """ArmPort wrapper around BodyArmPort: every message sent to wl-body with its send and reply times and the
+    body's answer, WHATEVER the answer (the fence tests count every chunk sent after an ack, accepted or not)."""
+
+    def __init__(self, inner: Any):
+        self.inner = inner
+        self.lock = threading.Lock()
+        self.log: list[dict] = []
+
+    def arm(self, args: dict, op_id: str | None = None) -> dict:
+        t0 = time.monotonic()
+        rep = self.inner.arm(args, op_id)
+        t1 = time.monotonic()
+        kind = ("end" if args.get("end") else "keepalive" if args.get("keepalive") else "chunk" if "chunk" in args
+                else "release" if args.get("release") else "start")
+        ch = args.get("chunk") or {}
+        d = rep.get("data") if isinstance(rep.get("data"), dict) else {}
+        with self.lock:
+            self.log.append({"t_send": t0, "t_reply": t1, "kind": kind, "session_id": args.get("session_id"),
+                             "seq": ch.get("seq"), "t0_mono": ch.get("t0_mono"), "ok": bool(rep.get("ok")),
+                             "state": rep.get("state"), "error": rep.get("error"), "why": d.get("why"),
+                             "dropped": d.get("dropped")})
+        return rep
+
+    def subscribe(self, cb):
+        return self.inner.subscribe(cb)
+
+    def supports_chunk(self):
+        return self.inner.supports_chunk()
+
+    def close(self) -> None:
+        self.inner.close()
+
+    def of(self, sid: str) -> list[dict]:
+        with self.lock:
+            return [m for m in self.log if m["session_id"] == sid]
+
+
+class TrajRecorder(threading.Thread):
+    """The measured upper body (g1_debug body_q[12:29], MuJoCo order: waist 3, left arm 7, right arm 7) and both
+    Dex3 hands, every new g1_debug sample while a session is tagged."""
+
+    def __init__(self, sensors: Any):
+        super().__init__(daemon=True, name="g2-traj")
+        self.sensors = sensors
+        self.session: str | None = None
+        self.samples: dict[str, list[tuple]] = {}
+        self._run = True
+        self._last: float | None = None
+
+    def run(self) -> None:
+        while self._run:
+            d, t = self.sensors.debug_state()
+            sid = self.session
+            if d is not None and sid and t != self._last and d.get("body_q") is not None:
+                self._last = t
+                q = [float(v) for v in d["body_q"]]
+                self.samples.setdefault(sid, []).append(
+                    (t, q[12:29], [float(v) for v in d.get("left_hand_q") or [0.0] * 7],
+                     [float(v) for v in d.get("right_hand_q") or [0.0] * 7]))
+            time.sleep(0.004)
+
+    def stop(self) -> None:
+        self._run = False
+
+    def arrays(self, sid: str) -> dict[str, np.ndarray]:
+        rows = self.samples.get(sid) or []
+        if not rows:
+            return {}
+        return {"t": np.array([r[0] for r in rows]), "q17": np.array([r[1] for r in rows]),
+                "left_hand": np.array([r[2] for r in rows]), "right_hand": np.array([r[3] for r in rows])}
+
+
+def ego_view_check(world: Any, sensors: Any, object_id: str, out_png: Path | None, consumer: str = "g2-view",
+                   settle_s: float = 0.5) -> dict:
+    """The GR00T view check the W2.5 bar uses, from P1's instance segmentation of ego_view (docs/contracts/p1_m2b.md
+    §7): the target's pixels and bbox, and whether its bbox centre sits below the image's upper third (v >= 160 of
+    480: Arena's training frames show the apple in the lower part). Saves the frame it judged."""
+    world.enable_camera("ego_view", True, consumer=consumer, ttl_s=10.0, hz=30.0)
+    try:
+        time.sleep(settle_s)
+        sid = world.map.objects[object_id].scene_id
+        rep = world.rpc.call("detections", timeout_s=3.0, camera="ego_view", min_px=1, bbox=True)
+        mine = [d for d in rep.get("detections") or [] if str(d.get("id")) == str(sid)]
+        out: dict[str, Any] = {"camera": "ego_view", "method": rep.get("method"), "object": object_id,
+                               "render_seq": rep.get("render_seq"), "cam_pose_wl": rep.get("cam_pose_wl")}
+        if mine:
+            d = mine[0]
+            u0, v0, u1, v1 = (float(x) for x in d["bbox"])
+            uc, vc = (u0 + u1) / 2.0, (v0 + v1) / 2.0
+            out.update(px=int(d["px"]), bbox=[int(u0), int(v0), int(u1), int(v1)], centre_uv=[round(uc, 1),
+                       round(vc, 1)], dist_m=d.get("dist_m"), lower_two_thirds=bool(vc >= 160.0),
+                       ok=bool(d["px"] >= 200 and vc >= 160.0))
+        else:
+            out.update(px=0, bbox=None, centre_uv=None, lower_two_thirds=False, ok=False)
+        if out_png is not None:
+            frame, _ = sensors.ego_frame()
+            if frame is not None:
+                from PIL import Image, ImageDraw
+                img = Image.fromarray(np.asarray(frame, dtype=np.uint8))
+                dr = ImageDraw.Draw(img)
+                dr.line([(0, 160), (639, 160)], fill=(255, 255, 0))
+                if out.get("bbox"):
+                    dr.rectangle(out["bbox"], outline=(255, 0, 0), width=2)
+                img.save(out_png)
+                out["frame"] = out_png.name
+        return out
+    finally:
+        world.enable_camera("ego_view", False, consumer=consumer)
+
+
+def _steps(q: np.ndarray) -> np.ndarray:
+    """Largest arm-joint change between consecutive measured samples (rad), per sample."""
+    if len(q) < 2:
+        return np.zeros(0)
+    arms = np.asarray(q)[:, 3:]                                  # drop the waist: 14 arm joints
+    return np.abs(np.diff(arms, axis=0)).max(axis=1)
+
+
+def _palms(q17: np.ndarray) -> dict[str, np.ndarray]:
+    from body.g1_kin import named_from_mj17, points
+    pts = [points(named_from_mj17(v)) for v in q17]
+    return {k: np.array([p[k] for p in pts]) for k in ("left_palm", "right_palm")}
+
+
+def g2_session_report(kind: str, out, s, sends: list[dict], t_trig: float | None, receipt: dict | None,
+                      traj: dict, t_start: float, t_done: float) -> dict:
+    d = out.data or {}
+    chunks = [m for m in sends if m["kind"] == "chunk"]
+    r: dict[str, Any] = {
+        "kind": {"N": "run", "C": "cancel", "H": "halt"}[kind], "status": out.status, "reason": out.reason,
+        "detail": out.detail, "wall_s": round(t_done - t_start, 2), "inferences": d.get("inferences"),
+        "chunks_sent": d.get("chunks_sent"), "chunk_msgs": len(chunks),
+        "chunks_accepted": sum(1 for m in chunks if m["ok"] and not m["dropped"]),
+        "chunks_dropped": d.get("chunks_dropped"), "latency_ms": d.get("latency_ms"),
+        "clamped_frac": d.get("clamped_frac"), "clamped_frac_source": d.get("clamped_frac_source"),
+        "slew_frac": d.get("slew_frac"), "body": d.get("body"), "gt": d.get("gt"), "hold_on_end":
+        d.get("hold_on_end"), "view_check": d.get("view_check"), "camera_first_frame_s": d.get("camera_first_frame_s"),
+        "stall_s_max": d.get("stall_s_max"), "prompt": d.get("prompt"), "session_id": d.get("session_id"),
+        "control_epoch": d.get("control_epoch")}
+    if s is not None and s.t_ack is not None:
+        r["ack_after_fence_ms"] = None if s.t_fence is None else round((s.t_ack - s.t_fence) * 1000, 2)
+        r["chunks_sent_after_ack"] = sum(1 for m in chunks if m["t_send"] > s.t_ack)       # every one, whatever reply
+    if t_trig is not None:
+        r["trigger_to_ack_ms"] = None if s is None or s.t_ack is None else round((s.t_ack - t_trig) * 1000, 2)
+        r["trigger_to_result_ms"] = round((t_done - t_trig) * 1000, 1)
+        late = [m for m in chunks if m["t_send"] >= t_trig]
+        r["chunks_sent_after_trigger"] = [{"dt_ms": round((m["t_send"] - t_trig) * 1000, 1), "ok": m["ok"],
+                                           "error": m["error"], "dropped": m["dropped"]} for m in late]
+        r["chunks_accepted_after_trigger"] = sum(1 for m in late if m["ok"] and not m["dropped"])
+    if receipt is not None:
+        body = receipt.get("body") or {}
+        r["halt_receipt"] = {"acked": receipt.get("acked"), "rtt_ms": receipt.get("rtt_ms"),
+                             "wait_ms": receipt.get("wait_ms"), "handle_ms": body.get("handle_ms"),
+                             "kind": body.get("kind"), "arms_latched": body.get("arms_latched"),
+                             "arm": body.get("arm"), "epoch": receipt.get("epoch")}
+    if traj:
+        t, q = traj["t"], traj["q17"]
+        st = _steps(q)
+        r["measured"] = {"samples": int(len(t)), "rate_hz": round((len(t) - 1) / (t[-1] - t[0]), 1)
+                         if len(t) > 1 and t[-1] > t[0] else None,
+                         "max_arm_step_rad": round(float(st.max()), 4) if len(st) else None,
+                         "left_hand_closure_max": round(float(np.abs(traj["left_hand"]).max()), 3)}
+        if t_trig is not None and len(st):
+            tt = t[1:]
+            before = st[(tt >= t_trig - 1.0) & (tt < t_trig)]
+            after = st[(tt >= t_trig) & (tt <= t_trig + 0.5)]
+            r["measured"]["max_arm_step_1s_before_rad"] = round(float(before.max()), 4) if len(before) else None
+            r["measured"]["max_arm_step_0p5s_after_rad"] = round(float(after.max()), 4) if len(after) else None
+        try:
+            pal = _palms(q)
+            lp = pal["left_palm"]
+            r["measured"]["left_palm_pelvis_m"] = {"start": np.round(lp[0], 3).tolist(),
+                                                   "end": np.round(lp[-1], 3).tolist(),
+                                                   "min": np.round(lp.min(axis=0), 3).tolist(),
+                                                   "max": np.round(lp.max(axis=0), 3).tolist()}
+        except Exception as e:  # noqa: BLE001 - FK is evidence, not a verdict
+            r["measured"]["palm_error"] = repr(e)
+    return r
+
+
+async def g2_async(a: argparse.Namespace) -> dict:
+    import random
+
+    from api.execution import Execution, ExecutionManager, ResultHandle
+    from robot.factory import build
+    from services.common import EventSink
+    from services.executors.groot_arms import (BodyArmPort, GrootArmExecutor, GrootArmsConfig, ZmqSensors,
+                                               _groot_helpers)
+    from services.executors.kinematic_attach import ManipJob
+    from services.skills import load_skill_specs
+    from sim.clock import SimClock
+    from sim.log import EventLog
+
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    clock = SimClock(1.0)
+    world, robot, _ = build(a.profile, a.scene, clock, frames=None)
+    em = ExecutionManager(clock)
+    bc = robot.body.client
+    off = int(os.environ.get("WL_PORT_OFFSET", "0") or 0)
+    rng = random.Random(a.seed)
+    rep: dict[str, Any] = {
+        "mode": "g2", "scene": a.scene, "profile": a.profile, "p1": dict(world.p1_info), "t_start": time.time(),
+        "plan": a.plan, "object": a.object, "skill": a.skill, "endpoint": a.endpoint,
+        "labels": {"groot_arms": "experimental (off-the-shelf Arena N1.7 G1 checkpoint, zero-shot)",
+                   "arm_op": "wl-body arm op, chunk mode (B.8): REAL chunks into SONIC's upper-body override",
+                   "halt": "the body's B.1 halt lane (BodyClient.halt, PUSH 5612) + the runtime HaltGate",
+                   "grasp": "GT judge (gt_lifted / grasp_missed) through the WorldModel; success is not expected"}}
+    rep["sim_health_start"] = world.sim_health().__dict__ if hasattr(world, "sim_health") else None
+    stats0 = world.stats()
+    sensors = traj = exe = arm = None
+    poses: list[tuple] = []
+    pose_task = None
+    try:
+        # 0. staging (P1.7 move_object, test-only) and the stance
+        steps: list[dict] = []
+        if a.stage:
+            c = [float(v) for v in a.stage.split(",")]
+            world.move_object(a.object, c[:3], c[3] if len(c) > 3 else None)
+            await asyncio.sleep(1.0)
+            steps.append({"stage": {"object": a.object, "center": c, "now": [round(v, 3) for v in
+                                                                                 world.object(a.object).pos]}})
+        if a.stand:
+            r = await _run_tool(robot, em, "navigate", {"location": a.stand}, 0)
+            steps.append({"navigate": _brief(r)})
+        if a.approach:
+            x, y, yaw_deg = (float(v) for v in a.approach.split(","))
+            h = await asyncio.to_thread(bc.approach, x, y, math.radians(yaw_deg), None, (0.03, 3.0), True, 90.0)
+            steps.append({"approach": {"goal": [x, y, yaw_deg], "ok": h.ok, "reason": h.reason,
+                                       "pos_err": (h.result or {}).get("pos_err"),
+                                       "yaw_err_deg": (h.result or {}).get("yaw_err_deg")}})
+        elif a.reach:
+            obj = world.object(a.object)
+            for _ in range(2):
+                r = await _run_tool(robot, em, "check_reachability", {"object_type": obj.type,
+                                                                        "object_id": a.object}, 0)
+                steps.append({"check_reachability": _brief(r)})
+                if r.data.get("reason") != "needs_reposition":
+                    break
+                r2 = await _run_tool(robot, em, "navigate", {"location": "reach_stance", "anchor": a.stand,
+                                                              "stance": r.data["stance"]}, 0)
+                steps.append({"reach_stance": _brief(r2)})
+        await asyncio.sleep(1.0)
+        p = world.robot_pose()
+        o = world.object(a.object)
+        from world import coords
+        f, l = coords.world_to_body((p.x, p.y, p.yaw), o.pos[0], o.pos[1])
+        rep["stance"] = {"steps": steps, "pose": {"x": round(p.x, 3), "y": round(p.y, 3),
+                                                  "yaw_deg": round(math.degrees(p.yaw), 1)},
+                         "object_center": [round(v, 3) for v in o.pos], "object_where": o.where,
+                         "object_body_frame": {"forward": round(f, 3), "left": round(l, 3),
+                                               "height_above_floor": round(o.pos[2], 3)}}
+
+        # 1. the executor: real chunks into the real arm op, every message recorded
+        sensors = ZmqSensors(f"tcp://127.0.0.1:{5566 + off}", f"tcp://127.0.0.1:{5557 + off}", "ego_view").start()
+        rep["view"] = await asyncio.to_thread(ego_view_check, world, sensors, a.object, out / "view_check.png")
+        port = BodyArmPort.of(robot.body)
+        if port is None:
+            raise SystemExit("the body has no wl-body client (profile sonic/full on a live stack)")
+        arm = RecordingArm(port)
+        events: list[dict] = []
+        arm.subscribe(lambda ev: events.append({**ev, "t_rx": time.monotonic()}))
+        cfg = GrootArmsConfig(endpoint=a.endpoint, max_duration_s=a.max_s, view_min_px=a.view_min_px,
+                              lead_s=a.lead_s, camera_hz=30.0)
+        rec = ChainRecorder(out, every=a.frame_every)
+        helpers = rec.wrap(_groot_helpers())
+        log = EventLog(clock)
+        exe = GrootArmExecutor(world, arm=arm, sensors=sensors, cfg=cfg, gate=robot.gate, events=EventSink(log),
+                               helpers=helpers)
+        t_h = time.monotonic()
+        while not exe.health().ok and time.monotonic() < t_h + 60.0:
+            await asyncio.sleep(0.2)
+        rep["executor_health"] = {**exe.health().__dict__, "wait_s": round(time.monotonic() - t_h, 2)}
+        if not exe.health().ok:
+            raise SystemExit(f"groot_arms is down: {exe.health().detail}")
+        skill = {x.skill_id: x for x in load_skill_specs()}[a.skill]
+        otype = world.object(a.object).type
+        traj = TrajRecorder(sensors)
+        traj.start()
+
+        async def sample_poses():
+            while True:
+                q = world.robot_pose()
+                poses.append((time.monotonic(), q.x, q.y, q.yaw, getattr(q, "pelvis_z", None), bool(q.fallen),
+                              float(q.speed)))
+                await asyncio.sleep(0.1)
+        pose_task = asyncio.ensure_future(sample_poses())
+
+        # 2. the sessions
+        sessions = []
+        for i, kind in enumerate(a.plan):
+            sid = f"g2-{i + 1:02d}-{kind}"
+            ce = robot.gate.epoch + 1              # above every halt so far (a halt at n fences control_epoch <= n)
+            ex = Execution(execution_id=sid, tool_name="manipulate", args={}, generation=1, control_epoch=ce)
+            j = ManipJob("pick", a.object, a.arm_side, skill.skill_id, epoch=robot.gate.epoch)
+            for k, v in dict(execution_id=sid, generation=1, control_epoch=ce, object_type=otype, skill=skill).items():
+                setattr(j, k, v)
+            h = ResultHandle(ex)
+            rec.session, traj.session = sid, sid
+            t_start = time.monotonic()
+            task = asyncio.ensure_future(exe.run(j, h))
+            t_trig = receipt = None
+            halt_epoch = None
+            if kind in "CH":
+                t_end = time.monotonic() + 20.0
+                while not task.done() and time.monotonic() < t_end and (
+                        exe.last_session is None or exe.last_session.id != sid
+                        or exe.last_session.chunks_sent < a.trigger_chunks):
+                    await asyncio.sleep(0.02)
+                await asyncio.sleep(rng.uniform(0.0, 0.4))
+                if not task.done():
+                    t_trig = time.monotonic()
+                    if kind == "C":
+                        h.cancel("g2 cancel")
+                    else:
+                        halt_epoch = robot.gate.halt()             # the runtime latch first, then the body's lane
+                        receipt = await asyncio.to_thread(bc.halt, halt_epoch, 0.03, "g2")
+            o = await task
+            t_done = time.monotonic()
+            await asyncio.sleep(0.4)                               # late replies / the terminal event
+            rec.session = traj.session = None
+            s = exe.last_session if exe.last_session is not None and exe.last_session.id == sid else None
+            if exe.last_client is not None:
+                exe.last_client.join(2.0)
+            row = g2_session_report(kind, o, s, arm.of(sid), t_trig, receipt, traj.arrays(sid), t_start, t_done)
+            row["session"] = sid
+            row["body_events"] = [{"state": e["state"], "ended_by": (e.get("data") or {}).get("ended_by"),
+                                   "hold": (e.get("data") or {}).get("hold")}
+                                  for e in events if (e.get("data") or {}).get("session_id") == sid
+                                  and e.get("state") in ("succeeded", "failed", "canceled")]
+            win = [x for x in poses if t_start - 0.5 <= x[0] <= time.monotonic()]
+            row["fell"] = any(x[5] for x in win)
+            row["pelvis_z_min"] = round(min((x[4] for x in win if x[4] is not None), default=float("nan")), 3)
+            row["base_drift_m"] = round(math.hypot(win[-1][1] - win[0][1], win[-1][2] - win[0][2]), 3) if win else None
+            if kind == "H" and halt_epoch is not None:
+                robot.gate.resume(halt_epoch)
+                row["resume"] = await asyncio.to_thread(bc.resume, halt_epoch)
+                row["resume"] = {"ok": row["resume"].get("ok"), "error": row["resume"].get("error")}
+            # arms back to SONIC's own reference between sessions (stop {arms: true}: blend 1.5 s)
+            hs = await asyncio.to_thread(bc.stop, True, 10.0, True)
+            row["release"] = {"ok": hs.ok, "reason": hs.reason}
+            await asyncio.sleep(a.rest_s)
+            sessions.append(row)
+            print(json.dumps({k: row.get(k) for k in ("session", "status", "reason", "chunks_sent",
+                                                      "chunks_sent_after_ack", "chunks_accepted_after_trigger",
+                                                      "trigger_to_ack_ms", "slew_frac", "clamped_frac", "fell")},
+                             default=repr), flush=True)
+        rep["sessions"] = sessions
+        rep["chain"] = rec.save()
+        # 3. trajectories: measured (g1_debug) per session, the chunks as sent (chunks.npz), palms by FK
+        arrs = {}
+        for row in sessions:
+            tr = traj.arrays(row["session"])
+            for k, v in tr.items():
+                arrs[f"{row['session']}__{k}"] = v
+            if tr:
+                for k, v in _palms(tr["q17"]).items():
+                    arrs[f"{row['session']}__{k}"] = v
+        np.savez_compressed(out / "trajectories.npz", **arrs)
+        rep["summary"] = g2_summary(sessions)
+    finally:
+        if pose_task is not None:
+            pose_task.cancel()
+        if traj is not None:
+            traj.stop()
+        if exe is not None:
+            exe.close()
+        rep["sim_health_end"] = world.sim_health().__dict__ if hasattr(world, "sim_health") else None
+        try:
+            st1 = world.stats()
+            rep["p1_stats"] = {k: st1.get(k) for k in ("rtf_total", "rtf_worst_1s", "heartbeat_pubs", "cameras",
+                                                        "render_calls", "overruns", "hitches_gt25ms")}
+            rep["p1_stats"]["heartbeat_pubs_delta"] = (st1.get("heartbeat_pubs") or 0) - (stats0.get("heartbeat_pubs")
+                                                                                          or 0)
+        except Exception as e:  # noqa: BLE001
+            rep["p1_stats"] = {"error": repr(e)}
+        await robot.shutdown()
+        world.close()
+    rep["t_end"] = time.time()
+    return rep
+
+
+def g2_summary(rows: list[dict]) -> dict:
+    by = {k: [r for r in rows if r["kind"] == k] for k in ("run", "cancel", "halt")}
+    ok_c = [r for r in by["cancel"] if r["status"] == "cancelled" and r.get("chunks_sent_after_ack") == 0]
+    ok_h = [r for r in by["halt"] if r["status"] == "failed" and r["reason"] == "halted"
+            and r.get("chunks_sent_after_ack") == 0 and r.get("chunks_accepted_after_trigger") == 0
+            and (r.get("halt_receipt") or {}).get("acked")]
+    slew = [r["slew_frac"] for r in rows if isinstance(r.get("slew_frac"), (int, float))]
+    clamp = [r["clamped_frac"] for r in rows if isinstance(r.get("clamped_frac"), (int, float))]
+    lat = [r["latency_ms"]["p50"] for r in rows if (r.get("latency_ms") or {}).get("p50") is not None]
+    return {"sessions": len(rows), "falls": sum(1 for r in rows if r.get("fell")),
+            "cancel_ok": f"{len(ok_c)}/{len(by['cancel'])}", "halt_ok": f"{len(ok_h)}/{len(by['halt'])}",
+            "chunks_sent_total": sum(r.get("chunks_sent") or 0 for r in rows),
+            "chunks_sent_after_ack_total": sum(r.get("chunks_sent_after_ack") or 0 for r in rows),
+            "chunks_accepted_after_trigger_total": sum(r.get("chunks_accepted_after_trigger") or 0
+                                                       for r in rows if r["kind"] != "run"),
+            "slew_frac": {"mean": round(float(np.mean(slew)), 4) if slew else None,
+                          "max": round(float(np.max(slew)), 4) if slew else None},
+            "clamped_frac": {"mean": round(float(np.mean(clamp)), 4) if clamp else None,
+                             "max": round(float(np.max(clamp)), 4) if clamp else None},
+            "latency_p50_ms_median": round(float(np.median(lat)), 1) if lat else None,
+            "outcomes": {f"{r['status']}({r['reason']})": sum(1 for x in rows if (x["status"], x["reason"]) ==
+                                                                (r["status"], r["reason"])) for r in rows},
+            "gt_lift_max_m": max(((r.get("gt") or {}).get("lift_max_m") or 0.0) for r in rows) if rows else None,
+            "grasp_success": sum(1 for r in rows if r["status"] == "succeeded")}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--scene", default="procthor-train-40")
@@ -279,8 +718,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--halt-after-s", type=float, default=2.5)
     ap.add_argument("--walk", action="append", default=None, help="DEST:BACK pairs for the halt trials")
     ap.add_argument("--out", required=True)
+    g = ap.add_argument_group("G2 (--g2, with --arm body): N sessions of real chunks into the real arm op")
+    g.add_argument("--g2", action="store_true")
+    g.add_argument("--plan", default=G2_PLAN, help="one letter per session: N run, C cancel, H halt")
+    g.add_argument("--profile", default="full", help="the robot façade's profile (full: GR00T skills' stance)")
+    g.add_argument("--stage", default=None, help="x,y,z[,yaw]: move the object there first (P1 move_object)")
+    g.add_argument("--approach", default=None, help="x,y,yaw_deg: the body's approach op to this stance")
+    g.add_argument("--reach", action="store_true", help="check_reachability + navigate(reach_stance)")
+    g.add_argument("--trigger-chunks", type=int, default=3, help="cancel/halt once this many chunks were sent")
+    g.add_argument("--lead-s", type=float, default=0.15)
+    g.add_argument("--rest-s", type=float, default=2.5)
+    g.add_argument("--frame-every", type=int, default=5)
+    g.add_argument("--seed", type=int, default=7)
     a = ap.parse_args(argv)
     a.walks = [tuple(w.split(":", 1)) for w in (a.walk or ["kitchen_counter_1a:kitchen_counter_1b"])]
+    if a.g2:
+        if a.arm != "body":
+            ap.error("--g2 needs --arm body")
+        rep = asyncio.run(g2_async(a))
+        out = Path(a.out)
+        (out / "g2.json").write_text(json.dumps(rep, indent=1, default=lambda x: repr(x)))
+        print(json.dumps({"summary": rep.get("summary"), "view": rep.get("view"),
+                          "stance": (rep.get("stance") or {}).get("object_body_frame")}, default=repr))
+        return 0
     rep = asyncio.run(main_async(a))
     out = Path(a.out)
     (out / "smoke.json").write_text(json.dumps(rep, indent=1, default=lambda x: repr(x)))

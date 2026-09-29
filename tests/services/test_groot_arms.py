@@ -175,7 +175,9 @@ class Rig:
 
 
 def _no_chunk_after(body: FakeArmBody, sid: str, t_ack: float) -> list[float]:
-    return [t for t in body.chunk_times(sid) if t > t_ack]
+    """Receive times of EVERY chunk message of the session that reached the body after the ack, whatever the body
+    answered: a chunk sent after the ack is a fence bug even when the body refuses it (stale_session, halted)."""
+    return [m["t"] for m in body.messages("chunk", sid) if m["t"] > t_ack]
 
 
 # ================================================================================================ outcomes

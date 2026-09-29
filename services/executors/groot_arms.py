@@ -42,6 +42,16 @@ that comes back after the session was fenced is dropped (`stale_session`) and ne
 send share one lock, and cancel waits for a send in flight before it acknowledges, so no chunk is published after
 the cancel ack.
 
+Body refusals (the as-built wire, docs/contracts/arm_chunk.md §8): body_verdict() decides which end the session.
+`stale_command` is keyed on data.why: the fence (control_epoch / resume_epoch -> halted, generation -> superseded)
+is fatal, a single late message (t_wall older than the watchdog, no data.why) is only counted. `body_busy` (B.2
+lease), `halted` (B.1 latch), `stale_session`, `arm_preempted` ... are fatal (BODY_FATAL); three refusals in a row
+of any kind are too. A session the body ends on its own maps its ended_by through ENDED_BY (watchdog ->
+policy_stall, halt/stop -> halted, fault -> fell, preempted/taken_over -> body_busy, anything else ->
+controller_unavailable). After `end` the executor waits terminal_wait_s for the body's terminal event, so the
+result carries the body's own counters (data.body: chunks applied, clamped_frac_total, slew_frac_total,
+max_step_rad).
+
 GT confinement: every ground-truth read is a WorldModel call (object, robot_pose, detections, palm_position when the
 world has it). GR00T's inputs are sensors, not ground truth: the ego camera frame and SONIC's g1_debug (5557).
 
@@ -92,10 +102,51 @@ ARENA_CLOSED_DEX3 = {"left": (0.0, 0.7, 0.7, -0.6, -1.2, -0.6, -1.2),
 
 # body replies that end the session (the arm op is no longer ours) -> the outcome's reason
 BODY_FATAL = {"stale_session": "controller_unavailable", "arm_preempted": "body_busy", "not_owner": "body_busy",
-              "arm_busy": "body_busy", "halted": "halted", "arm_stopped": "halted",   # body stop {arms: true}
+              "arm_busy": "body_busy", "body_busy": "body_busy",       # B.2: a lease held by another execution
+              "halted": "halted", "arm_stopped": "halted",               # the B.1 latch; body stop {arms: true}
               "not_standing": "controller_unavailable",
               "mode_mismatch": "controller_unavailable", "bad_args": "controller_unavailable",
               "body_timeout": "controller_unavailable"}
+# The body's `stale_command` means two things (docs/contracts/m1.md §3.9, §3.11), told apart by data.why:
+#   the FENCE (data.why = control_epoch | resume_epoch | generation): every message of this execution is refused
+#       from now on (a halt ended its epoch, or a correction's newer generation superseded it) -> fatal;
+#   one late MESSAGE (no data.why; data.t_wall older than the session watchdog): only that message was dropped, the
+#       next one carries a fresh t_wall -> counted, not fatal.
+STALE_WHY = {"control_epoch": "halted", "resume_epoch": "halted", "generation": "superseded"}
+MAX_BODY_REJECTS = 3        # this many refusals in a row of any kind (an unknown code too) end the session
+# The body ended the session on its own (terminal event while the executor still streams; data.ended_by, m1.md
+# §3.9) -> the outcome's reason. watchdog = the body heard nothing from P5 for watchdog_s (terminal `failed`,
+# reason client_silent, and body.fault{policy_lost}); stop = `stop {arms: true}` from someone else. Anything
+# else (client, script, an unknown value) means the arm op is not doing what this session asked.
+ENDED_BY = {"halt": "halted", "stop": "halted", "watchdog": "policy_stall", "fault": "fell",
+            "preempted": "body_busy", "taken_over": "body_busy"}
+
+
+def body_verdict(rep: dict) -> tuple[str, str] | None:
+    """(reason, detail) when a body reply to a session message ends the session, None when it does not."""
+    if rep.get("ok"):
+        return None
+    err = str(rep.get("error") or "rejected")
+    data = rep.get("data") if isinstance(rep.get("data"), dict) else {}
+    if err == "stale_command":
+        why = data.get("why")
+        if why in STALE_WHY:
+            return STALE_WHY[why], f"the body fenced the arm stream: stale_command ({why})"
+        return None
+    if err.startswith("fault:"):
+        return ("fell" if err == "fault:fallen" else "controller_unavailable"), f"the body is in fault: {err}"
+    if err in BODY_FATAL:
+        return BODY_FATAL[err], f"the body rejected the arm stream: {err}"
+    return None
+
+
+def body_reject_key(rep: dict) -> str:
+    """The `chunks_dropped` counter key of a refused message: body:<error>, with the stale_command kind."""
+    err = str(rep.get("error") or "rejected")
+    if err == "stale_command":
+        why = (rep.get("data") or {}).get("why") if isinstance(rep.get("data"), dict) else None
+        return f"body:stale_command({why or 't_wall'})"
+    return f"body:{err}"
 
 
 # ================================================================================================ config
@@ -147,6 +198,7 @@ class GrootArmsConfig:
     oob_frac: float = 0.2
     oob_window_s: float = 1.0
     arm_timeout_s: float = 0.5           # one `arm` message round trip
+    terminal_wait_s: float = 0.3         # after `end`: wait this long for the body's terminal event (its counters)
     max_duration_s: float | None = None  # None: the skill's
     progress_hz: float = 5.0
 
@@ -253,6 +305,7 @@ class Session:
         self.latencies_ms: list[float] = []
         self.errors = 0                                          # consecutive
         self.errors_total = 0
+        self.rejects_run = 0                                     # consecutive body refusals
         self.last_error: str | None = None
         self.obs_stale = 0
         self.last_obs_age: tuple[float, float] | None = None
@@ -266,6 +319,7 @@ class Session:
         self.body_progress: dict | None = None
         self.t_body_progress: float | None = None
         self.body_clamp: collections.deque = collections.deque(maxlen=64)     # (t, clamped_frac) from arm.progress
+        self.body_slew: list[float] = []                                      # slew_frac per arm.progress window
         self.body_terminal: dict | None = None
         self.stall_max = 0.0
         self.sent_log: list[tuple[float, int]] = []              # (t_mono, seq) of every chunk the body accepted
@@ -306,17 +360,30 @@ class Session:
         rep = self.publish(arm, {**self.base(), "keepalive": True})
         if rep is not None and rep.get("ok"):
             self.keepalives += 1
+            self.body_ok()
         elif rep is not None:
             self.body_rejected(rep)
 
+    def body_ok(self) -> None:
+        with self.lock:
+            self.rejects_run = 0
+
     def body_rejected(self, rep: dict) -> None:
-        err = str(rep.get("error") or "rejected")
-        self.dropped[f"body:{err}"] += 1
-        if err in BODY_FATAL:
-            with self.lock:
-                if self.verdict is None:
-                    self.verdict = ("failed", BODY_FATAL[err], f"the body rejected the arm stream: {err}")
-            self.fence(f"body:{err}")
+        """Count a refused session message; end the session when the refusal is fatal (body_verdict), or after
+        MAX_BODY_REJECTS refusals in a row (an unknown code must not leave the arms to stall silently)."""
+        key = body_reject_key(rep)
+        self.dropped[key] += 1
+        v = body_verdict(rep)
+        with self.lock:
+            self.rejects_run += 1
+            if v is None and self.rejects_run >= MAX_BODY_REJECTS:
+                v = ("controller_unavailable", f"the body refused {self.rejects_run} arm messages in a row "
+                                               f"(last: {key[5:]})")
+            if v is None:
+                return
+            if self.verdict is None:
+                self.verdict = ("failed", v[0], v[1])
+        self.fence(key)
 
     # -- derived ---------------------------------------------------------------------------------------------
     def base(self) -> dict:
@@ -350,7 +417,39 @@ class Session:
             return max(f for _, f in samples)
         return None
 
+    def body_summary(self) -> dict | None:
+        """The body's own numbers for this session: its terminal event when it came, else the last arm.progress."""
+        term = (self.body_terminal or {}).get("data") or {}
+        bp = self.body_progress or {}
+        src = term if term else bp
+        if not src:
+            return None
+        out = {"source": "terminal" if term else "progress"}
+        if term:
+            out.update(state=(self.body_terminal or {}).get("state"), ended_by=term.get("ended_by"),
+                       hold=term.get("hold"), reason=term.get("reason"), duration_s=term.get("duration_s"))
+        for k in ("chunks", "clamped_frac_total", "slew_frac_total", "stall_s_max", "max_step_rad", "cross_fades",
+                  "lead_s", "chunk_seq"):
+            if src.get(k) is not None:
+                out[k] = src[k]
+        if not term and bp.get("slew_frac") is not None:
+            out["slew_frac_last_window"] = bp["slew_frac"]
+        return out
+
+    def slew_frac(self) -> float | None:
+        """The body's slew-limited share of the arm values (slew_frac_total of the terminal event; before it, the
+        mean of the 5 Hz progress windows)."""
+        term = (self.body_terminal or {}).get("data") or {}
+        if isinstance(term.get("slew_frac_total"), (int, float)):
+            return round(float(term["slew_frac_total"]), 4)
+        if self.body_slew:
+            return round(float(np.mean(self.body_slew)), 4)
+        return None
+
     def clamped_frac(self) -> tuple[float | None, str]:
+        term = (self.body_terminal or {}).get("data") or {}
+        if isinstance(term.get("clamped_frac_total"), (int, float)):
+            return round(float(term["clamped_frac_total"]), 4), "body"
         bp = self.body_progress or {}
         if isinstance(bp.get("clamped_frac_total"), (int, float)):
             return round(float(bp["clamped_frac_total"]), 4), "body"
@@ -516,8 +615,9 @@ class GrootArmClient(threading.Thread):
             return self._drop("stale_session", lat)
         if not rep.get("ok"):
             s.body_rejected(rep)
-            s.emit("groot.inference", ok=True, latency_ms=round(lat, 1), dropped=f"body:{rep.get('error')}")
+            s.emit("groot.inference", ok=True, latency_ms=round(lat, 1), dropped=body_reject_key(rep))
             return
+        s.body_ok()
         s.seq = seq
         body_drop = (rep.get("data") or {}).get("dropped")
         if body_drop:                                       # the body counted it (expired / out_of_order)
@@ -752,8 +852,11 @@ class GrootArmExecutor:
         return ServiceHealth(False, state, detail)
 
     def _warmup(self, client: PolicyPort) -> None:
-        obs = self.h["build_obs"](np.zeros((480, 640, 3), np.uint8), [0.0] * 29, [0.0] * N_HAND, [0.0] * N_HAND,
-                                  self.h.get("prompt") or "move the apple to the plate")   # any non-empty prompt
+        """One get_action on a black frame at zero state. It builds its observation with helpers["build_obs_warmup"]
+        when given (a recorder wraps "build_obs" and must not count this synthetic observation as evidence)."""
+        build = self.h.get("build_obs_warmup") or self.h["build_obs"]
+        obs = build(np.zeros((480, 640, 3), np.uint8), [0.0] * 29, [0.0] * N_HAND, [0.0] * N_HAND,
+                    self.h.get("prompt") or "move the apple to the plate")   # any non-empty prompt
         client.get_action(obs, timeout_s=self.cfg.warmup_timeout_s)
 
     def close(self) -> None:
@@ -841,6 +944,8 @@ class GrootArmExecutor:
                 s.t_body_progress = time.monotonic()
                 if isinstance(d.get("clamped_frac"), (int, float)):
                     s.body_clamp.append((s.t_body_progress, float(d["clamped_frac"])))
+                if isinstance(d.get("slew_frac"), (int, float)):
+                    s.body_slew.append(float(d["slew_frac"]))
                 s.emit("arm.progress", chunk_idx=d.get("chunk_seq"), k=d.get("k"), stall_s=d.get("stall_s"),
                        clamped_frac=d.get("clamped_frac"), latency_ms=d.get("latency_ms"),
                        cross_fades=d.get("cross_fades"), inferences=s.inferences, dropped=dict(s.dropped),
@@ -993,10 +1098,11 @@ class GrootArmExecutor:
                 rep = await self._send(start, s.op_id)
                 s.t_last_msg = time.monotonic()
                 if not rep.get("ok"):
-                    err = str(rep.get("error") or "rejected")
-                    self._phase(s, phases, "enter", t0, ok=False, error=err)
-                    return done("failed", BODY_FATAL.get(err, "controller_unavailable"), "enter",
-                                f"the body refused the arm session: {err}")
+                    key = body_reject_key(rep)[5:]
+                    v = body_verdict(rep)
+                    self._phase(s, phases, "enter", t0, ok=False, error=key)
+                    return done("failed", v[0] if v else "controller_unavailable", "enter",
+                                f"the body refused the arm session: {key}")
                 opened = True
                 await asyncio.sleep(cfg.hands_open_s)
                 self._phase(s, phases, "enter", t0, ok=True, hands="open")
@@ -1125,9 +1231,9 @@ class GrootArmExecutor:
         d = ev.get("data") or {}
         by = str(d.get("ended_by") or d.get("reason") or ev.get("state"))
         s.fence(f"body:{by}")
-        reason = {"halt": "halted", "fault": "fell", "preempted": "body_busy", "taken_over": "body_busy",
-                  "stop": "halted", "watchdog": "policy_stall"}.get(by, "controller_unavailable")
-        return "failed", reason, f"the body ended the arm session ({ev.get('state')}, ended_by {by})"
+        reason = ENDED_BY.get(by, "controller_unavailable")
+        why = f", reason {d['reason']}" if d.get("reason") and d.get("reason") != by else ""
+        return "failed", reason, f"the body ended the arm session ({ev.get('state')}, ended_by {by}{why})"
 
     async def _end(self, s: Session, judge: GtJudge | None, verdict: tuple[str, str | None, str] | None
                    ) -> str | None:
@@ -1135,19 +1241,24 @@ class GrootArmExecutor:
         status, reason = (verdict[0], verdict[1]) if verdict else ("failed", "internal_error")
         s.fence(reason or status)
         await asyncio.to_thread(s.drain)
-        if s.body_terminal is not None or (s.fenced or "").startswith("body:"):
-            return None                                   # the body already ended it
-        in_hand = bool(judge and judge.lifted_now)
-        if status == "succeeded":
-            hold = "target"
-        elif status == "cancelled":
-            hold = "target" if in_hand else "stand"
-        else:
-            hold = "measured"
-        rep = await self._send({**s.base(), "end": True, "hold_on_end": hold, "reason": reason or status})
-        if not rep.get("ok"):
-            s.dropped[f"end:{rep.get('error')}"] += 1       # e.g. `halted` once the B.1 latch exists: harmless
-        return hold
+        hold = None
+        if s.body_terminal is None and not (s.fenced or "").startswith("body:"):
+            in_hand = bool(judge and judge.lifted_now)
+            if status == "succeeded":
+                hold = "target"
+            elif status == "cancelled":
+                hold = "target" if in_hand else "stand"
+            else:
+                hold = "measured"
+            rep = await self._send({**s.base(), "end": True, "hold_on_end": hold, "reason": reason or status})
+            if not rep.get("ok"):
+                s.dropped[f"end:{rep.get('error')}"] += 1   # e.g. `halted` once the B.1 latch holds: harmless
+        # the body's terminal event (published by its next 50 Hz tick) carries the session's own counters:
+        # chunks applied, clamped_frac_total, slew_frac_total, max_step_rad (docs/contracts/m1.md §3.9)
+        t_end = time.monotonic() + self.cfg.terminal_wait_s
+        while s.body_terminal is None and time.monotonic() < t_end:
+            await asyncio.sleep(0.01)
+        return hold if hold is not None else ((s.body_terminal or {}).get("data") or {}).get("hold")
 
     def _outcome(self, s: Session, status: str, reason: str | None, phase: str, detail: str, phases: list[dict],
                  notes: list[str], extra: dict, judge: GtJudge | None, t_run: float, **_: Any) -> GrootArmOutcome:
@@ -1167,7 +1278,8 @@ class GrootArmExecutor:
             "inferences": s.inferences, "chunks_sent": s.chunks_sent, "chunks_dropped": dict(s.dropped),
             "keepalives": s.keepalives, "latency_ms": {"p50": _p(s.latencies_ms, 50), "p95": _p(s.latencies_ms, 95),
                                                        "n": len(s.latencies_ms)},
-            "clamped_frac": clamped, "clamped_frac_source": clamped_src, "stall_s_max": round(s.stall_max, 2),
+            "clamped_frac": clamped, "clamped_frac_source": clamped_src, "slew_frac": s.slew_frac(),
+            "body": s.body_summary(), "stall_s_max": round(s.stall_max, 2),
             "base_shift_m": round(shift, 3), "obs_stale": s.obs_stale, "policy_errors": s.errors_total,
             "hold_on_end": hold, "carry": CARRY_LABEL if status == "succeeded" else None,
             "view_check": extra.get("view_check"), "camera_first_frame_s": extra.get("camera_first_frame_s"),
@@ -1379,5 +1491,6 @@ def create(ctx: Any) -> GrootArmExecutor:
 
 
 __all__ = ["EXECUTOR", "BACKEND", "LABEL", "CHECKPOINT", "DEFAULT_ENDPOINT", "CARRY_LABEL", "ARENA_CLOSED_DEX3",
+           "BODY_FATAL", "STALE_WHY", "ENDED_BY", "MAX_BODY_REJECTS", "body_verdict", "body_reject_key",
            "GrootArmsConfig", "PolicyPort", "ArmPort", "SensorPort", "GrootArmOutcome", "Session", "GrootArmClient",
            "GtJudge", "PolicyHealth", "GrootArmExecutor", "BodyArmPort", "ZmqSensors", "hand_closure", "create"]

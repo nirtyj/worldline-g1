@@ -111,7 +111,7 @@ def test_live_cancel(delay):
         out, t_cancel, t_done = asyncio.run(main())
         s = exe.last_session
         exe.last_client.join(3.0)
-        late = [t for t in body.chunk_times(s.id) if t > s.t_ack]
+        late = [m["t"] for m in body.messages("chunk", s.id) if m["t"] > s.t_ack]     # every chunk SENT after it
         _save(f"cancel_{delay}", {"status": out.status, "terminal_s": round(t_done - t_cancel, 3),
                                   "ack_ms": round((s.t_ack - t_cancel) * 1000, 2), "chunks_before": len(
                                       body.chunk_times(s.id)), "chunks_after_ack": len(late),
@@ -140,7 +140,7 @@ def test_live_halt(delay):
         out, t_halt, t_done = asyncio.run(main())
         s = exe.last_session
         exe.last_client.join(3.0)
-        late = [t for t in body.chunk_times(s.id) if t > s.t_ack]
+        late = [m["t"] for m in body.messages("chunk", s.id) if m["t"] > s.t_ack]     # every chunk SENT after it
         _save(f"halt_{delay}", {"status": out.status, "reason": out.reason, "terminal_s": round(t_done - t_halt, 3),
                                 "chunks_before": len(body.chunk_times(s.id)), "chunks_after_ack": len(late),
                                 "body_hold": body.hold["mode"] if body.hold else None})

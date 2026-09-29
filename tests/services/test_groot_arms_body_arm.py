@@ -154,6 +154,11 @@ def test_a_session_runs_on_the_body_arm_channel():
         assert len(term) == 1 and term[0]["state"] == "succeeded" and term[0]["data"]["ended_by"] == "client"
         assert term[0]["data"]["hold"] == "measured" and d["hold_on_end"] == "measured"
         assert r.body.ch.state()["mode"] == "hold"                                   # HOLD at the measured pose
+        # the result carries the body's own counters from its terminal event (the executor waits for it)
+        b = d["body"]
+        assert b["source"] == "terminal" and b["chunks"]["applied"] == r.body.ch.stats["chunks_applied"]
+        assert d["slew_frac"] == b["slew_frac_total"] and d["clamped_frac"] == b["clamped_frac_total"]
+        assert b["max_step_rad"] is not None and b["lead_s"] == pytest.approx(0.15)
 
 
 def test_a_body_halt_latch_ends_the_session_halted():
@@ -175,6 +180,8 @@ def test_a_body_halt_latch_ends_the_session_halted():
         out, n = asyncio.run(main())
         assert out.status == "failed" and out.reason == "halted", out.detail
         assert r.body.ch.stats["chunks_applied"] == n                               # nothing applied after the latch
+        t_ack = r.exe.last_session.t_ack
+        assert [t for t, a, _ in r.body.replies if "chunk" in a and t > t_ack] == []   # nothing SENT after the ack
         term = r.body.terminal("man-b2")
         assert len(term) == 1 and term[0]["state"] == "canceled" and term[0]["data"]["ended_by"] == "halt"
         assert r.body.ch.state()["mode"] == "latched"
@@ -197,7 +204,7 @@ def test_cancel_ends_the_session_at_once():
         out, dt = asyncio.run(main())
         assert out.status == "cancelled" and dt < 1.0, (out.detail, dt)
         t_ack = r.exe.last_session.t_ack
-        applied_after = [t for t, a, rep in r.body.replies if "chunk" in a and rep.get("ok") and t > t_ack]
-        assert applied_after == []
+        sent_after = [t for t, a, rep in r.body.replies if "chunk" in a and t > t_ack]   # whatever the body said
+        assert sent_after == []
         term = r.body.terminal("man-b3")
         assert len(term) == 1 and term[0]["data"]["ended_by"] == "client" and term[0]["data"]["hold"] == "stand"
