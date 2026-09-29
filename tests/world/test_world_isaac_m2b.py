@@ -19,7 +19,7 @@ import pytest
 
 pytest.importorskip("zmq")
 
-from tests.fakes.fake_p1_world import FakeP1World
+from tests.fakes.fake_p1_world import FakeP1World, free_port_offset
 from world.model import NotSupported
 
 HOUSE = "procthor-train-38"
@@ -36,7 +36,7 @@ def _wait(cond, timeout=2.0, dt=0.02):
 
 @pytest.fixture
 def m2b():
-    p = FakeP1World(HOUSE, port_offset=433, m2b=True, health_hz=20.0).start()
+    p = FakeP1World(HOUSE, port_offset=free_port_offset(), m2b=True, health_hz=20.0).start()
     yield p
     p.stop()
 
@@ -47,7 +47,7 @@ def _client(off, camera="head_sim"):
 
 
 def test_discovery_and_capabilities(m2b):
-    w = _client(433)
+    w = _client(m2b.off)
     try:
         caps = w.capabilities()
         assert caps["p1_contract"] == "m2b-1" and caps["cameras"] == {"head": True, "ego_view": False}
@@ -63,9 +63,9 @@ def test_discovery_and_capabilities(m2b):
 
 
 def test_m1_p1_models_the_d435_camera_and_says_so():
-    p = FakeP1World(HOUSE, port_offset=434).start()
+    p = FakeP1World(HOUSE, port_offset=free_port_offset()).start()
     try:
-        w = _client(434)
+        w = _client(p.off)
         try:
             assert w.cam.name == "ego_d435" and "no head camera" in w.camera_note
             assert w.capabilities()["p1_contract"] is None and not w.capabilities()["segmentation"]
@@ -80,7 +80,7 @@ def test_m1_p1_models_the_d435_camera_and_says_so():
 
 
 def test_live_object_poses_from_gt_objects(m2b):
-    w = _client(433)
+    w = _client(m2b.off)
     try:
         assert all(o.pose_source == "sim" for o in w.objects().values())          # P1.2 exit
         n_polls = m2b.calls.count("get_objects")
@@ -95,7 +95,7 @@ def test_live_object_poses_from_gt_objects(m2b):
 
 
 def test_attach_follows_the_real_palm_and_detach_places(m2b):
-    w = _client(433)
+    w = _client(m2b.off)
     try:
         k = w.map.keypoints["bedroom_dresser_1a"]
         m2b.set_pose(k.x, k.y, k.yaw)
@@ -121,7 +121,7 @@ def test_attach_follows_the_real_palm_and_detach_places(m2b):
 
 
 def test_camera_pose_from_the_real_torso(m2b):
-    w = _client(433)
+    w = _client(m2b.off)
     try:
         assert _wait(lambda: w.link_pose("torso_link") is not None)
         nominal = w.camera_pose(pose=w.robot_pose())                                   # the model, no links
@@ -138,7 +138,7 @@ def test_camera_pose_from_the_real_torso(m2b):
 
 
 def test_detections_best_uses_p1_segmentation(m2b):
-    w = _client(433)
+    w = _client(m2b.off)
     try:
         k = w.map.keypoints["bedroom_bed_1b"]
         m2b.set_pose(k.x, k.y, k.yaw)
@@ -171,7 +171,7 @@ def test_detections_best_uses_p1_segmentation(m2b):
 
 
 def test_sim_health_levels_and_events(m2b):
-    w = _client(433)
+    w = _client(m2b.off)
     try:
         assert _wait(lambda: w.sim_health().source == "p1:sim.health")
         assert w.sim_health().ok and w.sim_health().rtf == pytest.approx(1.0)
@@ -193,7 +193,7 @@ def test_sim_health_levels_and_events(m2b):
 
 
 def test_reset_scene_and_move_object(m2b):
-    w = _client(433)
+    w = _client(m2b.off)
     try:
         w.attach("mug_1", "left")
         c = w.object("fork_1").pos
@@ -209,10 +209,10 @@ def test_reset_scene_and_move_object(m2b):
 
 def test_head_frames_carry_the_render_pose():
     from world.frames import IsaacFrames
-    p = FakeP1World(HOUSE, port_offset=435, m2b=True, frames=True).start()
+    p = FakeP1World(HOUSE, port_offset=free_port_offset(), m2b=True, frames=True).start()
     try:
-        w = _client(435)
-        fr = IsaacFrames(w, port_offset=435)
+        w = _client(p.off)
+        fr = IsaacFrames(w, port_offset=p.off)
         try:
             assert _wait(lambda: fr.latest("head") is not None, 3.0)
             f = fr.latest("head")

@@ -145,10 +145,11 @@ def test_layout_builds_from_the_map(cached_map, house):
                  for n, l in m.landmarks.items()}
     lines = layout.build(kmap, landmarks)
     in_lines = {t.name for ln in lines for t in ln.things}
-    # every stretch of a multi-stretch furniture sits on a line (its neighbours are on the same axis)
+    # every stretch of a multi-stretch furniture sits on a line (its neighbours are on the same axis), except one
+    # cut to an L/U footprint (R.5): its stand faces the counter part that is really there, off its siblings' line
     multi = [s for s in m.surfaces.values() if s.part]
     assert multi
-    missing = [s.name for s in multi if s.name not in in_lines]
+    missing = [s.name for s in multi if s.name not in in_lines and not _cut(m, s)]
     assert not missing, missing
     assert layout.render(lines, kmap)
 
@@ -160,3 +161,76 @@ def test_layout_for_ui_and_occupancy(cached_map):
     assert set(ui["keypoints"]) == set(m.keypoints)
     occ = m.occupancy
     assert occ["raw"].shape == occ["inflated"].shape and occ["resolution"] == pytest.approx(0.05)
+
+
+# ------------------------------------------------------------------ R.5: stretches from footprints
+def _cut(m, s) -> bool:
+    """The stretch's cross-section is narrower than its furniture's AABB (the footprint cut moved an edge)."""
+    f = next((t for t in m.things if t.scene_id == s.furniture_id), None)
+    if f is None:
+        return False
+    (x0, y0, _), (x1, y1, _) = f.aabb
+    along_x = (x1 - x0) >= (y1 - y0)
+    full = (y1 - y0) / 2 if along_x else (x1 - x0) / 2
+    got = s.half[1] if along_x else s.half[0]
+    return got < full - 0.05
+
+
+@pytest.mark.parametrize("house", RECORDED)
+def test_every_stand_faces_its_furniture(cached_map, house):
+    """R.5: the 10 cm of a stretch nearest its stand is mostly the furniture's footprint (walls and outside cells
+    excluded from the count). Before R.5, the stands of L/U-shaped counters faced the empty part of the AABB (H40's
+    user surface kitchen_counter_1a: 1.2 m of floor between the stand and the counter)."""
+    from tests.fakes.fixtures import _lite
+    from world.mapgen import Footprint, embedded_items
+    w = _lite(house)
+    m = w.map
+    for s in m.surfaces.values():
+        f = w.scene_data.item(s.furniture_id)
+        fp = Footprint(m.grid, f, embedded_items(w.scene_data, f))
+        (cx, cy), (hx, hy) = s.center, s.half
+        side = {"+x": ((cx + hx - 0.05, cy), (0.05, hy)), "-x": ((cx - hx + 0.05, cy), (0.05, hy)),
+                "+y": ((cx, cy + hy - 0.05), (hx, 0.05)), "-y": ((cx, cy - hy + 0.05), (hx, 0.05))}[s.side]
+        assert fp.fill(*side) >= 0.5, (s.name, s.side, round(fp.fill(*side), 2))
+
+
+def test_h15_u_counter_stands_inside_the_u(cached_map):
+    """M2 gap 1: the apple's stretch (kitchen_counter_1b, the back run of a U-shaped counter) has its stand inside the
+    U facing the back run, not on the open side of the 1.84 m-deep AABB 2.1 m from the apple."""
+    m = cached_map("procthor-train-15")
+    s = m.surfaces["kitchen_counter_1b"]
+    apple = m.objects["apple_1"]
+    assert s.contains_xy(*apple.pos[:2])
+    assert 2 * s.half[1] < 0.7, "cut to the back run's depth"
+    k = m.keypoints["kitchen_counter_1b"]
+    assert math.dist((k.x, k.y), apple.pos[:2]) < 1.0
+    assert s.stand_off_m <= 0.5 and not s.relaxed
+
+
+def test_k10_no_stretch_covers_the_stove(cached_map):
+    """M2 gap 1 (K10): counter_2 is cut at the built-in stove; the spatula's stretch and the other side flank it."""
+    m = cached_map("ithor-FloorPlan10")
+    stove = m.landmarks["stove_1"]
+    (sx0, sy0, _), (sx1, sy1, _) = stove.aabb
+    for s in m.surfaces.values():
+        if s.furniture_id != m.surfaces["counter_2a"].furniture_id:
+            continue
+        ov = max(0.0, min(sx1, s.center[1] + s.half[1]) - max(sy0, s.center[1] - s.half[1])) \
+            if False else max(0.0, min(sy1, s.center[1] + s.half[1]) - max(sy0, s.center[1] - s.half[1]))
+        assert ov <= 0.06, (s.name, ov)
+    assert {"counter_2a", "counter_2b", "counter_2c"} <= set(m.surfaces)
+    ys = sorted((m.surfaces[n].center[1], n) for n in ("counter_2a", "counter_2b"))
+    assert ys[0][1] == "counter_2a" and ys[0][0] < (sy0 + sy1) / 2 < ys[1][0], "2a and 2b flank the stove"
+    assert stove.near in ("counter_2a", "counter_2b"), "a stand that faces the stove"
+
+
+def test_footprints_off_is_thors_aabb_partition(lite38):
+    """MapParams(footprints=False) reproduces the THOR partition exactly (the AABB stretches)."""
+    import dataclasses
+    from world.mapgen import MapParams, build_static_map
+    old = build_static_map(lite38.scene_data, lite38.grid, dataclasses.replace(MapParams(), footprints=False))
+    for s in old.surfaces.values():
+        f = lite38.scene_data.item(s.furniture_id)
+        (x0, y0, _), (x1, y1, _) = f.aabb
+        along_x = (x1 - x0) >= (y1 - y0)
+        assert (s.half[1] if along_x else s.half[0]) == pytest.approx(((y1 - y0) if along_x else (x1 - x0)) / 2)

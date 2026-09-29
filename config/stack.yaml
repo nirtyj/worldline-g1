@@ -17,7 +17,8 @@ default_scene: procthor-train-38
 scenes:                          # scene key -> house id and per-scene overrides (eval/scenes.yaml may add more)
   procthor-train-38: {house: procthor-train-38}
   procthor-train-40: {house: procthor-train-40}
-  procthor-train-15: {house: procthor-train-15}
+  procthor-train-15: {house: procthor-train-15, user_surface: living_room_dining_table_1a}   # M2 gap 2: the
+                                 # armchair THOR's rule picks has its backrest as the AABB top
   ithor-FloorPlan10: {house: ithor-FloorPlan10}
 rpc:
   p1_timeout_s: 5.0

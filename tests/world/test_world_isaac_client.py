@@ -10,20 +10,20 @@ import pytest
 
 pytest.importorskip("zmq")
 
-from tests.fakes.fake_p1_world import FakeP1World
+from tests.fakes.fake_p1_world import FakeP1World, free_port_offset
 from world.model import NotSupported
 
 
 @pytest.fixture
 def p1_m1():
-    p = FakeP1World("procthor-train-38", port_offset=431).start()
+    p = FakeP1World("procthor-train-38", port_offset=free_port_offset()).start()
     yield p
     p.stop()
 
 
 @pytest.fixture
 def p1_m2b():
-    p = FakeP1World("procthor-train-38", port_offset=432, m2b=True).start()
+    p = FakeP1World("procthor-train-38", port_offset=free_port_offset(), m2b=True).start()
     yield p
     p.stop()
 
@@ -35,7 +35,7 @@ def _client(off):
 
 def test_builds_the_same_map_as_lite(p1_m1):
     from tests.fakes.fixtures import fresh_lite
-    w = _client(431)
+    w = _client(p1_m1.off)
     try:
         lite = fresh_lite("procthor-train-38")
         assert list(w.map.surfaces) == list(lite.map.surfaces)
@@ -47,7 +47,7 @@ def test_builds_the_same_map_as_lite(p1_m1):
 
 
 def test_pose_follows_gt_pose(p1_m1):
-    w = _client(431)
+    w = _client(p1_m1.off)
     try:
         k = w.map.keypoints["bedroom_bed_1b"]
         p1_m1.set_pose(k.x, k.y, k.yaw)
@@ -67,7 +67,7 @@ def test_pose_follows_gt_pose(p1_m1):
 
 
 def test_m1_p1_has_no_attach(p1_m1):
-    w = _client(431)
+    w = _client(p1_m1.off)
     try:
         caps = w.capabilities()
         assert caps["attach"] is False and caps["object_poses"] is False and caps["band"] is True
@@ -81,7 +81,7 @@ def test_m1_p1_has_no_attach(p1_m1):
 
 
 def test_m2b_ops(p1_m2b):
-    w = _client(432)
+    w = _client(p1_m2b.off)
     try:
         caps = w.capabilities()
         assert caps["attach"] and caps["detach"] and caps["object_poses"]

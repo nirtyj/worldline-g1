@@ -229,7 +229,8 @@ def test_sonic_body_late_ack_is_resent_and_acked(monkeypatch):
     from robot.health import HaltResender
     from tests.fakes.fake_body_server import FakeBodyServer
 
-    off = 470
+    from tests.fakes.fake_p1_world import free_port_offset
+    off = free_port_offset()
     fb = FakeBodyServer(port_offset=off).start()
     fb.reply_delay_s = 0.06
     try:

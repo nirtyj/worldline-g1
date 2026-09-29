@@ -49,6 +49,7 @@ REACHABILITY = _r("reachability", {
     "needs_reposition": "navigate(location='reach_stance'), then check again",
     "too_far": "navigate to the suggested location, then check again",
     "out_of_workspace": "the arm can't reach it from this pose; try another stand",
+    "beyond_reach": "it sits deeper than the arm reaches from anywhere the robot can stand; tell the user",
     "hand_full": "put down what the robot holds first",
     "no_skill": "no skill can handle that object",
     "policy_unavailable": "the manipulation policy is down; tell the user",

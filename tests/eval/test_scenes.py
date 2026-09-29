@@ -75,7 +75,13 @@ def _world(scene: str):
         pytest.skip(f"world/ not importable: {e}")
     if not (HOUSES / scene / "occupancy.npz").exists():
         pytest.skip(f"no recorded occupancy for {scene}")
-    return LiteWorld(HOUSES / scene)
+    # the map exactly as the G1 runtime builds it (robot/factory.py: config/g1.yaml mapgen, e.g. the `placeable`
+    # user-surface rule, and config/stack.yaml's per-scene user_surface), since the suite scores what the runtime serves
+    from robot.profile import load_profile
+    from world.mapgen import MapParams
+    prof = load_profile("lite")
+    return LiteWorld(HOUSES / scene, map_params=MapParams.from_dict(prof.g1.get("mapgen")),
+                     user_surface=prof.scene_config(scene).get("user_surface"))
 
 
 @pytest.mark.parametrize("house", ["H40", "H15", "K10"])

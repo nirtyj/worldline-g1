@@ -38,6 +38,32 @@ PALM_IN_PELVIS = {"left": (0.32, 0.18, 0.20), "right": (0.32, -0.18, 0.20)}   # 
 GRIP_OFFSET = 0.07
 
 
+PORTS = (5565, 5566, 5600, 5601, 5602, 5610, 5611, 5612)
+
+
+def free_port_offset(lo: int = 2000, hi: int = 9000) -> int:
+    """A port offset whose P1/P3 ports are all free right now, so concurrent test runs on one machine (several
+    owners run the suite at once) do not collide on fixed offsets."""
+    import random
+    import socket
+    rng = random.Random()
+    for _ in range(200):
+        off = rng.randrange(lo, hi, 7)
+        socks = []
+        try:
+            for port in PORTS:
+                sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                socks.append(sk)
+                sk.bind(("127.0.0.1", port + off))
+            return off
+        except OSError:
+            continue
+        finally:
+            for sk in socks:
+                sk.close()
+    raise RuntimeError("no free port offset")
+
+
 def _rot(yaw: float, v):
     c, s = math.cos(yaw), math.sin(yaw)
     return (c * v[0] - s * v[1], s * v[0] + c * v[1], v[2])
