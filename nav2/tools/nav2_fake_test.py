@@ -265,6 +265,8 @@ class Nav2Test:
                                 "nav2": (h.result or {}).get("error_name"),
                                 "pass": h.state == "failed" and h.reason in ("goal_in_obstacle", "no_path")}
             print(f"[unreachable] furniture {out['furniture']}", flush=True)
+            self.runs.append({"kind": "unreachable", "t0": t0, "t1": t1, "goal": {"x": fg[0], "y": fg[1]},
+                              "plan": None, "state": h.state})
         # a goal outside the map (Nav2 GOAL_OUTSIDE_MAP)
         t0 = time.time()
         h = self.bc.go_to(self.origin[0] - 5.0, self.origin[1] - 5.0, timeout_s=30)
@@ -328,7 +330,7 @@ class Nav2Test:
         out["pass"] = (h.state == "canceled" and sh.state == "succeeded" and st.get("state") == "canceled"
                        and len(fwd_after) == 0 and t_settle is not None and t_settle <= 2.0)
         self.runs.append({"kind": "cancel", "t0": t0, "t1": time.time(), "goal": {"x": far["x"], "y": far["y"]},
-                          "plan": None, "t_cancel": t_cancel})
+                          "plan": None, "t_cancel": t_cancel, "id": h.id, "state": h.state})
         self.phase("cancel", t0, time.time())
         print(f"[cancel] {out}", flush=True)
         return out
