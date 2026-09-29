@@ -332,7 +332,8 @@ class Session:
         self.world, self.robot, self.frames = built[0], built[1], built[2]
         self.map = self.robot.lookup_keypoints()
         self.grid = world_grid(self.world)
-        self.layout = layout_message(self.scene, self.map, self.world, self.grid, profile=self.profile)
+        self.layout = layout_message(self.scene, self.map, self.world, self.grid, profile=self.profile,
+                                     truth=_call(self.world, "truth", default=None))
         free = display_cells(self.grid, DISPLAY_STEP, "walk") if self.grid else {tuple(c) for c in self.layout["grid"]}
         floor = display_cells(self.grid, DISPLAY_STEP, "floor") if self.grid else None
         self.robot_map = RobotMap(free, DISPLAY_STEP, floor)     # what the robot itself knows of the space

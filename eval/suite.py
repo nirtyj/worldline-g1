@@ -1,18 +1,23 @@
 """Scenario suite: scripted conversations with the robot, scored against the simulator's truth.
 
-Run it against a live playground server (it drives the same websocket the page uses):
+Run it against a live page server (it drives the same websocket the page uses):
 
-    .venv-thor/bin/python ui/server.py            # in one terminal
-    .venv-thor/bin/python eval/suite.py           # in another
-    .venv-thor/bin/python eval/suite.py --only fetch_other_room,recall_history --tag trial
+    .venv/bin/python -m ui.server --profile sonic                     # in one terminal (on the box)
+    .venv/bin/python eval/suite.py --profile sonic                    # in another
+    .venv/bin/python eval/suite.py --profile lite --only fetch_other_room,recall_history --tag trial
 
-Each scenario loads a house (some wipe memory first, some rely on what earlier
-scenarios left in it), says things at scripted moments, and passes or fails on
-what really happened: where the object is, what the robot said, what it did.
-Every session also lands in the episode log, so a suite run doubles as training
-data for the procedural graph.
+Each scenario loads a house (some wipe memory first, some rely on what earlier scenarios left in it), says
+things at scripted moments, and passes or fails on what really happened: where the object is, what the robot
+said, what it did. The houses and object ids come from eval/scenes.yaml (MolmoSpaces H40, H15 and Kitchen 10),
+time limits are scaled for a humanoid (eval/scenes.py time_limit), and every pass records which executors
+produced it: a pass that rests on a sim shortcut (kinematic base, attach grasp) is a fallback pass, never a
+target pass (PLAN 2.3, 12.2).
 
-Writes runs/eval/<stamp>_<tag>.json and prints a table.
+The referee reads ground truth only as the page shows it: frame.truth, which the page builds from
+world.truth(), the one ground-truth reader on the runtime side. It never talks to the simulator.
+
+Every session also lands in the episode log, so a suite run doubles as training data for the procedural graph.
+Writes runs/eval/<stamp>_<profile>_<tag>.json and prints a table.
 """
 
 from __future__ import annotations
@@ -26,38 +31,56 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from websockets.asyncio.client import connect
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from eval import scenes as sc  # noqa: E402
+
 OUT = ROOT / "runs" / "eval"
-H40, H15 = "procthor-train-40", "procthor-train-15"
-K10 = "FloorPlan10"                     # Kitchen 10: counter 1 runs counter_1b · counter_1a · stove · counter_2
+LOAD_TIMEOUT_S = 300.0                   # an Isaac reset: band on, reset_scene, robot reset, band release (PLAN 9.1)
+BIND = sc.load()
+H40, H15, K10 = BIND.scene("H40"), BIND.scene("H15"), BIND.scene("K10")
 
 
 class Run:
     """One websocket session and everything it has seen."""
 
-    def __init__(self, ws: Any) -> None:
+    def __init__(self, ws: Any, profile: str = "lite", scale: float | None = None, original: bool = False) -> None:
         self.ws = ws
+        self.profile = profile
+        self.scale = scale
+        self.original = original
         self.init: dict[str, Any] | None = None
         self.frame: dict[str, Any] | None = None
         self.trace: list[dict[str, Any]] = []
         self.said: list[tuple[float, str]] = []         # (runtime t, text) the robot started saying
         self.calls: dict[int, dict[str, Any]] = {}
+        self.frames_seen: list[dict[str, Any]] = []     # for executors: a thin copy of each frame's executions
+        self.current: str = ""                          # the scenario running now
+        self.fixtures: dict[str, Any] = {}
 
     async def reader(self) -> None:
         async for raw in self.ws:
-            m = json.loads(raw)
-            if m.get("type") == "init":
-                self.init, self.trace, self.said, self.calls = m, [], [], {}
-            elif m.get("type") == "frame":
-                self.frame = m
-                self.trace += m.get("trace", [])
-                for e in m.get("events", []):
-                    if e.get("type") == "speech_started":
-                        self.said.append((e.get("t", 0.0), e.get("text", "")))
-                for c in m.get("calls", []):
-                    self.calls[c["n"]] = c
+            self.ingest(json.loads(raw))
+
+    def ingest(self, m: dict[str, Any]) -> None:
+        if m.get("type") == "init":
+            self.init, self.trace, self.said, self.calls = m, [], [], {}
+            self.frame = m
+        elif m.get("type") == "frame":
+            self.frame = m
+            self.trace += m.get("trace", [])
+            for e in m.get("events", []):
+                if e.get("type") == "speech_started":
+                    self.said.append((e.get("t", 0.0), e.get("text", "")))
+            for c in m.get("calls", []):
+                self.calls[c["n"]] = c
+            rt = m.get("runtime") or {}
+            if rt.get("executions") or rt.get("recent"):
+                self.frames_seen.append({"runtime": {"executions": rt.get("executions") or [],
+                                                     "recent": rt.get("recent") or []}})
+                del self.frames_seen[:-50]
 
     async def send(self, **msg: Any) -> None:
         await self.ws.send(json.dumps(msg))
@@ -66,9 +89,13 @@ class Run:
         self.init = None
         await self.send(type="persona", level="off")        # own goals would make runs less repeatable
         await self.send(type="step", mode="off")             # a step mode left on by the page would hang the run
-        await self.send(type="reset", scene=scene, forget=forget)
-        await self.until(lambda: self.init is not None and self.init["config"]["scene"] == scene, 150)
+        await self.send(type="reset", scene=scene, forget=forget, profile=self.profile)
+        ok = await self.until(lambda: self.init is not None and self.init["config"]["scene"] == scene
+                              and self.init["config"].get("profile", self.profile) == self.profile, LOAD_TIMEOUT_S)
+        if not ok:
+            raise TimeoutError(f"{scene} did not load within {LOAD_TIMEOUT_S:.0f} s")
         await asyncio.sleep(1.0)
+        self.trace_mark = len(self.trace)
 
     async def say(self, text: str) -> None:
         await self.send(type="say", text=text)
@@ -84,6 +111,15 @@ class Run:
             await asyncio.sleep(0.3)
         return False
 
+    # -- time ----------------------------------------------------------
+    def limit(self, name: str | None = None) -> float:
+        """This scenario's time limit on this profile (THOR limit x time scale, >= 2 x humanoid estimate)."""
+        return BIND.time_limit(name or self.current, self.profile, self.scale)[0]
+
+    def wait(self, seconds: float) -> float:
+        """A body-dependent wait inside a script, scaled like the limits."""
+        return seconds * BIND.wait_scale(self.profile, self.scale)
+
     # -- what happened -------------------------------------------------
     @property
     def user_surface(self) -> str:
@@ -98,8 +134,10 @@ class Run:
     def rows(self, kind: str, **match: Any) -> list[dict[str, Any]]:
         return [r for r in self.trace if r.get("type") == kind and all(r.get(k) == v for k, v in match.items())]
 
-    def started(self, tool: str) -> bool:
-        return bool(self.rows("started", tool=tool))
+    def started(self, tool: str, action: str | None = None) -> bool:
+        """A tool started, e.g. started("navigate"), started("manipulate", action="pick")."""
+        return any(action is None or r.get("action") == action or (r.get("args") or {}).get("action") == action
+                   for r in self.rows("started", tool=tool))
 
     def said_since(self, t: float, pattern: str) -> bool:
         return any(st >= t and re.search(pattern, text, re.I) for st, text in self.said)
@@ -115,6 +153,7 @@ class Run:
             "decisions": len(self.rows("decision")),
             "rejected": len(self.rows("rejected")),
             "stale": len(self.rows("stale_decision")),
+            "late": len(self.rows("late_result")),
             "recalls": len(self.rows("recall")),
             "tokens_in": sum(int(c.get("tokens_in") or 0) for c in calls),
             "unasked": sum(1 for r in self.rows("started") if r["t"] < first_request),
@@ -122,6 +161,9 @@ class Run:
             "labels": len(self.rows("classified")),
             "s1_labels": sum(1 for r in self.rows("classified") if (r.get("directive") or {}).get("source") == "system1"),
         }
+
+    def executors(self) -> dict[str, dict[str, int]]:
+        return sc.executors_used(self.trace, self.frames_seen)
 
     def s1_calls(self, purpose: str) -> list[dict[str, Any]]:
         return [c for c in self.calls.values() if c.get("via") == "system1" and c.get("purpose") == purpose]
@@ -134,104 +176,124 @@ class Run:
                 return {**d, "kind": r.get("kind")}
         return {}
 
+    # -- scenario start --------------------------------------------------
+    async def begin(self, name: str) -> None:
+        """Load the scenario's house and assert its fixtures on world truth."""
+        self.current = name
+        b = BIND.scenario(name)
+        house = b["house"]
+        await self.load(BIND.scene(house), forget=bool(b.get("forget")))
+        need = [x for x in [b.get("target"), b.get("object")] if x] + list(b.get("distractors") or [])
+        need += BIND.second_request(name, self.original)[1] if b.get("status") == "substituted" or b.get("original") else []
+        ok, notes = sc.check_fixtures(BIND, house, (self.init or {}).get("layout") or {},
+                                      (self.frame or {}).get("truth") or {}, need)
+        self.fixtures = {"fixtures_ok": ok, "fixture_notes": notes}
+        if not ok:
+            raise FixtureError("; ".join(notes))
+
+
+class FixtureError(RuntimeError):
+    pass
+
 
 # ----------------------------------------------------------------------
 # Scenarios. Each returns (passed, note).
 # ----------------------------------------------------------------------
-async def fetch(r: Run, oid: str, label: str, timeout: float = 200) -> tuple[bool, str]:
+async def fetch(r: Run, oid: str, label: str, timeout: float | None = None) -> tuple[bool, str]:
     await r.say(f"Bring me the {label}.")
-    ok = await r.until(lambda: r.where(oid) == r.user_surface and r.idle(), timeout)
+    ok = await r.until(lambda: r.where(oid) == r.user_surface and r.idle(), timeout or r.limit())
     return ok, f"{oid} ended on {r.where(oid)}"
 
 
 async def fetch_other_room(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=True)
+    await r.begin("fetch_other_room")
     return await fetch(r, "alarm_clock_1", "alarm clock")
 
 
 async def fetch_search(r: Run) -> tuple[bool, str]:
-    await r.load(H15, forget=True)
+    await r.begin("fetch_search")
     return await fetch(r, "apple_1", "apple")
 
 
 async def correction(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=False)
+    await r.begin("correction")
     await r.say("Bring me a book.")
-    await r.until(lambda: r.started("navigate"), 40)
+    await r.until(lambda: r.started("navigate"), r.wait(40))
     await r.say("No, bring me the alarm clock instead.")
-    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), 200)
+    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), r.limit())
     books = [b for b in ("book_1", "book_2") if r.where(b) == r.user_surface]
     return ok and not books, f"alarm clock on {r.where('alarm_clock_1')}; books delivered: {books or 'none'}"
 
 
 async def stop_resume(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=False)
+    await r.begin("stop_resume")
     await r.say("Bring me the alarm clock.")
-    await r.until(lambda: r.started("navigate"), 40)
+    await r.until(lambda: r.started("navigate"), r.wait(40))
     await asyncio.sleep(2.0)
     await r.say("stop")
     stopped = await r.until(lambda: bool(r.rows("stop")), 10)
     await asyncio.sleep(5.0)
     await r.say("Okay, carry on.")
-    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), 200)
+    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), r.limit())
     acks = sum(1 for _, t in r.said if "stopped" in t.lower())
     return ok and stopped and acks == 1, f"halted={stopped}, delivered={ok}, 'stopped' said {acks}x"
 
 
 async def remember_where(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=False)                 # memory from the scenarios above
+    await r.begin("remember_where")                 # memory from the scenarios above
     t0 = r.now()
     await r.say("Where did you put the alarm clock last time?")
-    ok = await r.until(lambda: r.said_since(t0, r"table|kitchen"), 30)
+    ok = await r.until(lambda: r.said_since(t0, BIND.scenario("remember_where")["expect_said"]), r.limit())
     moved = r.started("navigate")
-    return ok and not moved, f"answered from memory={ok}, drove first={moved}"
+    return ok and not moved, f"answered from memory={ok}, walked first={moved}"
 
 
 async def recall_history(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=False)
+    await r.begin("recall_history")
     t0 = r.now()
     await r.say("What did I ask you to bring me before?")
-    ok = await r.until(lambda: r.said_since(t0, r"alarm clock|book|banana"), 30)   # everything the suite asks for in house 40
+    ok = await r.until(lambda: r.said_since(t0, BIND.scenario("recall_history")["expect_said"]), r.limit())
     return ok, f"named an earlier request={ok}, recalls={len(r.rows('recall'))}"
 
 
 async def question_midtask(r: Run) -> tuple[bool, str]:
-    await r.load(H15, forget=False)
+    await r.begin("question_midtask")
     await r.say("Bring me the apple.")
-    await r.until(lambda: r.started("navigate"), 40)
+    await r.until(lambda: r.started("navigate"), r.wait(40))
     t0 = r.now()
     await r.say("What are you holding right now?")
     answered = await r.until(lambda: any(st >= t0 for st, _ in r.said), 20)
-    ok = await r.until(lambda: r.where("apple_1") == r.user_surface and r.idle(), 200)
+    ok = await r.until(lambda: r.where("apple_1") == r.user_surface and r.idle(), r.limit())
     return ok and answered, f"answered={answered}, delivered={ok}"
 
 
 async def note_only(r: Run) -> tuple[bool, str]:
-    await r.load(H15, forget=False)
+    await r.begin("note_only")
     await r.say("By the way, my keys are usually on the kitchen counter.")
-    await asyncio.sleep(15)
+    await asyncio.sleep(r.limit())
     noted = bool(r.rows("note_saved"))
-    moved = r.started("navigate") or r.started("pick")
+    moved = r.started("navigate") or r.started("manipulate")
     return noted and not moved, f"noted={noted}, moved={moved}"
 
 
 async def unsupported(r: Run) -> tuple[bool, str]:
-    await r.load(H15, forget=False)
+    await r.begin("unsupported")
     t0 = r.now()
     await r.say("Put the apple in the microwave.")
-    ok = await r.until(lambda: r.said_since(t0, r"can't|cannot|can not|unable|not able|don't have a way"), 40)
+    ok = await r.until(lambda: r.said_since(t0, r"can't|cannot|can not|unable|not able|don't have a way"), r.limit())
     return ok, f"said it can't={ok}"
 
 
 async def missing_object(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=False)
+    await r.begin("missing_object")
     t0 = r.now()
     await r.say("Bring me the banana.")                  # there is no banana in this house
     told = await r.until(lambda: r.said_since(t0, r"can't find|couldn't find|could not find|no banana|"
-                                                   r"not find|didn't find|don't see|haven't found|isn't here|not here"), 150)
-    await r.until(r.idle, 20)
+                                                   r"not find|didn't find|don't see|haven't found|isn't here|not here"),
+                         r.limit())
+    await r.until(r.idle, r.wait(20))
     looks = len(r.rows("started", tool="navigate"))
-    return told, f"told you it isn't here={told}, drove to {looks} spots, {r.now() - t0:.0f} s"
+    return told, f"told you it isn't here={told}, walked to {looks} spots, {r.now() - t0:.0f} s"
 
 
 # ----------------------------------------------------------------------
@@ -246,20 +308,15 @@ THING_WORDS = {"apple", "banana", "orange", "bread", "egg", "tomato", "potato", 
 
 
 def _types_present(r: Run) -> set[str]:
-    objs = ((r.frame or {}).get("truth") or {}).get("objects") or {}
-    out = set()
-    for v in objs.values():
-        t = str(v.get("type") or "").replace("_", " ")
-        out |= {t, t.split()[-1], t.replace(" ", "")}          # "basket ball" is also "basketball"
-    return out | {"phone" if "cell phone" in out else "", "keys" if "key chain" in out else "",
-                  "remote" if "remote control" in out else "", "sponge" if "dish sponge" in out else ""}
+    """Every type in the house, from world truth (objects, and the house's full vocabulary sent in init)."""
+    return sc.types_present((r.frame or {}).get("truth") or {}, (r.init or {}).get("layout") or {})
 
 
 async def hold_on(r: Run) -> tuple[bool, str]:
     """A stop the keyword check misses: only System 1's label can stop the robot."""
-    await r.load(H40, forget=False)
+    await r.begin("hold_on")
     await r.say("Bring me the alarm clock.")
-    await r.until(lambda: r.started("navigate"), 40)
+    await r.until(lambda: r.started("navigate"), r.wait(40))
     await asyncio.sleep(2.0)
     t_say = time.monotonic()
     await r.say("hang on a sec")
@@ -268,19 +325,19 @@ async def hold_on(r: Run) -> tuple[bool, str]:
     lab = r.label("hang on a sec")
     await asyncio.sleep(3.0)
     await r.say("okay, go ahead")
-    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), 200)
+    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), r.limit())
     return (ok and stopped and lab.get("source") == "system1",
             f"stopped on the label={stopped} after {took:.1f}s (label {lab.get('kind')} from {lab.get('source')}, "
             f"P={lab.get('confidence')}), delivered={ok}")
 
 
 async def replace_task(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=False)
+    await r.begin("replace_task")
     await r.say("Bring me a book.")
-    await r.until(lambda: r.started("navigate"), 40)
+    await r.until(lambda: r.started("navigate"), r.wait(40))
     text = "Never mind the book, get me the alarm clock."
     await r.say(text)
-    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), 200)
+    ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle(), r.limit())
     books = [b for b in ("book_1", "book_2") if r.where(b) == r.user_surface]
     lab = r.label(text)
     return (ok and not books,
@@ -289,22 +346,24 @@ async def replace_task(r: Run) -> tuple[bool, str]:
 
 
 async def addition(r: Run) -> tuple[bool, str]:
-    await r.load(H40, forget=False)
+    """Two deliveries: the second request arrives while the first runs. On H40 the THOR text asked for a book;
+    both books are unreachable static prims there, so scenes.yaml substitutes a mug (see its note)."""
+    await r.begin("addition")
+    then, second = BIND.second_request("addition", r.original)
     await r.say("Bring me the alarm clock.")
-    await r.until(lambda: r.started("navigate"), 40)
-    text = "Also bring me a book."
-    await r.say(text)
+    await r.until(lambda: r.started("navigate"), r.wait(40))
+    await r.say(then)
     ok = await r.until(lambda: r.where("alarm_clock_1") == r.user_surface and r.idle()
-                       and any(r.where(b) == r.user_surface for b in ("book_1", "book_2")), 320)
-    books = [b for b in ("book_1", "book_2") if r.where(b) == r.user_surface]
-    lab = r.label(text)
-    return ok, (f"alarm clock on {r.where('alarm_clock_1')}, books delivered: {books or 'none'}; "
-                f"label {lab.get('kind')} from {lab.get('source')}")
+                       and any(r.where(b) == r.user_surface for b in second), r.limit())
+    got = [b for b in second if r.where(b) == r.user_surface]
+    lab = r.label(then)
+    return ok, (f"alarm clock on {r.where('alarm_clock_1')}, second ({'/'.join(second)}) delivered: {got or 'none'}; "
+                f"said {then!r}; label {lab.get('kind')} from {lab.get('source')}")
 
 
 async def observations(r: Run) -> tuple[bool, str]:
     """System 1 watches the camera during a fetch: it must look, and never report a thing the house lacks."""
-    await r.load(H40, forget=False)
+    await r.begin("observations")
     n0 = len(r.s1_calls("observe"))
     delivered, where = await fetch(r, "alarm_clock_1", "alarm clock")
     obs = [row for row in r.rows("observation") if row.get("source") == "system1"]
@@ -327,7 +386,7 @@ async def observations(r: Run) -> tuple[bool, str]:
 
 async def procedural(r: Run) -> tuple[bool, str]:
     """The planner gets what the procedural graph learned from earlier episodes."""
-    await r.load(H40, forget=False)
+    await r.begin("procedural")
     n0 = max(r.calls or {0: None})
     ok, note = await fetch(r, "alarm_clock_1", "alarm clock")
     inputs = [str(c.get("input") or "") for n, c in r.calls.items() if n > n0 and c.get("via") == "model"]
@@ -337,10 +396,10 @@ async def procedural(r: Run) -> tuple[bool, str]:
 
 async def permission_yes(r: Run) -> tuple[bool, str]:
     """In a house it hasn't mapped, the robot asks to look around; a yes (labelled by System 1) starts it."""
-    await r.load(H15, forget=True)
+    await r.begin("permission_yes")
     t0 = r.now()
     await r.send(type="persona", level="optimize")
-    asked = await r.until(lambda: any(st >= t0 and text.rstrip().endswith("?") for st, text in r.said), 90)
+    asked = await r.until(lambda: any(st >= t0 and text.rstrip().endswith("?") for st, text in r.said), r.limit())
     if not asked:
         await r.send(type="persona", level="off")
         return False, "the robot never asked"
@@ -355,19 +414,29 @@ async def permission_yes(r: Run) -> tuple[bool, str]:
 
 
 async def other_side(r: Run) -> tuple[bool, str]:
-    """"The other side of the stove" needs to know what the stove sits between. The spatula starts
-    on counter_1a, right of it is the stove, then counter_2. Memory is kept (it's your kitchen)."""
-    await r.load(K10, forget=False)
+    """"The other side of the stove" needs to know what the stove sits between. In MolmoSpaces Kitchen 10 the
+    spatula starts on counter_2b, the stove is next along the wall, then counter_2a (scenes.yaml has why this
+    differs from THOR's counter_1a / counter_2). Both surfaces are also resolved from the live map and truth."""
+    b = BIND.scenario("other_side")
+    await r.begin("other_side")
     n0 = max(r.calls or {0: None})
-    start = r.where("spatula_1")
-    await r.say("move the spatula to the other side of the stove")
-    ok = await r.until(lambda: r.where("spatula_1") == "counter_2" and r.idle(), 200)
+    lay = (r.init or {}).get("layout") or {}
+    start = r.where(b["object"])
+    lm = (lay.get("landmarks") or {}).get(b["landmark"]) or {}
+    target = b["target_surface"]
+    if start and lm.get("x") is not None:
+        live = sc.other_side(lay, (float(lm["x"]), float(lm["z"])), start)
+        if live and live != target:
+            r.fixtures.setdefault("fixture_notes", []).append(f"live map puts the other side at {live}, scenes.yaml at {target}")
+            target = live
+    await r.say(b["say"])
+    ok = await r.until(lambda: r.where(b["object"]) == target and r.idle(), r.limit())
     inputs = [str(c.get("input") or "") for n, c in r.calls.items() if n > n0 and c.get("via") == "model"]
-    knew = any("stove_1 (stove) is between counter_1a and counter_2" in i for i in inputs)
+    golden = sc.golden_lines(b["landmark"], start or b["start_surface"], target)
+    knew = any(g in i for i in inputs for g in golden)
     checks = [f"{c.get('goal')!r}: {c.get('ok')}" for c in r.rows("goal_check")]
-    return ok and start == "counter_1a", (f"spatula_1 from {start} to {r.where('spatula_1')}; "
-                                         f"LAYOUT had the stove between counter_1a and counter_2: {knew}; "
-                                         f"goal checks: {', '.join(checks) or 'none'}")
+    return ok and start == b["start_surface"], (f"{b['object']} from {start} to {r.where(b['object'])} (target {target}); "
+                                                f"LAYOUT had {golden[0]!r}: {knew}; goal checks: {', '.join(checks) or 'none'}")
 
 
 SCENARIOS: list[tuple[str, Callable[[Run], Awaitable[tuple[bool, str]]]]] = [
@@ -391,40 +460,90 @@ SCENARIOS: list[tuple[str, Callable[[Run], Awaitable[tuple[bool, str]]]]] = [
 ]
 
 
+def score(name: str, passed: bool, note: str, seconds: float, run: Run) -> dict[str, Any]:
+    """One result row: pass/fail, the binding, the time limit and how it was derived, the executors that
+    produced the result, and the honesty label (a pass through a STEPPING STONE is a fallback pass)."""
+    b = BIND.scenario(name)
+    limit, how = BIND.time_limit(name, run.profile, run.scale)
+    used = run.executors()
+    hon = sc.honesty(used, grasp=bool(b.get("grasp")), profile=run.profile)
+    return {"name": name, "passed": passed, "seconds": round(seconds, 1), "note": note,
+            "profile": run.profile, "house": b["house"], "scene": BIND.scene(b["house"]),
+            "binding": ("original" if run.original else b.get("use", "original")) if b.get("status") == "substituted" else "as_thor",
+            "binding_status": b.get("status", "ok"), "binding_flags": list(b.get("flags") or []),
+            "time_limit_s": limit, "time_limit": how,
+            "executors_used": used, "shortcuts": hon["shortcuts"], "honesty": hon["labels"],
+            "fallback_pass": bool(passed and hon["fallback"]), "target_pass": bool(passed and not hon["fallback"]),
+            **run.fixtures, **run.metrics()}
+
+
+def summarize(results: list[dict[str, Any]], profile: str, tag: str) -> dict[str, Any]:
+    by_exec: dict[str, dict[str, int]] = {}
+    for r in results:
+        for group in ("nav", "manip"):
+            for ex in (r["executors_used"].get(group) or {}):
+                d = by_exec.setdefault(ex, {"scenarios": 0, "passed": 0})
+                d["scenarios"] += 1
+                d["passed"] += int(r["passed"])
+    return {"tag": tag, "profile": profile, "wall": round(time.time()),
+            "passed": sum(r["passed"] for r in results), "total": len(results),
+            "target_passes": sum(r["target_pass"] for r in results),
+            "fallback_passes": sum(r["fallback_pass"] for r in results),
+            "by_executor": by_exec,
+            "decisions": sum(r["decisions"] for r in results),
+            "tokens_in": sum(r["tokens_in"] for r in results), "results": results}
+
+
+def line(res: dict[str, Any]) -> str:
+    verdict = "PASS" if res["passed"] else "FAIL"
+    if res["fallback_pass"]:
+        verdict = "PASS*"
+    lab = f"  [{'; '.join(res['honesty'])}]" if res["honesty"] else ""
+    return (f"{verdict:<5} {res['name']:<18} {res['seconds']:>6.1f}s/{res['time_limit_s']:<6.0f} decisions "
+            f"{res['decisions']:>3}  rejected {res['rejected']}  recalls {res['recalls']}  tokens {res['tokens_in']:>6}  "
+            f"labels {res['s1_labels']}/{res['labels']} by System 1  {res['note']}{lab}")
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", default="ws://127.0.0.1:8765/ws")
     ap.add_argument("--only", default="", help="comma-separated scenario names")
     ap.add_argument("--tag", default="run")
+    ap.add_argument("--profile", default="lite", choices=sorted(BIND.data["profiles"]))
+    ap.add_argument("--time-scale", type=float, default=None, help="override the profile's time scale")
+    ap.add_argument("--original", action="store_true", help="run THOR's text where scenes.yaml substituted one")
     args = ap.parse_args()
     only = {s for s in args.only.split(",") if s}
+    from websockets.asyncio.client import connect
     results = []
     async with connect(args.url, max_size=2 ** 24) as ws:
-        run = Run(ws)
+        run = Run(ws, args.profile, args.time_scale, args.original)
         reader = asyncio.create_task(run.reader())
         for name, fn in SCENARIOS:
             if only and name not in only:
                 continue
             t0 = time.monotonic()
+            run.fixtures, run.frames_seen = {}, []
             try:
                 passed, note = await fn(run)
-            except Exception as e:                         # a broken scenario fails, the suite goes on
+            except FixtureError as e:
+                passed, note = False, f"fixture: {e}"
+            except Exception as e:  # noqa: BLE001  (a broken scenario fails, the suite goes on)
                 passed, note = False, f"error: {e!r}"
-            res = {"name": name, "passed": passed, "seconds": round(time.monotonic() - t0, 1),
-                   "note": note, **run.metrics()}
+            res = score(name, passed, note, time.monotonic() - t0, run)
             results.append(res)
-            print(f"{'PASS' if passed else 'FAIL'}  {name:<18} {res['seconds']:>6.1f}s  decisions {res['decisions']:>3}  "
-                  f"rejected {res['rejected']}  recalls {res['recalls']}  tokens {res['tokens_in']:>6}  "
-                  f"labels {res['s1_labels']}/{res['labels']} by System 1  {note}", flush=True)
+            print(line(res), flush=True)
         reader.cancel()
-    summary = {"tag": args.tag, "wall": round(time.time()), "passed": sum(r["passed"] for r in results),
-               "total": len(results), "decisions": sum(r["decisions"] for r in results),
-               "tokens_in": sum(r["tokens_in"] for r in results), "results": results}
+    summary = summarize(results, args.profile, args.tag)
     OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.tag}.json"
+    path = OUT / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.profile}_{args.tag}.json"
     path.write_text(json.dumps(summary, indent=1))
-    print(f"\n{summary['passed']}/{summary['total']} passed · {summary['decisions']} decisions · "
-          f"{summary['tokens_in']} tokens in · {path.relative_to(ROOT)}")
+    print(f"\n{summary['passed']}/{summary['total']} passed on {args.profile} "
+          f"({summary['target_passes']} target, {summary['fallback_passes']} fallback: PASS* rests on a sim shortcut) · "
+          f"{summary['decisions']} decisions · {summary['tokens_in']} tokens in · {path.relative_to(ROOT)}")
+    for ex, d in sorted(summary["by_executor"].items()):
+        tag = " (STEPPING STONE)" if ex in sc.stepping_stones() else ""
+        print(f"  {ex}{tag}: {d['passed']}/{d['scenarios']} scenarios passed")
     return 0 if summary["passed"] == summary["total"] else 1
 
 

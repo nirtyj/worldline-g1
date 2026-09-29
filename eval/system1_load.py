@@ -2,8 +2,11 @@
 Gemini Live connection (GEMINI_API_KEY from .env; some cents a run): a frame and a state every
 second to the observer, an observation every 5 s, and a message every few seconds to the router.
 
-    .venv-thor/bin/python -m eval.system1_load [seconds]
-    .venv-thor/bin/python -m eval.system1_load 120 --jev    # label with Jev, observe with Gemini
+    .venv/bin/python -m eval.system1_load [seconds]
+    .venv/bin/python -m eval.system1_load 120 --jev    # label with Jev, observe with Gemini
+
+Frames: captured G1 head frames runs/frames/g1_*.jpg (PLAN 8.6, recorded in M2 from the eval houses),
+else the M1 head-camera stills under outputs/ (the d435-mount camera), else a stub.
 
 Reports route latency (the target is under 1 s; the runtime's budget is 2 s), observation
 latency, fresh sessions, time the router was unavailable, and tokens billed.
@@ -28,10 +31,18 @@ MESSAGES = [("hold on", "stop"), ("where are you going?", "question"), ("okay go
             ("thanks!", "chitchat"), ("stop", "stop"), ("don't go into the bedroom", "constraint")]
 
 
+def g1_frames() -> list[bytes]:
+    """G1 head-camera JPEGs: runs/frames/g1_*.jpg, else the M1 stills in outputs/, else a stub."""
+    jpgs = sorted((ROOT / "runs" / "frames").glob("g1_*.jpg"))
+    if jpgs:
+        return [p.read_bytes() for p in jpgs]
+    stills = sorted((ROOT / "outputs").glob("m1*/**/*ego*.png")) + sorted((ROOT / "outputs").glob("m1*/**/*eye*.png"))
+    return [jpeg_from(p) for p in stills[:40]] or [b"\xff\xd8"]
+
+
 async def main(seconds: float) -> int:
     load_env()
-    pngs = sorted((ROOT.parent / ".playwright-mcp").glob("thor_*.png"))
-    frames = [jpeg_from(p) for p in pngs] or [b"\xff\xd8"]
+    frames = g1_frames()
     if "--jev" in sys.argv:
         s1 = JevSystemOne(os.environ.get("TYPESAFE_API_KEY", ""), os.environ.get("GEMINI_API_KEY", ""),
                           model=os.environ.get("SYSTEM1_MODEL", MODEL), route_timeout=8.0)

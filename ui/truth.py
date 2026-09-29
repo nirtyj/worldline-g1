@@ -278,10 +278,27 @@ def world_rooms(world: Any, map_rooms: dict[str, Any] | None = None) -> dict[str
     return out
 
 
+def static_truth(truth: Any) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """From world.truth(): every type in the house (`things`, decor included: the eval's hallucination
+    check) and the landmarks with their positions (fixed at load). Both are ground truth, UI + eval only."""
+    t = to_plain(truth) if truth is not None else {}
+    if not isinstance(t, dict):
+        return [], {}
+    things = t.get("things") or {}
+    types = sorted({str(v) for v in (things.values() if isinstance(things, dict) else things) if v})
+    lms = {}
+    for name, lm in (t.get("landmarks") or {}).items():
+        lms[name] = {"type": lm.get("type"), "label": lm.get("label"), "near": lm.get("near"),
+                     "x": lm.get("x"), "z": lm.get("z"), "y": lm.get("y")}
+    return types, lms
+
+
 def layout_message(scene: str, map_: dict[str, Any], world: Any, grid: GridView | None,
-                   *, profile: str = "", top_extent: Iterable[float] | None = None) -> dict[str, Any]:
+                   *, profile: str = "", top_extent: Iterable[float] | None = None,
+                   truth: Any = None) -> dict[str, Any]:
     """The init message's `layout`: the same keys the THOR page used, now built from the
-    robot map (keypoints, surfaces, people) and the world model (rooms, occupancy)."""
+    robot map (keypoints, surfaces, people) and the world model (rooms, occupancy, and from
+    world.truth() the house's type vocabulary and landmark positions)."""
     kps: dict[str, dict[str, float]] = {}
     for name, k in (map_.get("keypoints") or {}).items():
         xy = k.get("xy") or [k.get("x", 0.0), k.get("z", 0.0)]
@@ -321,11 +338,12 @@ def layout_message(scene: str, map_: dict[str, Any], world: Any, grid: GridView 
             ext = [min(xs) - 1, min(zs) - 1, max(xs) + 1, max(zs) + 1]
         else:
             ext = [-5.0, -5.0, 5.0, 5.0]
+    things, landmarks = static_truth(truth)
     return {
         "scene": scene, "profile": profile, "topdown": topdown_from_extent(ext),
         "keypoints": kps, "surfaces": surfaces, "user_surface": user_surface, "human": human,
         "grid": grid_cells, "grid_step": DISPLAY_STEP, "rooms": rooms, "occupancy": occupancy,
-        "truth_label": GT_LABEL,
+        "things": things, "landmarks": landmarks, "truth_label": GT_LABEL,
     }
 
 

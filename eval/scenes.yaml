@@ -1,0 +1,288 @@
+# The 17 Worldline scenarios bound to the G1 stack (PLAN 9.1, 9.2; owner decision 0.3).
+#
+# Houses are the MolmoSpaces USD exports of the SAME ProcTHOR/iTHOR houses Worldline used on AI2-THOR:
+# procthor-train-40 = MolmoSpaces procthor-10k-train/train_40 (100% of object ids match the ProcTHOR JSON,
+# docs/scenes.md 2), procthor-train-15 likewise, ithor-FloorPlan10 = iTHOR FloorPlan10 ("Kitchen 10").
+#
+# Where each binding comes from (checked on 2026-09-29 against the recorded houses in
+# /work/worldline-g1/assets/houses/<id>/house_info.json + occupancy.npz, built through world/ exactly as the
+# runtime builds them: world.lite_world.LiteWorld -> static map, truth; tests/eval/test_scenes.py re-checks it):
+#   surface names   world/mapgen.py on the G1 nav grid (THOR's naming rule, ported)
+#   user_surface    world/mapgen.py's rule (the surface whose stand is nearest the start)
+#   object surface  world/where.py at scene load (the initial pose; reset_scene restores it)
+#   heights         object AABB bottom/top above the floor (m); the G1 reach band is api.types.RobotProfile
+#                   reach_h_min_m .. reach_h_max_m (0.55 .. 1.20 m today)
+#   dynamic         MolmoSpaces metadata is_static == false (a rigid body the sim can move)
+#
+# At run time the suite never trusts this file over the world: scoring reads frame.truth (world.truth(),
+# through the page), the user surface is init.layout.user_surface, and `fixtures` below are asserted against
+# the truth at the start of every scenario (a mismatch is recorded as fixtures_ok: false). The eval never
+# talks to the simulator itself: the referee reads ground truth only through world/.
+version: 1
+
+# Walking speed, pick and place times per profile come from api.types.PROFILES when it imports; these are the
+# fallbacks and the M1 measurements behind them (SONIC walks ~0.45 m/s, 0.4-1.1 s stops; THOR teleported 0.6 m/s).
+profiles:
+  lite:    {time_scale: 1.0, walk_mps: 0.45, t_pick_s: 6.0,  t_place_s: 5.0}
+  bringup: {time_scale: 1.3, walk_mps: 0.40, t_pick_s: 8.0,  t_place_s: 6.0}
+  sonic:   {time_scale: 2.0, walk_mps: 0.40, t_pick_s: 12.0, t_place_s: 10.0}
+  full:    {time_scale: 2.5, walk_mps: 0.40, t_pick_s: 15.0, t_place_s: 10.0}
+
+# A scenario's time limit is  max(thor_limit_s * time_scale, 2 * humanoid_estimate_s)  with
+#   humanoid_estimate_s = planner_s + 1.25 * walk_m / walk_mps + legs * stop_s + scans * scan_s
+#                         + picks * (t_pick_s + check_s) + places * t_place_s
+# (1.25: path curvature and turn-in-place; stop_s: SONIC's measured 0.4-1.1 s stop plus the 0.6 s settle).
+estimate:
+  planner_s: 60.0
+  stop_s: 1.7
+  scan_s: 5.0
+  check_s: 3.0
+
+houses:
+  H40:
+    scene: procthor-train-40
+    thor_scene: procthor-train-40
+    rooms: [bedroom, kitchen, living_room]
+    start: {x: 5.75, y: 4.25, room: kitchen}          # ProcTHOR agent start (Isaac xy)
+    user_surface: kitchen_counter_1a                   # G1 map; THOR had kitchen_dining_table_1b (stands moved with the G1 radius)
+    user_surface_thor: kitchen_dining_table_1b
+    objects:
+      alarm_clock_1: {type: alarm_clock, surface: bedroom_dresser_1b, room: bedroom, height_m: [0.97, 1.13], dynamic: true}
+      book_1:        {type: book, surface: bedroom_bed_1a, room: bedroom, height_m: [0.53, 0.56], dynamic: false,
+                      flags: [static_prim, below_reach]}
+      book_2:        {type: book, surface: bedroom_bed_1c, room: bedroom, height_m: [0.53, 0.57], dynamic: false,
+                      flags: [static_prim, below_reach]}
+      mug_1:         {type: mug, surface: bedroom_dresser_1a, room: bedroom, height_m: [0.97, 1.05], dynamic: true}
+      mug_2:         {type: mug, surface: kitchen_counter_1b, room: kitchen, height_m: [0.94, 1.02], dynamic: true}
+    absent_types: [banana]
+    walk_m:                                            # world/mapgen edge lengths on the G1 nav grid
+      start>bedroom_dresser_1b: 4.82
+      bedroom_dresser_1b>kitchen_counter_1a: 6.08
+      start>bedroom_bed_1a: 5.95
+      bedroom_bed_1a>bedroom_dresser_1b: 2.93
+      start>kitchen_counter_1a: 1.73
+      bedroom_dresser_1a>kitchen_counter_1a: 6.89
+  H15:
+    scene: procthor-train-15
+    thor_scene: procthor-train-15
+    rooms: [bathroom, bedroom, kitchen, living_room]
+    start: {x: 9.25, y: 2.75, room: living_room}
+    user_surface: living_room_arm_chair_1a             # same name as THOR's living_room_arm_chair_1 stretch a
+    user_surface_thor: living_room_arm_chair_1
+    user_surface_flags: [chair_top_is_backrest]
+    user_surface_proposed: living_room_dining_table_1a # 0.86 m flat top in the same room; needs mapgen's user_surface override
+    objects:
+      apple_1:     {type: apple, surface: kitchen_counter_1b, room: kitchen, height_m: [0.94, 1.05], dynamic: true}
+    landmarks:
+      microwave_1: {type: microwave, surface: kitchen_dining_table_1a, room: kitchen}
+    absent_types: []
+    walk_m:
+      start>kitchen_counter_1b: 6.16
+      kitchen_counter_1b>living_room_arm_chair_1a: 7.30
+      start>living_room_arm_chair_1a: 1.52
+  K10:
+    scene: ithor-FloorPlan10
+    thor_scene: FloorPlan10
+    rooms: [kitchen]
+    start: {x: -3.125, y: -1.575, room: kitchen}
+    user_surface: sink_basin_1                         # same as THOR
+    user_surface_thor: sink_basin_1
+    objects:
+      spatula_1:   {type: spatula, surface: counter_2b, room: kitchen, height_m: [0.90, 0.92], dynamic: true}
+    landmarks:
+      stove_1:     {type: stove, near: counter_2b, room: kitchen}
+    absent_types: []
+    walk_m:
+      start>counter_2b: 4.27
+      counter_2b>counter_2a: 1.06
+
+# The scenarios. `thor_limit_s` is the THOR suite's wall-clock limit; the G1 limit is derived as above.
+# `status`: ok | flagged (runs as written, but part of it cannot be exercised on the G1 today; see `flags`) |
+# substituted (the THOR object cannot work here; `use: substitute` runs the proposal, `use: original` the THOR text).
+# `grasp`: the scenario's score depends on a pick/place, so on bringup/sonic it rests on the attach-grasp shortcut
+# and is reported as a fallback pass (PLAN 12.2).
+scenarios:
+  fetch_other_room:
+    house: H40
+    forget: true
+    say: "Bring me the alarm clock."
+    target: alarm_clock_1
+    thor_limit_s: 200
+    legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 2, picks: 1, places: 1}
+    grasp: true
+    status: ok
+  correction:
+    house: H40
+    say: "Bring me a book."
+    then: "No, bring me the alarm clock instead."
+    target: alarm_clock_1
+    distractors: [book_1, book_2]
+    thor_limit_s: 200
+    legs: [start>bedroom_bed_1a, bedroom_bed_1a>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 3, picks: 1, places: 1}
+    grasp: true
+    status: flagged
+    flags: [distractor_not_graspable]
+    note: >-
+      The books are static prims lying at 0.53-0.57 m in the mattress (the bed's AABB top is 0.68 m), below the
+      0.55 m reach band. The correction comes after the first navigate starts, so no book has to be picked and the
+      score (alarm clock delivered, no book on the user surface) is unaffected; a planner that reaches the bed first
+      will get check_reachability -> too_low for the book instead of THOR's pick.
+  stop_resume:
+    house: H40
+    say: "Bring me the alarm clock."
+    target: alarm_clock_1
+    thor_limit_s: 200
+    legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 2, picks: 1, places: 1}
+    grasp: true
+    status: ok
+  remember_where:
+    house: H40
+    say: "Where did you put the alarm clock last time?"
+    expect_said: "table|kitchen|counter"
+    thor_limit_s: 30
+    status: ok
+    note: "The user surface is kitchen_counter_1a on the G1 map (THOR: kitchen_dining_table_1b); 'counter' is accepted too."
+  recall_history:
+    house: H40
+    say: "What did I ask you to bring me before?"
+    expect_said: "alarm clock|book|banana|mug"
+    thor_limit_s: 30
+    status: ok
+  missing_object:
+    house: H40
+    say: "Bring me the banana."
+    absent: banana
+    thor_limit_s: 150
+    legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 4, picks: 0, places: 0}
+    status: ok
+  fetch_search:
+    house: H15
+    forget: true
+    say: "Bring me the apple."
+    target: apple_1
+    thor_limit_s: 200
+    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_arm_chair_1a]
+    work: {scans: 3, picks: 1, places: 1}
+    grasp: true
+    status: flagged
+    flags: [user_surface_is_armchair]
+    note: >-
+      The apple is on kitchen_counter_1b (0.94 m, dynamic) with the start in the living room, as on THOR. The user
+      surface is an armchair whose AABB top (0.91 m) is the backrest, not the seat, so a place there is placed by the
+      attach shortcut at the wrong height. Proposal: user_surface living_room_dining_table_1a (0.86 m flat top).
+  question_midtask:
+    house: H15
+    say: "Bring me the apple."
+    then: "What are you holding right now?"
+    target: apple_1
+    thor_limit_s: 200
+    legs: [start>kitchen_counter_1b, kitchen_counter_1b>living_room_arm_chair_1a]
+    work: {scans: 2, picks: 1, places: 1}
+    grasp: true
+    status: flagged
+    flags: [user_surface_is_armchair]
+  note_only:
+    house: H15
+    say: "By the way, my keys are usually on the kitchen counter."
+    thor_limit_s: 15
+    status: ok
+  unsupported:
+    house: H15
+    say: "Put the apple in the microwave."
+    thor_limit_s: 40
+    status: ok
+    note: "microwave_1 is a landmark on kitchen_dining_table_1a; placing INTO containers stays unsupported."
+  hold_on:
+    house: H40
+    say: "Bring me the alarm clock."
+    target: alarm_clock_1
+    thor_limit_s: 200
+    legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 2, picks: 1, places: 1}
+    grasp: true
+    needs: [typesafe_key]
+    status: ok
+  replace_task:
+    house: H40
+    say: "Bring me a book."
+    then: "Never mind the book, get me the alarm clock."
+    target: alarm_clock_1
+    distractors: [book_1, book_2]
+    thor_limit_s: 200
+    legs: [start>bedroom_bed_1a, bedroom_bed_1a>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 3, picks: 1, places: 1}
+    grasp: true
+    status: flagged
+    flags: [distractor_not_graspable]
+  addition:
+    house: H40
+    say: "Bring me the alarm clock."
+    target: alarm_clock_1
+    thor_limit_s: 320
+    legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a,
+           bedroom_dresser_1a>kitchen_counter_1a, bedroom_dresser_1a>kitchen_counter_1a]
+    work: {scans: 4, picks: 2, places: 2}
+    grasp: true
+    status: substituted
+    original: {then: "Also bring me a book.", second: [book_1, book_2]}
+    substitute: {then: "Also bring me a mug.", second: [mug_1, mug_2]}
+    use: substitute
+    flags: [second_object_not_graspable]
+    note: >-
+      THOR's second delivery was a book. Both H40 books are static prims (MolmoSpaces is_static) lying at
+      0.53-0.57 m on the bed, below the G1's 0.55 m reach floor, so no G1 profile can pick one: the scenario would
+      measure the fixture, not the runtime. The substitute keeps the scenario's point (a second request added
+      while the first is running, two objects on the user surface): mug_1 is on bedroom_dresser_1a next to the
+      alarm clock (0.97-1.05 m, dynamic) and mug_2 on kitchen_counter_1b; either counts. `use: original` (or
+      --original) runs THOR's text once a fixture raises a book onto the dresser (needs world/sim fixture support).
+  observations:
+    house: H40
+    say: "Bring me the alarm clock."
+    target: alarm_clock_1
+    thor_limit_s: 200
+    legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 2, picks: 1, places: 1}
+    grasp: true
+    needs: [gemini_key]
+    status: ok
+    note: "Types present come from world.truth().things (every scene item, decor included), sent once in init."
+  procedural:
+    house: H40
+    say: "Bring me the alarm clock."
+    target: alarm_clock_1
+    thor_limit_s: 200
+    legs: [start>bedroom_dresser_1b, bedroom_dresser_1b>kitchen_counter_1a]
+    work: {scans: 2, picks: 1, places: 1}
+    grasp: true
+    status: ok
+  permission_yes:
+    house: H15
+    forget: true
+    thor_limit_s: 90
+    status: ok
+  other_side:
+    house: K10
+    say: "move the spatula to the other side of the stove"
+    object: spatula_1
+    landmark: stove_1
+    start_surface: counter_2b
+    target_surface: counter_2a
+    golden: "stove_1 (stove) is between counter_2b and counter_2a"
+    thor: {start_surface: counter_1a, target_surface: counter_2, golden: "stove_1 (stove) is between counter_1a and counter_2"}
+    thor_limit_s: 200
+    legs: [start>counter_2b, counter_2b>counter_2a]
+    work: {scans: 2, picks: 1, places: 1}
+    grasp: true
+    status: flagged
+    flags: [stretch_overlaps_stove]
+    note: >-
+      MolmoSpaces FloorPlan10 has one wall counter prim (counter_top_2, y -2.40..0.50) with the stove built into it
+      (y -1.70..-0.90), where THOR had counter_1 and counter_2 either side of the stove. Mapgen splits it into
+      counter_2a (coffee-machine side), counter_2b (over the stove and the spatula) and counter_2c (toaster side),
+      so the spatula starts on counter_2b and the other side of the stove is counter_2a; the golden line changes
+      accordingly (either order is accepted). The suite also resolves both surfaces from the live map and truth at
+      run time. Proposal for world/: cut stretches at embedded appliances so no stretch covers the stove top.

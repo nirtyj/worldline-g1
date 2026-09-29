@@ -1,7 +1,7 @@
 """Evolve the procedural graph: propose rules from past failures, keep them only if they help.
 
-    .venv-thor/bin/python eval/evolve.py                   # needs the playground server running
-    .venv-thor/bin/python eval/evolve.py --baseline runs/eval/<stamp>_baseline.json
+    .venv/bin/python eval/evolve.py                   # needs the playground server running
+    .venv/bin/python eval/evolve.py --baseline runs/eval/<stamp>_baseline.json
 
 1. Learn the graph from every episode on disk, and ask the refiner model for up
    to three candidate rules (agent/procedures.py propose).
