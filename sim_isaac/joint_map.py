@@ -81,6 +81,10 @@ KDS: list[float] = [
 # Dex3 hold gains used by the deploy: $WBC/gear_sonic_deploy/.../include/dex3_hands.hpp:308-332 (kp=1.5, kd=0.1)
 DEX3_HOLD_KP = 1.5
 DEX3_HOLD_KD = 0.1
+# Passive joint damping of every Dex3 joint in gear_sonic's MuJoCo model (finger_motor class,
+# g1_29dof_with_hand.xml:20-22: damping 0.05, armature 0.01, frictionloss 0.1). P1 adds it to the kd the deploy
+# sends (dds_bridge), as MuJoCo adds joint damping to the PD; armature 0.01 is in g1_asset; frictionloss is not modelled.
+DEX3_JOINT_DAMPING = 0.05
 
 # Training effort limits per joint (effort_limit_sim, g1.py:246-251,278,286,294,311-319); used for --pd explicit clipping
 # and tau_est. Hands: URDF <limit effort>, read at runtime from the articulation.

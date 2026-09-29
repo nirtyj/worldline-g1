@@ -110,7 +110,7 @@ class G1DdsBridge:
         self.kd[self.motor_idx] = jm.KDS
         for hi in (self.left_idx, self.right_idx):
             self.kp[hi] = jm.DEX3_HOLD_KP
-            self.kd[hi] = jm.DEX3_HOLD_KD
+            self.kd[hi] = jm.DEX3_HOLD_KD + jm.DEX3_JOINT_DAMPING
 
         self.crc_on = crc
         self.mode_machine = int(mode_machine)
@@ -263,7 +263,7 @@ class G1DdsBridge:
                     self.q_t[hi] = v["q"]
                     self.dq_t[hi] = v["dq"]
                     self.kp[hi] = v["kp"]
-                    self.kd[hi] = v["kd"]
+                    self.kd[hi] = v["kd"] + jm.DEX3_JOINT_DAMPING   # + the MuJoCo finger joints' passive damping
                     self.tau[hi] = v["tau"]
                     self.hand_cmd_count += 1
                     changed = True

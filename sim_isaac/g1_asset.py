@@ -7,10 +7,16 @@ Sources (`$WBC` = /work/repos/GR00T-WholeBodyControl @ b042411):
 - body: $WBC/gear_sonic/data/assets/robot_description/urdf/g1/main.urdf (the robot SONIC was trained on; 29 revolute
   joints, the 14 Dex3 joints are type="fixed", e.g. main.urdf:836)
 - hands: $WBC/gear_sonic/data/robot_model/model_data/g1/g1_29dof_with_hand.urdf (the same 14 joints as revolute,
-  e.g. :861-867); we copy <axis>/<limit>/<origin> from there.
+  e.g. :861-867); we copy <axis>/<limit>/<origin> from there, and the <collision> of every Dex3 link that it models
+  with a primitive: the two thumb_1 links are a 2 x 3 x 2 cm box there (and in the MuJoCo model,
+  g1_29dof_with_hand.xml:336,487) but the thumb_1 mesh in main.urdf, whose convex hull sits ~7.5 mm inside the
+  palm's hull at every thumb angle. With self-collisions on (training parity) that contact jammed both thumbs'
+  thumb_0/thumb_1 and pushed them to arbitrary poses at spawn (docs/arm_tracking.md §3.7).
 - conversion options: $WBC/gear_sonic/envs/manager_env/robots/g1.py:199-222 (UrdfFileCfg: fix_base=False,
   replace_cylinders_with_capsules=True, drive gains 0; merge_fixed_joints left at the Isaac Lab default True).
 - actuators: imported from g1.py:238-357 (G1_CYLINDER_MODEL_12_DEX_CFG.actuators), not copied.
+- spawn: the Dex3 finger links do not collide with the rest of the robot (filter_dex3_body_collisions; the training
+  body colliders are coarse proxies, e.g. a thigh capsule the fingertips sit in at SONIC's rest arms).
 """
 from __future__ import annotations
 
@@ -74,6 +80,22 @@ def patch_urdf(main_urdf: Path = MAIN_URDF, hand_urdf: Path = HAND_URDF, out_urd
         changed.append(name)
     if len(changed) != 14:
         raise RuntimeError(f"expected 14 hand joints, found {len(changed)}: {changed}")
+    # Dex3 links the hand URDF collides with primitives (thumb_1: a box) get that collision instead of the mesh
+    hand_links = {l.get("name"): l for l in hand_root.findall("link")}
+    child_links = {j.find("child").get("link") for j in root.findall("joint") if j.get("name") in changed}
+    collision_from_hand = []
+    for link in root.findall("link"):
+        src = hand_links.get(link.get("name"))
+        if link.get("name") not in child_links or src is None:
+            continue
+        cols = src.findall("collision")
+        if not cols or any(c.find("geometry/mesh") is not None for c in cols):
+            continue
+        for c in link.findall("collision"):
+            link.remove(c)
+        for c in cols:
+            link.append(copy.deepcopy(c))
+        collision_from_hand.append(link.get("name"))
     n_mesh = 0
     for m in root.iter("mesh"):
         m.set("filename", _resolve_mesh(m.get("filename"), main_urdf))
@@ -84,6 +106,7 @@ def patch_urdf(main_urdf: Path = MAIN_URDF, hand_urdf: Path = HAND_URDF, out_urd
     tree.write(out_urdf, encoding="utf-8", xml_declaration=True)
     revolute = [j.get("name") for j in root.findall("joint") if j.get("type") == "revolute"]
     return {"out_urdf": str(out_urdf), "hand_joints_made_revolute": changed, "limit_axis_origin_diffs": diffs,
+            "collision_from_hand_urdf": collision_from_hand,
             "revolute_joints": len(revolute), "meshes": n_mesh, "source": str(main_urdf), "hand_source": str(hand_urdf)}
 
 
@@ -114,8 +137,44 @@ def usd_path(out_dir: Path = DEFAULT_OUT) -> Path:
     return out_dir / USD_NAME
 
 
-def make_articulation_cfg(usd: str, prim_path: str = "/World/G1", pos=(0.0, 0.0, 0.8), yaw: float = 0.0):
-    """ArticulationCfg with training-parity actuators (imported from gear_sonic) + a Dex3 group."""
+DEX3_FINGER_LINK_RE = re.compile(r"^(left|right)_hand_(thumb_[0-2]|middle_[01]|index_[01])_link$")
+
+
+def filter_dex3_body_collisions(stage, root: str) -> int:
+    """UsdPhysics.FilteredPairsAPI: each Dex3 finger/thumb link vs every robot link that is not part of a hand.
+
+    Training had the Dex3 merged into the wrist (fixed joints), so its body collision shapes are coarse proxies that
+    never had fingers next to them: e.g. the thigh is a capsule (main.urdf left_hip_roll_link: cylinder r 0.05,
+    l 0.2, replace_cylinders_with_capsules) that encloses the space where the thumbs and fingertips sit when SONIC
+    holds its own rest arms. Measured (tools/hand_physics_probe.py, fixed root, SONIC's rest arms, no filter):
+    thumb_2 / index_1 / middle_1 vs hip_roll_link contacts up to 215 N, thumbs pushed off target by up to 1.2 rad.
+    Fingers keep colliding with their own hand, the other hand and the world. Returns the number of pairs."""
+    from pxr import UsdPhysics
+    links = [p for p in stage.GetPrimAtPath(root).GetChildren() if p.HasAPI(UsdPhysics.RigidBodyAPI)]
+    fingers = [p for p in links if DEX3_FINGER_LINK_RE.match(p.GetName())]
+    body = [p.GetPath() for p in links if not DEX3_FINGER_LINK_RE.match(p.GetName())
+            and not re.match(r"^(left|right)_wrist_yaw_link$", p.GetName())]   # the wrist-yaw body carries the palm
+    if len(fingers) != 14 or not body:
+        raise RuntimeError(f"{root}: expected 14 Dex3 finger links and body links, got {len(fingers)} / {len(body)}")
+    for p in fingers:
+        UsdPhysics.FilteredPairsAPI.Apply(p).CreateFilteredPairsRel().SetTargets(body)
+    return len(fingers) * len(body)
+
+
+def _spawn_g1(prim_path, cfg, translation=None, orientation=None, **kwargs):
+    """spawn_from_usd + filter_dex3_body_collisions (before the physics parses the stage at sim.reset())."""
+    from isaaclab.sim.spawners.from_files import spawn_from_usd
+    prim = spawn_from_usd(prim_path, cfg, translation, orientation, **kwargs)
+    filter_dex3_body_collisions(prim.GetStage(), prim_path)
+    return prim
+
+
+def make_articulation_cfg(usd: str, prim_path: str = "/World/G1", pos=(0.0, 0.0, 0.8), yaw: float = 0.0,
+                          dex3_body_collisions: bool = False):
+    """ArticulationCfg with training-parity actuators (imported from gear_sonic) + a Dex3 group.
+
+    dex3_body_collisions=False (default): the Dex3 finger links do not collide with the rest of the robot
+    (filter_dex3_body_collisions); True only for A/B tests."""
     import isaaclab.sim as sim_utils
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets.articulation import ArticulationCfg
@@ -123,14 +182,14 @@ def make_articulation_cfg(usd: str, prim_path: str = "/World/G1", pos=(0.0, 0.0,
     from gear_sonic.envs.manager_env.robots.g1 import G1_CYLINDER_MODEL_12_DEX_CFG as TRAIN
 
     actuators = {k: copy.deepcopy(v) for k, v in TRAIN.actuators.items()}
-    # Dex3: training had the hands fixed. Armature/damping like the MuJoCo finger_motor class
+    # Dex3: training had the hands fixed. Armature like the MuJoCo finger_motor class
     # (g1_29dof_with_hand.xml:20-22); effort/velocity limits from the URDF (None = keep USD values);
-    # initial gains = the deploy's Dex3 hold gains (dex3_hands.hpp:308-332). The deploy's rt/dex3/*/cmd kp/kd
-    # overwrite them at runtime.
+    # initial gains = the deploy's Dex3 hold gains (dex3_hands.hpp:308-332) + the finger joints' passive damping
+    # (joint_map.DEX3_JOINT_DAMPING). The deploy's rt/dex3/*/cmd kp/kd (+ that damping, dds_bridge) overwrite them.
     actuators["dex3"] = ImplicitActuatorCfg(
         joint_names_expr=[r".*_hand_(thumb|middle|index)_[0-2]_joint"],
         effort_limit_sim=None, velocity_limit_sim=None,
-        stiffness=jm.DEX3_HOLD_KP, damping=jm.DEX3_HOLD_KD, armature=0.01,
+        stiffness=jm.DEX3_HOLD_KP, damping=jm.DEX3_HOLD_KD + jm.DEX3_JOINT_DAMPING, armature=0.01,
     )
     import math
     init_state = copy.deepcopy(TRAIN.init_state)
@@ -142,6 +201,8 @@ def make_articulation_cfg(usd: str, prim_path: str = "/World/G1", pos=(0.0, 0.0,
         rigid_props=copy.deepcopy(TRAIN.spawn.rigid_props),                # g1.py:205-213
         articulation_props=copy.deepcopy(TRAIN.spawn.articulation_props),  # g1.py:214-218 (self-coll., 8/4 iters)
     )
+    if not dex3_body_collisions:
+        spawn.func = _spawn_g1
     return ArticulationCfg(prim_path=prim_path, spawn=spawn, init_state=init_state, actuators=actuators,
                            soft_joint_pos_limit_factor=TRAIN.soft_joint_pos_limit_factor)
 

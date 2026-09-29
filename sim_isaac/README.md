@@ -73,3 +73,23 @@ P1 is controller-agnostic: it only speaks the real G1's low-level Unitree DDS (`
   2 x 14.25 = 28.5 Nm/rad against a toppling stiffness m*g*h of roughly 35*9.81*0.7 = 240 Nm/rad. Balancing
   is SONIC's job; the stand test therefore uses stiff gains (legs 350, waist 400) to check contact/actuation/state,
   and the training-gain fall is reported as a physics sanity check.
+- **Dex3 hands (fixed 2026-09-29, G0 defect `docs/arm_tracking.md` §3.7).** Three P1-side causes, three small
+  changes; SONIC, the deploy, the wire and every non-hand collider are untouched.
+  1. `main.urdf` collides the thumb_1 links with their mesh, whose convex hull sits 7.4-7.8 mm inside the palm's
+     hull at *every* thumb angle (hull check, 486 poses per hand); PhysX pushed back with up to 1150 N and jammed
+     thumb_0/1 (never moved, landed on a different limit after each start, and the jammed right thumb blocked the
+     right fingers). `g1_asset.patch_urdf` takes the thumb_1 collision from `g1_29dof_with_hand.urdf` (a 2 x 3 x 2 cm
+     box, as in the MuJoCo model). USD rebuilt: `.asset_hash` 24d3c85f... -> d3069de7... (65 meshes, was 67).
+  2. With SONIC's own rest arms the thumbs and fingertips sit inside the thigh proxy of the training URDF
+     (`hip_roll_link`: cylinder r 0.05 x 0.2 m, a capsule after import); contacts up to 215 N held them off target by
+     up to 1.2 rad. In training the fingers were merged into the wrist. `g1_asset.make_articulation_cfg` now filters
+     the 14 finger links against every non-hand link at spawn (`filter_dex3_body_collisions`); fingers still collide
+     with their own hand, the other hand and the world.
+  3. P1 adds the MuJoCo finger joints' passive damping (`joint_map.DEX3_JOINT_DAMPING` 0.05, finger_motor class) to
+     the deploy's kd 0.1 (`dds_bridge`), as it already mirrored their armature: overshoot of a 0.3 rad step 0.07-0.09
+     -> 0.03-0.05 rad, time into +-0.05 rad 0.38-0.43 -> 0.20-0.33 s.
+  Live (3 probe runs from a fresh P1 start, `outputs/body_wave/hands/final/`): all 56 steps (+-0.3 rad, 14 joints)
+  within 0.05 rad in <= 0.43 s, steady-state error <= 0.023 rad, closure 0.993 on both hands, thumbs at rest
+  <= 0.017 rad from their command, rest pose identical across the 3 runs (spread <= 0.001 rad); before: 20/56,
+  thumbs 1.05 rad off. Tools: `tools/hand_step_probe.py` (live, P1 `get_joint_state`), `tools/hand_physics_probe.py`
+  (P1 physics alone: fixed root, contact partners, A/B flags).
