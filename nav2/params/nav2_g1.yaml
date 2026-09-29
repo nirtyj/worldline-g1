@@ -91,7 +91,7 @@ controller_server:
       use_rotate_to_heading: true
       allow_reversing: false
       rotate_to_heading_min_angle: 0.785
-      max_angular_accel: 1.0
+      max_angular_accel: 3.0   # value the fix E2E was verified with; 1.0 made in-place turns ~37% slower and ~170° turns tripped the progress checker (nav2 verify, 2026-09-29)
       max_robot_pose_search_dist: 10.0
       cost_scaling_dist: 0.3
       cost_scaling_gain: 1.0
