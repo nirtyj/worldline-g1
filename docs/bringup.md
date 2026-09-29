@@ -248,7 +248,8 @@ BREV_NAME=ludo-g1-arena ./ssh.sh "$LOCK"          # the dev lock first when the 
 BREV_NAME=ludo-g1-arena ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_server.sh status | head -4'
 #   not running: BREV_NAME=ludo-g1-arena ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_server.sh start --warm'
 ./ssh.sh 'cd /work/worldline-g1 && bash scripts/groot_link.sh ensure'
-#   first time only: keygen + install-key + `up --host 89.169.108.32` (groot_serving.md §5 steps 2-6)
+#   first time only: keygen + install-key + `up --host <DEV_IP>` (groot_serving.md §5 steps 2-6); new IPs after a
+#   Brev restart: groot_serving.md §5.2 (the IPs live only in the laptop's gitignored 00_infra/.state*/instance.env)
 
 # ---------- main box: the full stack (session wl-m2, H40)
 ./ssh.sh 'cd /work/worldline-g1 && bash scripts/m2_up.sh --profile full --scene procthor-train-40 --viz min --p5-port 8766'

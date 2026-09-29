@@ -615,7 +615,7 @@ async def g2_async(a: argparse.Namespace) -> dict:
         # runs the session exactly as `full` does; only the run's knobs are overridden
         cfg = profile_groot_cfg(a.profile, endpoint=a.endpoint, max_duration_s=a.max_s, view_min_px=a.view_min_px,
                                 lead_s=a.lead_s)
-        rep["groot_cfg"] = {k: getattr(cfg, k) for k in ("camera_hz", "camera_warm_hz", "session_head_hz", "frame_sync",
+        rep["groot_cfg"] = {k: getattr(cfg, k) for k in ("camera_hz", "camera_warm_hz", "session_head_hz", "frame_sync", "request_image",
                                                          "replan_s", "lead_s", "timeout_s", "endpoint")}
         rec = ChainRecorder(out, every=a.frame_every)
         helpers = rec.wrap(_groot_helpers())

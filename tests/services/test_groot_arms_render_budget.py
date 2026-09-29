@@ -2,7 +2,8 @@
 every enabled camera product at every render call, so a session (a) enables ego_view at camera_warm_hz until its
 first frame, then streams it at camera_hz, (b) drops the head camera to session_head_hz for the session and restores
 the rate it had, and (c) with frame_sync waits for each fresh frame instead of polling, so every get_action gets a
-new frame and nothing counts as stale. Also ZmqSensors.wait_frame, without sockets."""
+new frame and nothing counts as stale, (d) with request_image "area256" sends the server's own first resize
+(256x192) instead of the 640x480 frame. Also ZmqSensors.wait_frame, without sockets."""
 
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import pytest
 
 pytest.importorskip("groot.actions")
 
-from services.executors.groot_arms import GrootArmExecutor, ZmqSensors, _groot_helpers  # noqa: E402
+from services.executors.groot_arms import GrootArmExecutor, GrootArmsConfig, ZmqSensors, _groot_helpers  # noqa: E402
 from tests.fakes.fake_arm_body import FakeArmBody  # noqa: E402
 from tests.fakes.fake_policy_server import FakePolicyServer  # noqa: E402
 from tests.services.test_groot_arms import FakeWorld, Sink, fast_cfg, make_job  # noqa: E402
@@ -120,11 +121,11 @@ def test_the_session_warms_the_ego_camera_then_streams_at_the_inference_rate_wit
     first_chunk = body.messages("chunk", "man-1")[0]["t"]
     t_lowered = world.head_log[1][0]
     ego_off = next(c for c in world.cam_calls if c[0] == "ego_view" and not c[1])
-    assert ego_on[1][4] < t_lowered < first_chunk                           # lowered before GR00T streams
+    assert t_lowered < ego_on[0][4] and first_chunk > ego_on[1][4]          # lowered before ego_view warms up
     assert world.head_log[-1][1] == 30.0 and world.head_log[-1][0] >= ego_off[4]   # restored after ego_view went off
     r = out.data["render"]
     assert r == {"ego_hz": 2.5, "warm_hz": 10.0, "session_head_hz": 2.5, "head_restored_hz": 30.0,
-                 "frame_sync": False, "frame_waits": 0, "frame_wait_s": 0.0}
+                 "frame_sync": False, "frame_waits": 0, "request_image": "full", "frame_wait_s": 0.0}
 
 
 def test_without_a_session_head_rate_the_head_camera_is_untouched():
@@ -189,3 +190,38 @@ def test_zmq_sensors_wait_frame_wakes_on_a_newer_frame_and_times_out_without_one
         assert s.wait_frame(time.monotonic(), 0.05) is False                 # that frame is not newer than now
     finally:
         s.close()
+
+
+def test_request_image_area256_sends_the_servers_first_resize_and_the_result_says_so():
+    world = FakeWorld("never")
+    srv = FakePolicyServer(close_after=None).start()
+    body = FakeArmBody()
+    world.couple(body)
+    shapes: list[tuple] = []
+    h = _groot_helpers()
+    build = h["build_obs"]
+
+    def build_obs(frame, *a, **kw):
+        o = build(frame, *a, **kw)
+        shapes.append(tuple(o["video"]["ego_view"].shape))
+        return o
+    h["build_obs"], h["build_obs_warmup"] = build_obs, build
+    exe = GrootArmExecutor(world, arm=body, sensors=body, cfg=fast_cfg(srv, request_image="area256",
+                                                                       max_duration_s=0.8),
+                           events=Sink(), helpers=h)
+    try:
+        _healthy(exe)
+        job, handle = make_job()
+        out = asyncio.run(exe.run(job, handle))
+    finally:
+        exe.close(); body.close(); srv.stop()
+    assert out.data["inferences"] >= 1 and srv.calls >= 2                  # the warm-up + the session's calls
+    assert set(shapes) == {(1, 1, 192, 256, 3)}
+    assert out.data["render"]["request_image"] == "area256"
+
+
+def test_request_image_is_checked_when_the_profile_is_read():
+    assert GrootArmsConfig.from_dict({"request_image": "area256"}).request_image == "area256"
+    assert GrootArmsConfig.from_dict({}).request_image == "full"
+    with pytest.raises(ValueError):
+        GrootArmsConfig.from_dict({"request_image": "jpeg"})

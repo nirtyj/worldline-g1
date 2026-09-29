@@ -19,7 +19,11 @@ interleaved rounds (slow drifts on the box do not favour one phase):
 Why the head rate matters: P1 renders EVERY enabled camera product at every render call (docs/viz.md §4), so an
 enabled ego_view is rendered at the head camera's rate (30 Hz in the stack) whatever its own rate is, and each render
 blocks P1's physics loop for its duration. A render longer than the slack before the deploy's next leg target leaves a
-20 ms sim window without a new target (and the next one with two): `empties_per_render` below.
+20 ms sim window without a new target (and the next one with two): `empties_per_render` below. VizCams (P1
+`--viz min|low`) renders on its own whenever P1's cameras have not rendered within min(1.5/viz_hz, 0.25 s), about
+6 Hz at the default 10 Hz, and those renders also render every enabled product: with VizCams on, a 2.5 Hz session
+camera does not bound the render rate (`viz.forced_per_s` per phase; measure and run GR00T with `--viz off`,
+docs/groot_serving.md §9).
 
 Per phase, the walk_diagnosis gate (rule 3: INVALID if irregular > 0.15, RTF < 0.98, or heartbeats during motion):
   - RTF: gt.pose rtf over 1 s windows (p10 / mean / min / share < 0.98; the bar is p10 >= 0.98, PLAN §0.10 b);
@@ -42,7 +46,7 @@ client's thread caps (OMP_NUM_THREADS=1 etc., scripts/groot_gate.sh). Deliberate
 
     WL_PORT_OFFSET=0 .venv-rt/bin/python -m tools.groot_timing_gate --out outputs/m2b_finish/gmain/timing-<ts> \\
         [--rounds 3] [--phases stand_base,stand_lowhead,stand_client,stand_groot] [--stand-s 20] [--walk-s 40] \\
-        [--ego-hz 2.5] [--ego-warm-hz 10] [--head-hz 2.5] [--no-frame-sync] [--cpus 4-15] \\
+        [--ego-hz 2.5] [--ego-warm-hz 10] [--head-hz 2.5] [--no-frame-sync] [--cpus 4-15] [--request-image area256] \\
         [--endpoint tcp://127.0.0.1:5550] [--deploy-log PATH] [--no-home] [--dodge-stall]
 """
 
@@ -131,11 +135,33 @@ def leg_target_windows(path: str, wait_s: float = 5.0) -> dict:
            "note": "20 ms sim windows (P1 record trace) with no new leg target; irregular_est = 2 x that"}
     if "t_wall" in z.files and ok20.any():                 # P1's loop: wall time per 20 ms sim window
         dw = np.diff(np.asarray(z["t_wall"], dtype=np.float64))[ok20] * 1000.0
+        span = max(float(ts[-1] - ts[0]), 1e-3)
+        empty = ~changed[ok20]
         out["wall_ms_per_window"] = {"p1": round(float(np.percentile(dw, 1)), 1),
                                      "p50": round(float(np.percentile(dw, 50)), 1),
                                      "p99": round(float(np.percentile(dw, 99)), 1), "max": round(float(dw.max()), 1),
-                                     "over_30ms_frac": round(float((dw > 30.0).mean()), 4)}
+                                     "over_30ms_frac": round(float((dw > 30.0).mean()), 4),
+                                     # a stalled window (a render, an op in P1's loop) is followed by catch-up
+                                     # windows run back to back; an empty window is one of those short ones
+                                     "long_over_30ms_per_s": round(float((dw > 30.0).sum()) / span, 2),
+                                     "empties_under_12ms_frac": round(float((dw[empty] < 12.0).mean()), 3)
+                                     if empty.any() else None}
+    if "lowcmd_count" in z.files and ok20.any():            # the deploy publishes lowcmd at 4x the policy rate:
+        dl = np.diff(np.asarray(z["lowcmd_count"], dtype=np.int64))[ok20]   # an empty window still got messages
+        out["lowcmd_per_window_p50"] = float(np.percentile(dl, 50))
+        out["empty_windows_with_lowcmd"] = int(((~changed[ok20]) & (dl > 0)).sum())
     return out
+
+
+def viz_stats(rpc: Any) -> dict | None:
+    """VizCams (P1 --viz): its level and how often it rendered on its own ("forced"): it renders itself whenever the
+    host (P1's cameras) has not rendered within min(1.5/hz, 0.25 s) (docs/viz.md §4), and every render renders every
+    enabled product, so a slow session camera rate does not bound the render rate while VizCams is on."""
+    try:
+        v = rpc.call("viz_stats")
+    except Exception:  # noqa: BLE001 - P1 without VizCams (--viz off registers no viz ops)
+        return None
+    return {k: v.get(k) for k in ("level", "forced_renders", "piggyback_captures", "sent")} if v else None
 
 
 class StallClock:
@@ -301,13 +327,15 @@ class ClientLoad(threading.Thread):
     get_action through the link -> ArmChunk (dropped), at most every replan_s (the executor's 2.5 Hz)."""
 
     def __init__(self, sensors: Any, endpoint: str, prompt: str, replan_s: float = 0.4, timeout_s: float = 1.5,
-                 max_frame_age_s: float = 0.15, frame_sync: bool = True, camera_hz: float = 2.5):
+                 max_frame_age_s: float = 0.15, frame_sync: bool = True, camera_hz: float = 2.5,
+                 request_image: str = "full"):
         super().__init__(daemon=True, name="groot-client-load")
         from groot.actions import to_arm_chunk
         from groot.obs import build_observation
         from groot.policy_client import PolicyClient
         self.sensors, self.prompt, self.replan_s, self.max_frame_age_s = sensors, prompt, replan_s, max_frame_age_s
-        self.frame_sync, self.camera_hz = frame_sync, camera_hz
+        self.frame_sync, self.camera_hz, self.request_image = frame_sync, camera_hz, request_image
+        self.build_ms: list[float] = []
         self.client = PolicyClient(endpoint, timeout_s=timeout_s)
         self.build, self.to_chunk = build_observation, to_arm_chunk
         self.lat: list[float] = []
@@ -339,9 +367,11 @@ class ClientLoad(threading.Thread):
                     continue
                 self.last_tf = tf
                 self.frame_age_ms.append((now - tf) * 1000.0)
+                t_b = time.monotonic()
                 obs = self.build(frame, dbg["body_q"], dbg.get("left_hand_q") or [0.0] * 7,
-                                 dbg.get("right_hand_q") or [0.0] * 7, self.prompt)
+                                 dbg.get("right_hand_q") or [0.0] * 7, self.prompt, request_image=self.request_image)
                 t_req = time.monotonic()
+                self.build_ms.append((t_req - t_b) * 1000.0)
                 try:
                     act = self.client.get_action(obs)
                     self.lat.append((time.monotonic() - t_req) * 1000.0)
@@ -474,10 +504,11 @@ async def main_async(a: argparse.Namespace) -> dict:
     replan_s = 1.0 / a.replan_hz
     cfg = GrootArmsConfig(endpoint=a.endpoint, max_duration_s=a.stand_s, view_min_px=0.0, lead_s=0.15,
                           camera_hz=a.ego_hz, camera_warm_hz=a.ego_warm_hz, session_head_hz=a.head_hz,
-                          frame_sync=a.frame_sync, replan_s=replan_s,
+                          frame_sync=a.frame_sync, replan_s=replan_s, request_image=a.request_image,
                           closure_thresh=1e9)   # a load run: grasp judge off
     res["knobs"] = {"ego_hz": a.ego_hz, "ego_warm_hz": a.ego_warm_hz, "head_hz_session": a.head_hz,
                     "replan_hz": a.replan_hz, "frame_sync": a.frame_sync, "cpus": a.cpus,
+                    "request_image": a.request_image,
                     "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
                     "thread_caps": {k: os.environ.get(k) for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                                                                    "MKL_NUM_THREADS")},
@@ -492,6 +523,7 @@ async def main_async(a: argparse.Namespace) -> dict:
     cams0 = (rpc.call("get_stats") or {}).get("cameras") or {}
     head_hz0 = (cams0.get("head") or {}).get("hz")
     res["head_camera"] = {"stack_hz": head_hz0, "session_hz": a.head_hz or None}
+    res["viz_at_start"] = viz_stats(rpc)            # None: P1 runs --viz off
 
     def head(hz: float | None) -> dict | None:
         """The head camera's rate (its `default` consumer keeps it on); None leaves it."""
@@ -546,7 +578,7 @@ async def main_async(a: argparse.Namespace) -> dict:
             run["ego_first_frame_s"] = first
             load = ClientLoad(sensors, a.endpoint, skill.prompt_template.format(label="potato"), replan_s=replan_s,
                               max_frame_age_s=0.15 if a.frame_sync else max(0.15, 1.5 / a.ego_hz),
-                              frame_sync=a.frame_sync, camera_hz=a.ego_hz)
+                              frame_sync=a.frame_sync, camera_hz=a.ego_hz, request_image=a.request_image)
             load.start()
             return load
 
@@ -556,7 +588,8 @@ async def main_async(a: argparse.Namespace) -> dict:
             await asyncio.to_thread(ego, False)
             await asyncio.to_thread(head, head_hz0 if a.head_hz else None)
             run["client"] = {"latency_ms": lat_stats(load.lat), "frame_age_ms": lat_stats(load.frame_age_ms),
-                             "frame_wait_ms": lat_stats(load.wait_ms), "errors": load.errors[:5],
+                             "frame_wait_ms": lat_stats(load.wait_ms), "build_ms": lat_stats(load.build_ms),
+                             "errors": load.errors[:5],
                              "n_errors": len(load.errors), "obs_stale": load.stale, "inferences": len(load.lat)}
 
         stall = StallClock(a.stall_period)
@@ -590,6 +623,7 @@ async def main_async(a: argparse.Namespace) -> dict:
                     await asyncio.sleep(1.0)
                 trace = str((out / f"trace_r{rnd}_{phase}.npz").resolve())
                 rec = rpc.call("record", on=True, path=trace)
+                v0 = viz_stats(rpc)
                 s0 = rpc.call("get_stats")
                 off0 = dlog.offset()
                 with lock:
@@ -621,6 +655,7 @@ async def main_async(a: argparse.Namespace) -> dict:
                     run["walk_ops"] = ops
                 t1 = time.monotonic()
                 s1 = rpc.call("get_stats")
+                v1 = viz_stats(rpc)
                 off1 = dlog.offset()
                 rec_off = rpc.call("record", on=False)
                 if load is not None:
@@ -635,11 +670,19 @@ async def main_async(a: argparse.Namespace) -> dict:
                     "error": f"P1 record refused: {rec}"[:200]}
                 run["legs"]["record_samples"] = rec_off.get("samples")
                 rc0, rc1 = s0.get("render_calls"), s1.get("render_calls")
+                vf = None
+                if v0 and v1 and isinstance(v0.get("forced_renders"), int) and isinstance(v1.get("forced_renders"), int):
+                    vf = v1["forced_renders"] - v0["forced_renders"]
+                    run["viz"] = {"level": v1.get("level"), "forced_renders": vf,
+                                  "forced_per_s": round(vf / max(t1 - t0, 1e-3), 2)}
+                else:
+                    run["viz"] = {"level": "off" if v1 is None else v1.get("level")}
                 if isinstance(rc0, int) and isinstance(rc1, int):
-                    run["legs"]["renders"] = rc1 - rc0
+                    run["legs"]["renders"] = rc1 - rc0              # P1's camera renders (VizCams' own not included)
+                    run["legs"]["renders_all"] = rc1 - rc0 + (vf or 0)
                     ne = run["legs"].get("no_new_leg_target_n")
-                    if ne is not None and rc1 > rc0:
-                        run["legs"]["empties_per_render"] = round(ne / (rc1 - rc0), 3)
+                    if ne is not None and rc1 - rc0 + (vf or 0) > 0:
+                        run["legs"]["empties_per_render"] = round(ne / (rc1 - rc0 + (vf or 0)), 3)
                 run["cameras_during"] = {k: {kk: v.get(kk) for kk in ("on", "hz", "pub_hz")}
                                          for k, v in (s1.get("cameras") or {}).items()}
                 run["hitches_in_phase"] = hitches_in(s1, s0.get("t_sim"), s1.get("t_sim"))
@@ -708,8 +751,10 @@ async def main_async(a: argparse.Namespace) -> dict:
                        "irregular_est_max": round(max(irr), 4) if irr else None,
                        "irregular_est_mean": round(float(np.mean(irr)), 4) if irr else None,
                        "irregular_est": irr or None,
-                       "renders_per_s": [round(r["legs"]["renders"] / max(r.get("wall_s") or 1, 1e-3), 2)
+                       "renders_per_s": [round(r["legs"].get("renders_all", r["legs"]["renders"])
+                                               / max(r.get("wall_s") or 1, 1e-3), 2)
                                          for r in rows if isinstance((r.get("legs") or {}).get("renders"), int)] or None,
+                       "viz_forced_per_s": [(r.get("viz") or {}).get("forced_per_s") for r in rows] or None,
                        "empties_per_render": [r["legs"].get("empties_per_render") for r in rows] or None,
                        "heartbeat_pubs": sum(r.get("heartbeat_pubs") or 0 for r in rows),
                        "runs_with_heartbeats": sum(1 for r in rows if (r.get("heartbeat_pubs") or 0) > 0),
@@ -754,6 +799,9 @@ def main(argv: list[str] | None = None) -> int:
                     "4 warm-up frames per enable); 0 = --ego-hz")
     ap.add_argument("--head-hz", type=float, default=2.5, help="the head camera's rate while the client runs "
                     "(session_head_hz; restored after each phase); 0 = leave the stack's rate")
+    ap.add_argument("--request-image", default="full", choices=("full", "area256"),
+                    help="the frame on the wire: full 640x480 (0.92 MB) or area256 (the server's first resize done "
+                    "by the client, 256x192, 0.15 MB; groot.obs)")
     ap.add_argument("--no-frame-sync", dest="frame_sync", action="store_false",
                     help="poll the newest frame instead of waiting for a fresh one")
     ap.add_argument("--cpus", default="4-15" if hasattr(os, "sched_setaffinity") else "",

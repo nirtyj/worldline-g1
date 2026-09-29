@@ -581,3 +581,41 @@ drive-test regressions are still owed.
 .venv/bin/python -m tools.arm_wave_test pick --object "RemoteControl|surface|2|30" --clear --rise-gap 0.40 --out outputs/m2b_wave2/bodyfix/pick-$(date +%Y%m%d-%H%M%S)
 python outputs/m2b_wave2/bodyfix/gil_probe/gilprobe.py idle inline process                   # laptop: the GIL convoy
 ```
+
+## 10. M2b finish (2026-09-29, owner body-regress): the regression chain on the main box
+
+Status: **run live on the MAIN box `ludo-g1-brev2`** (H40 `procthor-train-40`, the M2 stack `wl-m2` from
+`scripts/m2_up.sh --profile sonic --viz min --p5-port 8766`, unmodified deploy), under the main stack lock `bregress`,
+no GR00T server on the box (`nvidia-smi`: only Isaac and the deploy, `env_before.txt` in each run). P5 (the page
+server) was down during the first chunk (another owner's fault test had stopped it; the body was latched
+`runtime_lost` and was resumed at its own halt epoch) and up with the live brains afterwards. Head camera 10 Hz (set
+live by another owner before these runs, `get_cameras`). Evidence: `outputs/m2b_finish/bregress/` (laptop; the same
+under `/work/worldline-g1/outputs/m2b_finish/bregress/` on the box).
+
+**Validity.** Every run below has lowstate heartbeats from P1's periodic head-render hitch (75-93 ms every ~30 s wall,
+`p1_stats.jsonl`, a 2 Hz `get_stats` poll), so by walk_diagnosis rule 3 they are **INVALID as SONIC timing-gate
+evidence**, as in §9. The body-side measurements (halt handling and receipt, the wire, the latch, the palm errors)
+do not depend on SONIC's timing. 0 falls and 0 `command{stop}` in every run.
+
+### 10.1 Run 1: body = master `2b476af` (`reg-20260929-165158`)
+
+| Test | Result |
+|---|---|
+| `m1_drive_test --session wl-m2` | **5/7**: stand, turn, walk, stop, E4 pass. `E3_strafe` 0.46 m lateral (bar 0.5): the robot had walked to (4.6, 1.0) and strafed toward the bedroom door. `E3_goto` leg bedroom → living room failed `stuck_then_no_path` at (4.39, 6.65), in the narrow kitchen/living-room doorway (SONIC's sway on the door frame); the stuck handler's virtual obstacle then closed the only doorway. Heartbeats 8 |
+| `halt_test --walk 20 --arm 5 --script 20 --chunk 3 --carry 3 --free-walks 2` | 49 halts, all acked: receipt p50 0.51 / p95 0.83 / **max 1.29 ms** (bar < 30); body handling p50 0.072 / **p99 0.117** / max 0.137 ms (bar p99 < 10). **B-D1**: 20 halts 4-30 ms into an unreachable-goal `arm_script` (IK 434 ms in the worker): all 20 overlapped, all answered `halted`, handling max 0.093 ms, receipt max 1.29 ms, no override on the wire. **B-D2**: 3 halt/resume cycles on a CarryLock hold: hand command unchanged 3/3, CarryLock engaged latched and after resume 3/3, measured closure 0.985 → 0.985. **B-D3**: a halt with free arms: `arms_latched` false, arm mode `off`, no override latched or after the resume; 2 walks before / 2 after with 0 % override. Arm streams: 5/5 latched, hands never opened (0.598 measured / 0.6 commanded), palm drift in 2 s p50 16.5 / max 24.4 mm. Walks: 20/20 `canceled(halt)`, first IDLE on the SONIC input p50 0.60 / max 1.23 ms, **at rest ≤ 1.5 s 19/20** (the 20th 1.62 s from 0.52 m/s, no heartbeat in its window), travel p50 0.20 m, pelvis z min 0.727. The 3 chunk trials did not run: `stale_command why generation` (the tool used generation 1 under the runtime's floor 16; fixed in `06dd599`). Heartbeats 21 |
+| `arm_wave_test chunk --sessions 10 --cancels 3 --halts 3` | 10 sessions, 0 falls, 98 chunks applied, 0 dropped; **cancel 3/3** (ack 0.75-0.98 ms), **halt 3/3** (receipt 0.46-0.84 ms, arms latched, latch 0.03 ms); the 18 poisoned chunks sent after the acks rejected (`stale_session` 9, `halted` 9), none on the wire; wire max step 0.044 rad (slew limit 0.12), 0 % clamped; hands after a halt kept closing to their target (left 0.53 → 0.60). Heartbeats 2 |
+
+Fix from run 1 (`783901e`, `body/path_follower.py`): when the stuck handler's virtual obstacle leaves no route, it
+is dropped and the mapped route is re-planned (`plans[].virtual_dropped`); a real blockage still ends `stuck`.
+
+### 10.2 Run 2: body restarted on `783901e` (`reg1b-20260929-170603`)
+
+The body restarted in place (`scripts/m1_restart_body.sh --session wl-m2`, standing), the robot sent to the spawn.
+
+| Test | Result |
+|---|---|
+| `m1_drive_test --session wl-m2` | **all_pass true** (7/7): stand 60 s (xy drift 1.4 cm), turn 90° (error 0.65°), walk 3.73 m, strafe 1.68 m, stop 1.02 s, go_to bedroom → living room → start (GT errors 0.056 / 0.070 / 0.033 m, 0 stuck events, 0 re-plans: the doorway fix was not exercised here), E4 SONIC walks. Heartbeats 5 |
+| `halt_test --walk 20 --chunk 3` | **all_pass true**: 23 halts, receipt p50 0.50 / max 1.70 ms, handling p99 0.100 ms; walks 20/20 `canceled(halt)`, **at rest ≤ 1.5 s 20/20** (p50 0.89, max 1.40 s) from 0.30-0.84 m/s; chunk halts 3/3 latched, the 9 poisoned chunks after the acks all rejected `halted`, 0 on the wire, waist step on the wire 0.000 rad, hand command = the last target 3/3, palm drift p50 11.6 / max 31.1 mm. Heartbeats 7 |
+
+B.1 over both runs: 72 halts, every receipt < 2 ms, handling p99 ≤ 0.12 ms, 0 falls; at rest within 1.5 s 39 of 40
+mid-walk halts (the 40th 1.62 s: SONIC's stop, the IDLE was on the wire 0.6 ms after the send).

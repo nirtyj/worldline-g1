@@ -99,6 +99,7 @@ DEFAULT_ENDPOINT = "tcp://127.0.0.1:5550"
 ENDPOINT_ENV = "WL_GROOT_ENDPOINT"
 CARRY_LABEL = "CarryLock (body B.7: the arm op's target hold with the hand closed, m1.md §3.9)"
 N_UPPER, N_HAND = 17, 7
+REQUEST_IMAGES = ("full", "area256")   # groot.obs.REQUEST_IMAGES (not imported: groot/ loads only when a session runs)
 
 # Arena's closed Dex3 pose in Dex3 order (thumb_0, thumb_1, thumb_2, middle_0, middle_1, index_0, index_1): the
 # checkpoint's hand actions are open (0) or this pose (HF Static dataset_statistics min/max, docs/groot_arms_design.md
@@ -181,6 +182,9 @@ class GrootArmsConfig:
                                          # enabled product at every render call), restored afterwards; 0 = leave it
     frame_sync: bool = False             # when due and the newest frame is older than frame_max_age_s, wait for the
                                          # next frame (a camera at the inference rate) instead of polling
+    request_image: str = "full"          # the frame on the wire: full (640x480, 0.92 MB) | area256 (the server's own
+                                         # first INTER_AREA resize done here, 256x192, 0.15 MB, same model input;
+                                         # groot.obs.REQUEST_IMAGES, docs/groot_serving.md §9)
     debug_port: int = 5557               # SONIC g1_debug PUB
     frame_max_age_s: float = 0.15
     state_max_age_s: float = 0.06
@@ -215,6 +219,10 @@ class GrootArmsConfig:
     max_duration_s: float | None = None  # None: the skill's
     progress_hz: float = 5.0
 
+    def __post_init__(self) -> None:
+        if self.request_image not in REQUEST_IMAGES:
+            raise ValueError(f"groot_arms.request_image must be one of {REQUEST_IMAGES}, got {self.request_image!r}")
+
     @classmethod
     def from_dict(cls, d: dict | None) -> "GrootArmsConfig":
         d = dict(d or {})
@@ -223,7 +231,7 @@ class GrootArmsConfig:
             if f.name not in d or d[f.name] is None:
                 continue
             v = d[f.name]
-            kw[f.name] = v if f.name in ("endpoint", "camera") else (
+            kw[f.name] = v if f.name in ("endpoint", "camera", "request_image") else (
                 bool(v) if f.name in ("warmup", "camera_swap_rb", "frame_sync") else
                 int(v) if f.name in ("camera_port", "debug_port", "min_rows_left", "max_errors") else float(v))
         cfg = cls(**kw)
@@ -490,6 +498,8 @@ class GrootArmClient(threading.Thread):
         self.s, self.policy, self.sensors, self.arm, self.h = s, policy, sensors, arm, helpers
         self.on_down = on_down
         self.cfg = s.cfg
+        # only a non-default request image is passed (a helper without the keyword keeps working)
+        self._obs_kw = {} if s.cfg.request_image == "full" else {"request_image": s.cfg.request_image}
 
     def _due(self, now: float) -> bool:
         s = self.s
@@ -561,7 +571,7 @@ class GrootArmClient(threading.Thread):
             hands = [dbg.get(f"{side}_hand_q") for side in ("left", "right")]
             try:
                 obs = self.h["build_obs"](frame, dbg["body_q"], *[[0.0] * N_HAND if q is None else q for q in hands],
-                                          s.prompt)
+                                          s.prompt, **self._obs_kw)
             except ValueError as e:
                 s.dropped["obs_invalid"] += 1
                 s.last_error = f"observation: {e}"[:200]
@@ -1134,6 +1144,7 @@ class GrootArmExecutor:
         extra["pose0"] = (pose0.x, pose0.y)
         # 2. the ego camera on (P1's `detections` answers camera_off otherwise), then the view check
         t0 = time.monotonic()
+        await self._head_rate(s, True, notes)          # first: the ego warm-up renders then run at the lower rate
         await self._camera(s, True, notes, hz=cfg.camera_warm_hz or None)
         judge: GtJudge | None = None
         verdict: tuple[str, str | None, str] | None = None
@@ -1156,10 +1167,9 @@ class GrootArmExecutor:
                             f"{vc['px']:.0f} px of {job.object_id} in {cfg.camera} (< {cfg.view_min_px:.0f})")
             if self._fenced_by(handle, job, s):
                 return self._early_fence(s, done)
-            # the stream rate (camera_warm_hz only covered P1's warm-up frames) and the session's head rate
+            # the stream rate (camera_warm_hz only covered P1's warm-up frames)
             if cfg.camera_warm_hz and cfg.camera_warm_hz != cfg.camera_hz:
                 await self._camera(s, True, notes)
-            await self._head_rate(s, True, notes)
             # 3. enter: the arm session opens with open hands
             t0 = time.monotonic()
             unsub = self.arm.subscribe(self._body_event(s))
@@ -1359,6 +1369,7 @@ class GrootArmExecutor:
             "render": {"ego_hz": self.cfg.camera_hz, "warm_hz": self.cfg.camera_warm_hz or self.cfg.camera_hz,
                        "session_head_hz": self.cfg.session_head_hz or None, "head_restored_hz": s.head_prev_hz,
                        "frame_sync": self.cfg.frame_sync, "frame_waits": s.frame_waits,
+                       "request_image": self.cfg.request_image,
                        "frame_wait_s": round(s.frame_wait_s, 2)},
             "gt": judge.summary() if judge is not None else None,
             "cancel_ack_ms": None if s.t_ack is None or s.t_fence is None else round((s.t_ack - s.t_fence) * 1000, 2),

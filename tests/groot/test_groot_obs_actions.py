@@ -188,3 +188,43 @@ def test_checkpoint_output_band_lies_inside_the_urdf_limits():
     for i in (0, 1):                                   # a chunk at the band's lower / upper edge clamps nothing
         act = {k: np.asarray(v[i], np.float32)[None, None].repeat(40, 1) for k, v in CKPT_ACTION_Q01_Q99.items()}
         assert clamp_stats(to_arm_chunk(act, 0.0), margin=0.02)["clamped"] == 0
+
+
+def test_request_image_area256_is_the_exact_area_resize():
+    """area256 = cv2.INTER_AREA 640x480 -> 256x192 (the server's first resize after its letterbox, docs/groot_serving.md
+    §9). Checked here against an exact rational area average on crops; the box check compares with cv2 itself."""
+    from fractions import Fraction
+
+    from groot.obs import area_downscale_2p5, request_frame
+
+    def exact(a):
+        h, w, c = a.shape
+
+        def wts(n, m):
+            return [[max(Fraction(0), min(Fraction(5, 2) * (j + 1), i + 1) - max(Fraction(5, 2) * j, i)) / Fraction(5, 2)
+                     for i in range(n)] for j in range(m)]
+        wr, wc = wts(h, 2 * h // 5), wts(w, 2 * w // 5)
+        o = np.zeros((2 * h // 5, 2 * w // 5, c), np.uint8)
+        for y in range(o.shape[0]):
+            for x in range(o.shape[1]):
+                for ch in range(c):
+                    v = sum(wr[y][i] * wc[x][k] * int(a[i, k, ch]) for i in range(h) if wr[y][i]
+                            for k in range(w) if wc[x][k])
+                    o[y, x, ch] = int((2 * v + 1) // 2)
+        return o
+    rng = np.random.default_rng(3)
+    for _ in range(2):
+        a = rng.integers(0, 256, (15, 20, 3), dtype=np.uint8)
+        assert np.array_equal(area_downscale_2p5(a), exact(a))
+    assert area_downscale_2p5(np.full((480, 640, 3), 255, np.uint8)).min() == 255
+    full = rng.integers(0, 256, (480, 640, 3), dtype=np.uint8)
+    assert request_frame(full, "full") is full
+    o = _obs(ego_rgb_uint8_HxWx3=full, request_image="area256")
+    v = o["video"]["ego_view"]
+    assert v.dtype == np.uint8 and v.shape == (1, 1, 192, 256, 3) and v.flags["C_CONTIGUOUS"]
+    assert np.array_equal(v[0, 0], area_downscale_2p5(full))
+    with pytest.raises(ValueError):
+        _obs(request_image="jpeg")
+    with pytest.raises(ValueError):
+        build_observation(np.zeros((240, 320, 3), np.uint8), np.zeros(29), np.zeros(7), np.zeros(7), "x",
+                          expect_hw=None, request_image="area256")

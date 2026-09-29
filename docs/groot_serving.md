@@ -300,10 +300,10 @@ options plus `from="127.0.0.1"`, a loopback tunnel, then removed): §6.6.
 |---|---|---|
 | 1 | dev, under the dev stack lock: `groot_server.sh start --warm` | ready in 18.4 s, VRAM 6522 → 6656 MiB after the warm-up call (731 ms), bound 127.0.0.1:5550 (`/work/logs/groot/server-5550.json`, started 10:18:37Z) |
 | 2 | main: `groot_link.sh keygen` | `~/.ssh/groot_link_ed25519` (comment `groot-link@computeinstance-e00d6jcj272tzcyrbp`) |
-| 3 | main: `curl -s ifconfig.me` | 89.169.122.42. The private addresses do not route between the boxes (main 10.0.0.3 → dev 10.0.0.27: no route), so the link uses the public IPs; main → dev ICMP RTT 0.2-1.1 ms |
-| 4 | dev: `install-key '<pub>' --from 89.169.122.42` | one line in `~/.ssh/authorized_keys2`: `from="89.169.122.42",restrict,port-forwarding,permitopen="127.0.0.1:5550",command="echo groot-link: port-forward only; exit 1" ssh-ed25519 … groot-link`; `authorized_keys` untouched |
-| 5 | host key pinned | the laptop's `.state-ludo-g1-arena/known_hosts` line for 89.169.108.32 copied to main's `~/.ssh/groot_link_known_hosts` (no trust-on-first-use) |
-| 6 | main: `groot_link.sh up --host 89.169.108.32` | autossh is not installed on the main box either, so the reconnect loop runs (tmux `groot-link`); "PolicyServer answers through the link"; `check` ping 7.1 ms, `status` ping 2.2 ms |
+| 3 | main: `curl -s ifconfig.me` | the main box's public IP (`<MAIN_IP>`; IPs stay in the laptop's gitignored state files). The private addresses do not route between the boxes (no route between their 10.0.0.x addresses), so the link uses the public IPs; main → dev ICMP RTT 0.2-1.1 ms |
+| 4 | dev: `install-key '<pub>' --from <MAIN_IP>` | one line in `~/.ssh/authorized_keys2`: `from="<MAIN_IP>",restrict,port-forwarding,permitopen="127.0.0.1:5550",command="echo groot-link: port-forward only; exit 1" ssh-ed25519 … groot-link`; `authorized_keys` untouched |
+| 5 | host key pinned | the laptop's `.state-ludo-g1-arena/known_hosts` line for `<DEV_IP>` copied to main's `~/.ssh/groot_link_known_hosts` (no trust-on-first-use) |
+| 6 | main: `groot_link.sh up --host <DEV_IP>` | autossh is not installed on the main box either, so the reconnect loop runs (tmux `groot-link`); "PolicyServer answers through the link"; `check` ping 7.1 ms, `status` ping 2.2 ms |
 | 7a | restrictions, from the main box with the link key (`StrictHostKeyChecking yes`) | `ssh … id -un` → `groot-link: port-forward only` (the forced command); `ssh -tt` → `PTY allocation request failed`; `-L …:127.0.0.1:22` and `-L …:127.0.0.1:5551` → `administratively prohibited: open failed` |
 | 7b | reconnect: kill the link's ssh client | the loop logged `ssh exited …; reconnect in 2 s`, the ping answered again 2.24 s after the kill |
 | 7c | main → dev latency with the real request | §6.7 |
@@ -315,6 +315,39 @@ Two things the steps above did not cover, found while doing them:
   last `up` (kept in `/work/logs/groot/link-5550.env`). `scripts/m2_up.sh --profile full` runs `ensure` instead of
   `check`.
 - `up` needs `--host` only the first time; afterwards `up` and `ensure` reuse the recorded host.
+
+### 5.2 New IPs after a Brev restart (M2b finish, 2026-09-29, owner groot-main) [m]
+
+A stop/start of the Brev instances gives both boxes new public IPs, so the dev box's `from="<MAIN_IP>"` and the main
+box's recorded host and pinned host key are stale. The key pair itself survives (it is on the main box's disk). Re-key
+in three commands (the IPs are in the laptop's gitignored `00_infra/.state*/instance.env`; nothing here commits them):
+
+```bash
+cd ludo_robotics_prep_g1/00_infra
+MAIN_IP=$(sed -n 's/^BREV_IP=//p' .state/instance.env); DEV_IP=$(sed -n 's/^BREV_IP=//p' .state-ludo-g1-arena/instance.env)
+PUB=$(BREV_NAME=ludo-g1-brev2 ./ssh.sh 'cat ~/.ssh/groot_link_ed25519.pub')
+HK=$(awk -v ip="$DEV_IP" '$1==ip && $2=="ssh-ed25519"{print $2" "$3}' .state-ludo-g1-arena/known_hosts)
+BREV_NAME=ludo-g1-arena ./ssh.sh "cd /work/worldline-g1 && bash scripts/groot_link.sh install-key '$PUB' --from $MAIN_IP"
+BREV_NAME=ludo-g1-brev2 ./ssh.sh "cd /work/worldline-g1 && bash scripts/groot_link.sh pin-host --host $DEV_IP '$HK' && bash scripts/groot_link.sh up --host $DEV_IP"
+```
+
+`install-key` replaces the key's old line (one line stays in `authorized_keys2`); `pin-host` writes the dev host key
+the laptop already trusts (no trust-on-first-use); `up --host` replaces a running link that goes to another host.
+As run after today's restart (main box, `outputs/m2b_finish/gmain/link-20260929-165831.log` on the box):
+
+| Step | Result |
+|---|---|
+| dev: `groot_server.sh start --warm` (dev lock) | ready in 111.6 s (a cold page cache after the restart; 18.4 s in wave 2), VRAM 6522 → 6656 MiB, first `get_action` 1661 ms, bound 127.0.0.1:5550 |
+| dev: `install-key … --from <main>` | "key already in authorized_keys2; replacing its line": 1 line, `from=` the new main IP |
+| main: `pin-host`, `up --host <dev>` | "PolicyServer answers through the link"; `check` ping 9.2 ms; the tunnel's ssh on CPUs 4-15, nice 5 (never the deploy's 0-3) |
+| restrictions (link key, `StrictHostKeyChecking yes`) | exec → `groot-link: port-forward only`; `ssh -tt` → `PTY allocation request failed`; `-L …:127.0.0.1:22` → `administratively prohibited: open failed` |
+| `ensure` with the link down and its tmux loop gone | brought up with the last host, ping ok, 4.03 s |
+| kill the link's ssh client | the loop reconnected; ping answered 2.24 s after the kill |
+
+A too-wide `pgrep -f` in the first reconnect check matched the loop's own shell and ended the link for good (the known
+weakness of the loop, §5.1); `ensure` (which `m2_up.sh --profile full` runs before and after the stack) is the
+recovery, and the check now kills only the ssh client (`pgrep -x ssh` + its `-L` argument, as `groot_link.sh down`
+does).
 
 ## 6. Measurements (wave 1, dev box)
 

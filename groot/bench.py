@@ -7,7 +7,8 @@
     python -m groot.bench --n 20 --obs-npz obs_ep0_f60.npz --endpoint tcp://127.0.0.1:5550 --out laptop.json
 
 The observation is a real 640x480 dataset frame + state (build_observation), so the payload is the production one
-(about 0.9 MB per request: the frame travels as raw uint8, the stock wire has no compression).
+(about 0.9 MB per request: the frame travels as raw uint8, the stock wire has no compression; 0.15 MB with
+--request-image area256, the server's own first resize done by the client, docs/groot_serving.md §9).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import numpy as np
 
 from . import DEFAULT_ENDPOINT, joint_order as jo
 from .actions import to_arm_chunk
-from .obs import DEFAULT_PROMPT, build_observation
+from .obs import DEFAULT_PROMPT, REQUEST_IMAGES, build_observation
 from .policy_client import PolicyClient
 
 
@@ -61,7 +62,11 @@ def run(args) -> dict:
                  "prompt": inp["prompt"]}
     if args.n <= 0 and not args.first_call:
         return res
-    obs = build_observation(inp["ego"], inp["q29"], inp["lh"], inp["rh"], inp["prompt"])
+    t_b = time.perf_counter()
+    obs = build_observation(inp["ego"], inp["q29"], inp["lh"], inp["rh"], inp["prompt"],
+                            request_image=args.request_image)
+    res["request_image"] = args.request_image
+    res["build_ms"] = (time.perf_counter() - t_b) * 1000.0
     with PolicyClient(args.endpoint, timeout_s=args.timeout) as c:
         t0 = time.monotonic()
         ok = c.ping(timeout_s=max(args.timeout, 5.0))
@@ -118,6 +123,8 @@ def main(argv=None) -> int:
     ap.add_argument("--obs-npz", default="")
     ap.add_argument("--save-obs", default="")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
+    ap.add_argument("--request-image", default="full", choices=REQUEST_IMAGES,
+                    help="full: the 640x480 frame; area256: the server's first resize done here (groot.obs)")
     ap.add_argument("--out", default="")
     args = ap.parse_args(argv)
     res = run(args)

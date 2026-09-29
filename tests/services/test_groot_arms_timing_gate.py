@@ -120,3 +120,35 @@ def test_a_stopped_local_server_is_not_reported_as_the_placement(tmp_path, monke
     r = tg.server_placement()
     assert r["where"] == "link" and r["stale_local_state"]["pid"] == 2 ** 22 + 12345
     assert r["state"] == "no link state file"
+
+
+def test_an_empty_window_is_a_catch_up_window_after_a_stall_and_still_got_lowcmd(tmp_path):
+    """As measured on the main box (B gate): the deploy publishes lowcmd at 4x its 50 Hz policy, so an empty window
+    still received messages; it is the short window P1 runs right after a stalled one."""
+    p = _trace(tmp_path, ([True] * 7 + [False]) * 25)            # one empty in eight: VizCams' ~6 Hz self-render
+    z = dict(np.load(p))
+    n = z["t_sim"].size
+    dw = np.tile([0.020] * 6 + [0.035, 0.008], 26)[: n - 1]      # the long window, then the empty catch-up window
+    np.savez(p, **z, t_wall=np.concatenate([[0.0], np.cumsum(dw)]), lowcmd_count=np.arange(n) * 4)
+    r = leg_target_windows(p)
+    w = r["wall_ms_per_window"]
+    assert r["no_new_leg_target_n"] == 25 and w["empties_under_12ms_frac"] == 1.0
+    assert w["long_over_30ms_per_s"] == round(25 / (0.02 * (n - 1)), 2)
+    assert r["lowcmd_per_window_p50"] == 4.0 and r["empty_windows_with_lowcmd"] == 25
+
+
+def test_viz_stats_is_none_without_vizcams_and_keeps_the_forced_renders():
+    from tools.groot_timing_gate import viz_stats
+
+    class Rpc:
+        def __init__(self, reply):
+            self.reply = reply
+
+        def call(self, op, **kw):
+            if isinstance(self.reply, Exception):
+                raise self.reply
+            return self.reply
+    assert viz_stats(Rpc(RuntimeError("unknown op viz_stats"))) is None
+    assert viz_stats(Rpc({"ok": True, "level": "min", "forced_renders": 12, "piggyback_captures": 3, "sent": 15,
+                          "capture_ms_mean": 1.0})) == {"level": "min", "forced_renders": 12,
+                                                        "piggyback_captures": 3, "sent": 15}
