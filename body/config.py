@@ -21,6 +21,7 @@ BASE_PORTS = {
     "body_ctl": 5610,     # body ROUTER
     "body_evt": 5611,     # body PUB events/state
     "fake_link": 5690,    # tools/fake_deploy.py -> tools/fake_p1.py twist link (mocks only)
+    "nav_bridge": 5620,   # nav2/ros_bridge.py REP (go_to backend nav2: goto / cancel / status); ROS side
 }
 
 
@@ -80,6 +81,15 @@ class BodyConfig:
     turn_style: str = "idle"            # "idle": IDLE + facing (keyboard Q/E); "slowwalk": fallback
     heading_bias_ki: float = 0.4        # outer-loop heading bias integrator [1/s]
     heading_bias_max_deg: float = 20.0
+    # go_to backend (docs/nav2.md): "nav2" (ROS 2 Nav2 through nav2/ros_bridge.py) or "astar" (path_follower.py)
+    nav_backend: str = field(default_factory=lambda: os.environ.get("NAV_BACKEND", "nav2").strip().lower())
+    nav_fallback: bool = field(default_factory=lambda: os.environ.get("NAV_FALLBACK", "1") not in ("0", "false"))
+    nav2_goto_timeout_s: float = 8.0    # bridge goto = ComputePathToPose pre-check + NavigateToPose accept
+    # streaming velocity op / Nav2 cmd_vel -> SONIC (body/velocity.py)
+    vel_watchdog_s: float = 0.30        # no fresh velocity message for this long -> IDLE
+    vel_deadband: float = 0.05          # |v| below this: no translation (turn in place / stand)
+    vel_wz_deadband: float = 0.02
+    facing_lead_max_deg: float = 25.0   # facing setpoint (integrated wz) stays within this of the GT yaw
 
     @property
     def ports(self) -> dict:

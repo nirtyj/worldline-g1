@@ -38,11 +38,13 @@ from .frames import PlannerFrame
 from .motions import MOTIONS, Motion, MotionError, StopMotion
 from .nav_grid import NavGrid
 from .p1_client import P1Error, P1Rpc, PoseSub
+from .nav2_backend import Nav2Link, select_motion
 from .path_follower import GoToMotion
 from .sonic_mux import SonicMux
+from .velocity import VelocityMotion, route_velocity
 from .wire import LocomotionMode, dumps_json, wrap
 
-ALL_MOTIONS = {**MOTIONS, GoToMotion.op: GoToMotion}
+ALL_MOTIONS = {**MOTIONS, GoToMotion.op: GoToMotion, VelocityMotion.op: VelocityMotion}
 TERMINAL = ("succeeded", "failed", "canceled")
 
 
@@ -66,6 +68,9 @@ class MotionCtx:
 
     def get_nav(self) -> NavGrid | None:
         return self.svc.get_nav()
+
+    def nav2_link(self) -> Nav2Link:
+        return self.svc.nav2_link()
 
 
 class BodyService:
@@ -93,6 +98,7 @@ class BodyService:
         self.fault: str | None = None
         self.nav: NavGrid | None = None
         self.nav_info: dict | None = None
+        self._nav2: Nav2Link | None = None   # nav2/ros_bridge.py REP (go_to backend nav2), created lazily
         self._seq = itertools.count(1)
         self._running = False
         self._last_progress = 0.0
@@ -136,6 +142,11 @@ class BodyService:
             self.log(f"[frame] planner frame from g1_debug: {self.frame.to_dict()}")
 
     # -- nav ------------------------------------------------------------------------------------
+    def nav2_link(self) -> Nav2Link:
+        if self._nav2 is None:
+            self._nav2 = Nav2Link(ep(self.cfg.ports["nav_bridge"], self.cfg.host), ctx=self.ctx)
+        return self._nav2
+
     def get_nav(self, reload: bool = False) -> NavGrid | None:
         if self.nav is not None and not reload:
             return self.nav
@@ -203,6 +214,10 @@ class BodyService:
             self._cancel_active("shutdown")
             self.mux.shutdown_control()
             return {"ok": True, "state": "done", "data": {"mux": self.mux.snapshot()}}
+        if op == "velocity":
+            rep = route_velocity(self, args)   # stream updates (and Nav2 /cmd_vel) never start a new op
+            if rep is not None:
+                return rep
         if op not in ALL_MOTIONS:
             return {"ok": False, "state": "rejected", "error": f"unknown op {op!r}"}
         return self._start_motion(op_id, op, args)
@@ -230,9 +245,12 @@ class BodyService:
                                                         "deploy": self.deploy.snapshot()})
         if cls.needs_control and not self.frame.known:
             return self._reject(op_id, "planner_frame_unknown")
+        cls, backend_info = select_motion(self, op, args, cls)   # go_to: NAV_BACKEND nav2 | astar
         if self.active is not None:
             self._cancel_active("stop" if op == "stop" else "preempted", by=op_id)
         m = cls(op_id, args, self.mctx)
+        if backend_info:
+            m.backend_info = backend_info
         try:
             data = m.start(pose)
         except MotionError as e:
@@ -241,7 +259,7 @@ class BodyService:
             return {"ok": False, "state": "failed", "error": e.reason, "data": _short(e.data)}
         self.active = m
         self._last_progress = time.monotonic()
-        self.emit(op_id, "accepted", {"args": args, **(data or {})})
+        self.emit(op_id, "accepted", {"args": args, **getattr(m, "backend_info", {}), **(data or {})})
         return {"ok": True, "state": "accepted", "data": _short(data or {})}
 
     def _cancel_active(self, reason: str, by: str | None = None) -> None:
@@ -355,6 +373,7 @@ class BodyService:
             "deploy": self.deploy.snapshot(),
             "mux": self.mux.snapshot(),
             "nav": self.nav_info,
+            "nav_backend": self.cfg.nav_backend,
             "tick": self.tick_stats,
             "ports": self.cfg.ports,
         }
@@ -427,6 +446,8 @@ class BodyService:
         self.pose_sub.stop()
         self.deploy.stop()
         self.p1.close()
+        if self._nav2 is not None:
+            self._nav2.close()
         for s in (self.ctl, self.evt):
             s.close(0)
         if self._logf:
@@ -468,12 +489,16 @@ def main(argv=None) -> int:
     ap.add_argument("--turn-style", choices=["idle", "slowwalk"], default="idle")
     ap.add_argument("--v-default", type=float, default=0.45)
     ap.add_argument("--pelvis-z-min", type=float, default=0.55)
+    ap.add_argument("--nav-backend", choices=["nav2", "astar"], default=None,
+                    help="go_to backend (env NAV_BACKEND, default nav2; falls back to astar if Nav2 is down)")
     args = ap.parse_args(argv)
     from .config import port_offset_from_env
 
     cfg = BodyConfig(port_offset=args.port_offset if args.port_offset is not None else port_offset_from_env(),
                      keepalive_hz=args.keepalive_hz, control_hz=args.control_hz, robot_radius=args.robot_radius,
                      turn_style=args.turn_style, v_default=args.v_default, pelvis_z_min=args.pelvis_z_min)
+    if args.nav_backend:
+        cfg.nav_backend = args.nav_backend
     log_dir = args.log_dir or f"/tmp/wl-body-{time.strftime('%Y%m%d-%H%M%S')}"
     svc = BodyService(cfg, log_dir=log_dir)
 

@@ -1,0 +1,95 @@
+# Overlay for nav2/params/nav2_g1.yaml: MPPI with the Omni motion model instead of RPP
+# (`nav2/up.sh --controller mppi`). Holonomic (strafes up to vy_max), model-predictive, CostCritic keeps clearance.
+# Tuned for SONIC on the fakes (docs/nav2.md): passes all tests but orbits goals and swings wide because SONIC's
+# 0.2 m/s floor makes MPPI's low-speed commands unrealisable; RPP is therefore the default.
+controller_server:
+  ros__parameters:
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 40                      # 40 x 0.05 s = 2.0 s horizon (1.2 m at 0.6 m/s)
+      model_dt: 0.05                      # = 1 / controller_frequency
+      batch_size: 1000                    # half the default: enough for 0.6 m/s, halves the CPU
+      iteration_count: 1
+      vx_std: 0.2
+      vy_std: 0.1
+      wz_std: 0.3
+      vx_max: 0.6                         # SLOW_WALK 0.2-0.8; 0.6 keeps a margin (the body clamps to 0.8 anyway)
+      vx_min: -0.1                        # a short step back is allowed but PreferForwardCritic penalises it
+      vy_max: 0.25                        # strafe allowed (SONIC limit 0.4) but kept small: walk facing the path
+      wz_max: 0.8
+      # MPPI clamps its first control to (measured speed) +- a_max * model_dt. SONIC cannot walk slower than
+      # 0.2 m/s and wl-body ignores |v| < 0.05 (no stepping on noise), so with a "gentle" a_max (0.6 -> 0.03 m/s at
+      # rest) MPPI and the robot deadlock at rest: measured 0 -> command 0.03 -> no step -> measured 0 (seen on the
+      # fakes: FAILED_TO_MAKE_PROGRESS). So MPPI gets permissive limits and the gentle ramp is done downstream by
+      # the velocity smoother (0.6 m/s^2, open loop), which does not look at odom.
+      ax_max: 2.0
+      ax_min: -2.0
+      ay_max: 1.5
+      ay_min: -1.5
+      az_max: 2.5
+      prune_distance: 1.7
+      transform_tolerance: 0.2
+      temperature: 0.3
+      gamma: 0.015
+      motion_model: "Omni"
+      visualize: false
+      regenerate_noises: false
+      reset_period: 1.0
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic",
+                "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic", "TwirlingCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:                # walk facing the direction of travel unless strafing clearly helps
+        enabled: true
+        cost_power: 1
+        cost_weight: 8.0
+        threshold_to_consider: 0.5
+      TwirlingCritic:                     # omni only: no gratuitous rotation while translating (low: the humanoid
+        enabled: true                     # SHOULD rotate to face the path)
+        cost_power: 1
+        cost_weight: 3.0
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        near_collision_cost: 253
+        critical_cost: 300.0
+        consider_footprint: false         # circular robot_radius
+        collision_cost: 1000000.0
+        near_goal_distance: 0.5
+        trajectory_point_step: 2
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 8.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:                    # face along the path (mode 0 = forward), earlier than the default
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 0.6
+        mode: 0
