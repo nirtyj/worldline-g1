@@ -610,10 +610,20 @@ class ArmChannel:
                 return self._rej("stale_session", {"hold_session": hf["session_id"], "hold": h.kind})
             if args.get("release") or args.get("end"):
                 return None                       # the session that left this hold releases it
-        if (s is None or s.stream != stream or s.session_id != sid) and sid in self.ended_sessions:
+        ended = self.ended_sessions.get(sid) if (s is None or s.stream != stream or s.session_id != sid) else None
+        if ended is not None and not self._above(ended, gen, ce):
             self.stats["stale_session"] += 1
-            return self._rej("stale_session", {"ended": True, "ended_by": self.ended_sessions[sid]})
+            return self._rej("stale_session", {"ended": True, "ended_by": ended["ended_by"]})
         return None
+
+    @staticmethod
+    def _above(ended: dict, gen: Any, ce: Any) -> bool:
+        """Is a message above an ended session's fence? Then its session id may repeat the ended one's: execution ids
+        (groot_arms' session_id) restart with every runtime session (a page reset), and R.2's one epoch space starts
+        each runtime session above every generation and control_epoch the body has seen. A message in flight from the
+        ended session itself carries its numbers and stays stale."""
+        return (gen is not None and ended.get("generation") is not None and gen > ended["generation"]) or \
+            (ce is not None and ended.get("control_epoch") is not None and ce > ended["control_epoch"])
 
     def _handle(self, op_id: str, args: dict, can_start) -> dict:
         self._apply_latch()
@@ -952,7 +962,8 @@ class ArmChannel:
         if extra:
             data.update(extra)
         if s.session_id:
-            self._bounded_add(self.ended_sessions, s.session_id, ended_by)
+            self._bounded_add(self.ended_sessions, s.session_id,
+                              {"ended_by": ended_by, "generation": s.generation, "control_epoch": s.control_epoch})
         if ended_by == "stop" and s.kind != "script":
             self._bounded_add(self.stopped, s.stream, cap=100)
         self._say(f"[arm] {s.op_id} {state} (ended_by {ended_by}, hold {label or hold})")

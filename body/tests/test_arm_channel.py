@@ -63,6 +63,28 @@ def test_stop_ends_a_chunk_session_and_its_messages_are_stale():
     assert rig.mux.upper is None
 
 
+def test_an_ended_session_id_reused_above_its_fence_opens_a_new_session():
+    """A page reset restarts the runtime's execution ids (groot_arms' session_id), and R.2's one epoch space starts the
+    new runtime session above every number the body has seen. The offline E5 rehearsal (M2b wave 2, eval-live): trial
+    4's GR00T pick reused trial 3's 'man-000008' and was refused stale_session at `enter`, so GR00T never ran again
+    (8 of 10 trials). The ended session's own numbers stay stale; higher ones open a new session."""
+    rig = Rig({"arm_blend_s": 0.3})
+    q0 = rig.ch.reference_mj17()
+    assert rig.arm({**base("man-8", gen=4, epoch=4), "chunk": chunk(1, rig.clock(), [q0] * 40)}, op_id="a1")["ok"]
+    rig.run(0.2)
+    assert rig.arm({**base("man-8", gen=4, epoch=4), "end": True, "hold_on_end": "measured"}, op_id="a1")["ok"]
+    rig.ch.flush()
+    assert rig.terminal("a1")["data"]["ended_by"] == "client"
+    stale = rig.arm({**base("man-8", gen=4, epoch=4), "chunk": chunk(2, rig.clock(), [q0] * 40)}, op_id="a2")
+    assert stale["error"] == "stale_session" and stale["data"]["ended"], stale      # in flight from the ended one
+    older = rig.arm({**base("man-8", gen=3, epoch=4), "chunk": chunk(1, rig.clock(), [q0] * 40)}, op_id="a2")
+    assert older["error"] == "stale_session", older
+    new = rig.arm({**base("man-8", gen=6, epoch=6), "chunk": chunk(1, rig.clock(), [q0] * 40)}, op_id="b1")
+    assert new["ok"], new                                                          # the next runtime session's pick
+    rig.run(0.2)
+    assert rig.ch.state()["mode"] == "chunk" and rig.ch.sess.session_id == "man-8" and rig.ch.sess.generation == 6
+
+
 def test_watchdog_ends_sessions_failed_client_silent():
     rig = Rig({"arm_hold_s": 0.2, "arm_blend_s": 0.3})
     q0 = rig.ch.reference_mj17()
