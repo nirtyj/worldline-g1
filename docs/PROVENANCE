@@ -1,0 +1,60 @@
+source: /Users/nirty/workspace/ludo/ludo-runtime
+commit: cb4ce53d95c9908155eb461abb24859de945294d
+method: git archive HEAD (tracked files only; the untracked .env, .venv-thor/ and runs/ cannot be included)
+imported: 2026-09-28, M2a (runtime agent), per PLAN.md section 4.1 / 4.4 and the M2a task text
+source status: `git status --porcelain` empty before and after the import (read-only)
+
+Copied untouched in the import commit, then adapted in later commits (PLAN 4.4 decision in brackets):
+  agent/__init__.py            [keep]
+  agent/episodes.py            [keep, small]
+  agent/fused_state.py         [adapt]
+  agent/harness.py             [adapt, heavy]
+  agent/layout.py              [keep]
+  agent/memory.py              [keep, small]
+  agent/model.py               [adapt]
+  agent/mutants.py             [adapt]
+  agent/narrator.py            [adapt]
+  agent/persona.py             [adapt]
+  agent/procedures.py          [adapt]
+  agent/recall.py              [keep]
+  agent/skills.py              [adapt]
+  agent/state.py               [adapt, small]
+  brains/__init__.py           [keep]
+  brains/composite.py          [keep]
+  brains/frame_gate.py         [adapt: params]
+  brains/interface.py          [adapt]
+  brains/system1.py            [keep, +1 line]
+  brains/system1_jev.py        [adapt, small]
+  llmkit/__init__.py           [keep]
+  llmkit/brain.py              [adapt]
+  llmkit/client.py             [keep]
+  sim/__init__.py              [keep; goals export removed]
+  sim/clock.py                 [keep]
+  sim/log.py                   [keep]
+  tests/test_frame_gate.py     -> tests/kept/test_frame_gate.py   [keep]
+  tests/test_layout.py         -> tests/kept/test_layout.py       [keep]
+  tests/test_narrator.py       -> tests/kept/test_narrator.py     [adapt: tool names]
+  tests/test_system1.py        -> tests/kept/test_system1.py      [keep]
+  tests/test_system1_jev.py    -> tests/kept/test_system1_jev.py  [keep]
+  tests/system1_stub.py        -> tests/kept/system1_stub.py      [keep]
+  tests/system1_live_check.py  -> tests/kept/system1_live_check.py [adapt: env loading order]
+  docs/robot-harness-landscape.md   [keep; historical, THOR era]
+  docs/shared-belief-research.md    [keep; historical, THOR era]
+
+Not copied by the runtime agent:
+  thor/__init__.py thor/robot.py thor/world.py thor/procthor.py
+      delete; behaviour is ported by the world agent (world/, services/) reading the read-only source
+  baseline/__init__.py baseline/agent/__init__.py baseline/agent/harness.py
+      delete (crashes on its first look; the mutants provide the ablations)
+  sim/goals.py
+      delete; replaced by api/execution.py (Execution, ExecutionHandle, Rejected)
+  tests/test_robot_presence.py
+      rewrite as tests/contract/test_robot_contract.py (parametrized over robot backends)
+  docs/architecture.md, README.md
+      rewrite (README.md is rewritten by the runtime agent)
+  ui/*, eval/*
+      owned by the ui+eval agent in M2a (imported and adapted there)
+  .gitignore
+      merged into the existing one (see .gitignore)
+  .env, .venv-thor/, runs/
+      never copied; ludo-runtime/.env is never read

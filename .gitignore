@@ -3,3 +3,9 @@ __pycache__/
 .venv/
 *.pyc
 .env
+# M2a runtime (PLAN 4.1)
+runs/
+.venv*/
+.env.*
+!.env.example
+.pytest_cache/
