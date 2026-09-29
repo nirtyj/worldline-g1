@@ -23,9 +23,11 @@ test = ["pytest"]
 packages = []
 
 [tool.pytest.ini_options]
-# Run from the repo root: `.venv-rt/bin/python -m pytest` (every M2a suite; -m live / -m box are opt-in)
+# Run from the repo root: `.venv-rt/bin/python -m pytest` (every M2a/M2b suite; -m live / -m box are opt-in).
+# tests/groot: the GR00T client (groot/); sim_isaac/tests: P1's camera specs, wire math and the fake P1 (no Isaac)
 pythonpath = ["."]
-testpaths = ["tests/unit", "tests/contract", "tests/kept", "tests/world", "tests/services", "tests/ui", "tests/eval"]
+testpaths = ["tests/unit", "tests/contract", "tests/kept", "tests/world", "tests/services", "tests/ui", "tests/eval",
+             "tests/groot", "sim_isaac/tests"]
 markers = [
     "asyncio: an async test, run with asyncio.run by tests/*/conftest.py",
     "live: needs real API keys and network (opt-in: -m live)",

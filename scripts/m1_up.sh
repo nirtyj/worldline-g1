@@ -71,7 +71,7 @@ cli() { (cd "$WL" && "$PY_BODY" -m tools.body_cli --port-offset "$OFFSET" "$@");
 
 # ---- preflight: never touch anything we did not start
 tmux has-session -t "=$SESSION" 2>/dev/null && die "tmux session $SESSION already exists (scripts/m1_down.sh --session $SESSION)"
-for base in 5556 5557 5565 5600 5601 5610 5611; do
+for base in 5556 5557 5565 5566 5600 5601 5610 5611; do   # 5566: P1 ego_view (p1_m2b.md §1)
   p=$((base + OFFSET))
   if ss -ltn "sport = :$p" | grep -q LISTEN; then die "port $p already bound by another process"; fi
 done

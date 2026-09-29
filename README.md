@@ -12,6 +12,9 @@ Ludi 0.1's robot API. The full plan is [`PLAN.md`](PLAN.md); read §0 (owner dec
   house), offline. One command runs "Bring me the alarm clock." through the page server, the harness, System 1, a
   scripted planner, the services and the lite body, and scores it on world truth.
 - **M2b is next:** Worldline driving the SONIC-walking G1 live, with scripted arms and GR00T in `manipulate`.
+  Wave 1 is integrated: the P1 M2b wire (two cameras, live object poses, attach), `groot_arms` with the GR00T client
+  (experimental), the bring-up scripts, the page's GR00T strip and the stack suite; a live GR00T chain up to the body
+  boundary on the dev box. [`docs/M2b_wave1.md`](docs/M2b_wave1.md) has the evidence and the wave-2 plan.
 
 [`docs/M2.md`](docs/M2.md) has the map, the recorded episode and the M2b task list.
 
@@ -43,7 +46,8 @@ with attach grasp, lite) are labelled `[fallback]` in results, prompts and eval.
 uv venv --python 3.11 .venv-rt
 uv pip install --python .venv-rt/bin/python numpy scipy pillow pyzmq msgpack websockets pyyaml pytest \
     "google-genai==2.25.0" "typesafe_sdk==0.7.2"
-.venv-rt/bin/python -m pytest                       # every suite: unit, contract, kept, world, services, ui, eval
+.venv-rt/bin/python -m pytest                       # every suite: unit, contract, kept, world, services, ui, eval,
+                                                    # groot (the GR00T client), sim_isaac (P1 wire math, fake P1)
 .venv-rt/bin/python -m api.gen_schemas --check      # api/schemas/*.json is current
 ```
 
@@ -57,6 +61,14 @@ uv pip install --python .venv-rt/bin/python numpy scipy pillow pyzmq msgpack web
 
 The same episode checks run against a live page server:
 `python -m eval.offline_episode --url ws://127.0.0.1:8765/ws --profile sonic`.
+
+```bash
+.venv-rt/bin/python -m eval.stack_suite --speed 10  # stack scenarios G1-G14, the lite subset (no model, no keys)
+.venv-rt/bin/python -m eval.live_suite --out outputs/e-1   # E-1: the 17 scenarios on lite with live models (keys)
+```
+
+On the box, `scripts/m2_up.sh` brings the live stack up (`docs/bringup.md`), and `tools/groot_live_smoke.py` drives one
+GR00T session on it (`docs/M2b_wave1.md` §3).
 
 No test calls a model. The opt-in live checks need keys (`.env.example` lists them):
 
