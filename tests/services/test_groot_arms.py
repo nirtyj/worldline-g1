@@ -126,6 +126,15 @@ def fast_cfg(srv: FakePolicyServer, **over) -> GrootArmsConfig:
     return cfg
 
 
+def make_job(eid: str = "man-1", *, skill: str = APPLE, otype: str = "apple", gate_epoch: int = 0):
+    """A pick job the way ManipulationService builds it (with the fence fields) and its ResultHandle."""
+    ex = Execution(execution_id=eid, tool_name="manipulate", args={}, generation=3, control_epoch=2)
+    job = ManipJob("pick", "apple_1", "left", skill, epoch=gate_epoch)
+    for k, v in dict(execution_id=eid, generation=3, control_epoch=2, object_type=otype, skill=SKILLS[skill]).items():
+        setattr(job, k, v)
+    return job, ResultHandle(ex)
+
+
 class Rig:
     """One executor over the fakes. Use as a context manager (it stops the threads and the server)."""
 
@@ -156,13 +165,8 @@ class Rig:
             h = self.exe.health()
         return h
 
-    def job(self, eid: str = "man-1", *, skill: str = APPLE, otype: str = "apple", gate_epoch: int = 0):
-        ex = Execution(execution_id=eid, tool_name="manipulate", args={}, generation=3, control_epoch=2)
-        job = ManipJob("pick", "apple_1", "left", skill, epoch=gate_epoch)
-        for k, v in dict(execution_id=eid, generation=3, control_epoch=2, object_type=otype,
-                         skill=SKILLS[skill]).items():
-            setattr(job, k, v)                  # the fence fields ManipulationService puts on a job
-        return job, ResultHandle(ex)
+    def job(self, eid: str = "man-1", **kw):
+        return make_job(eid, **kw)
 
     def run(self, eid: str = "man-1", **kw) -> GrootArmOutcome:
         job, h = self.job(eid, **kw)

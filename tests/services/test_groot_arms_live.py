@@ -29,7 +29,7 @@ from groot.policy_client import PolicyClient  # noqa: E402
 from services.common import HaltGate  # noqa: E402
 from services.executors.groot_arms import GrootArmExecutor, GrootArmsConfig, _groot_helpers  # noqa: E402
 from tests.fakes.fake_arm_body import FakeArmBody  # noqa: E402
-from tests.services.test_groot_arms import APPLE, SKILLS, FakeWorld, Sink  # noqa: E402
+from tests.services.test_groot_arms import FakeWorld, Sink, make_job  # noqa: E402
 
 pytestmark = pytest.mark.box
 
@@ -68,16 +68,6 @@ def _rig(gate=None, **cfg):
     return exe, body
 
 
-def _job(eid: str, gate_epoch: int = 0):
-    from api.execution import Execution, ResultHandle
-    from services.executors.kinematic_attach import ManipJob
-    job = ManipJob("pick", "apple_1", "left", APPLE, epoch=gate_epoch)
-    for k, v in dict(execution_id=eid, generation=1, control_epoch=0, object_type="apple", skill=SKILLS[APPLE]).items():
-        setattr(job, k, v)
-    return job, ResultHandle(Execution(execution_id=eid, tool_name="manipulate", args={}, generation=1,
-                                       control_epoch=0))
-
-
 def _summary(out, body, s) -> dict:
     d = out.data
     prog = [e["data"] for e in body.events if e["state"] == "progress" and e["data"].get("session_id") == s.id]
@@ -92,7 +82,7 @@ def test_live_session_runs_and_reports_honestly():
     exe, body = _rig()
     try:
         assert exe.health().ok, exe.health().detail
-        job, h = _job("live-run")
+        job, h = make_job("live-run")
         out = asyncio.run(exe.run(job, h))
         rec = _summary(out, body, exe.last_session)
         _save("session", rec)
@@ -108,7 +98,7 @@ def test_live_session_runs_and_reports_honestly():
 def test_live_cancel(delay):
     exe, body = _rig()
     try:
-        job, h = _job(f"live-cancel-{delay}")
+        job, h = make_job(f"live-cancel-{delay}")
 
         async def main():
             task = asyncio.ensure_future(exe.run(job, h))
@@ -137,7 +127,7 @@ def test_live_halt(delay):
     gate = HaltGate()
     exe, body = _rig(gate=gate)
     try:
-        job, h = _job(f"live-halt-{delay}", gate.epoch)
+        job, h = make_job(f"live-halt-{delay}", gate_epoch=gate.epoch)
 
         async def main():
             task = asyncio.ensure_future(exe.run(job, h))
@@ -164,7 +154,7 @@ def test_live_halt(delay):
 def test_live_f7_server_stopped_mid_session():
     exe, body = _rig(max_duration_s=30.0)
     try:
-        job, h = _job("live-f7")
+        job, h = make_job("live-f7")
 
         async def main():
             task = asyncio.ensure_future(exe.run(job, h))
