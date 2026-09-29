@@ -193,3 +193,61 @@ def test_takeovers_keep_the_servo_correction_without_counting_it_twice():
         rig.arm({**base("gr"), "keepalive": True})
         worst = max(worst, abs(rig.q()[k] - tgt))
     assert worst < 0.02, worst
+
+
+def test_carrylock_only_counts_the_hand_the_script_closed():
+    rig = Rig(pose=_pose())
+    ch = rig.ch
+    obj_w = pelvis_to_world([0.30, -0.20, 0.10], rig.pose).tolist()
+    ch.handle_arm_script("p", {"phase": "pregrasp", "arm": "right", "target_w": obj_w}, OK)
+    _run_op(rig, "p")
+    # the right hand is open; the left one is only the deploy's default fist filled in: not a carry
+    assert rig.mux.upper[2] == pytest.approx(list(jm.DEX3_CLOSED["left"]))
+    assert ch.hold.kind == "target" and not ch.hold.is_carry() and not ch.snapshot()["carry"]["engaged"]
+    ch.handle_arm_script("g", {"phase": "grasp", "arm": "right", "target_w": obj_w}, OK)
+    _run_op(rig, "g")
+    assert ch.hold.is_carry() and ch.hold.carry_arm == "right"
+
+
+def test_pregrasp_rises_before_it_reaches_and_carry_pulls_back_before_it_lowers():
+    rig = Rig(pose=_pose())
+    ch = rig.ch
+    obj_b = np.array([0.34, -0.22, 0.20])                            # above a counter edge in front
+    obj_w = pelvis_to_world(obj_b, rig.pose).tolist()
+    rep = ch.handle_arm_script("p", {"phase": "pregrasp", "arm": "right", "target_w": obj_w}, OK)
+    assert rep["data"]["via_b"] and rep["data"]["via_b"][0][0] <= rep["data"]["goal_b"][0] - 0.1 + 1e-6
+    plan = ch.sess.plan
+    xs, zs = [], []
+    t = 0.0
+    while t < plan.move_s:
+        q, _ = plan.sample(t, None)
+        p = K.points(K.named_from_mj17(q))["right_palm"]
+        xs.append(p[0])
+        zs.append(p[2])
+        t += DT
+    # the palm is never both far forward and low (it would sweep through the counter's front)
+    assert all(not (x > obj_b[0] - 0.06 and z < obj_b[2] - 0.02) for x, z in zip(xs, zs))
+    _run_op(rig, "p")
+    ch.handle_arm_script("g", {"phase": "grasp", "arm": "right", "target_w": obj_w}, OK)
+    _run_op(rig, "g")
+    rep = ch.handle_arm_script("c", {"phase": "carry", "arm": "right"}, OK)
+    assert rep["data"]["via_b"], rep
+    plan = ch.sess.plan
+    pts = [K.points(K.named_from_mj17(plan.sample(k * DT, None)[0]))["right_palm"] for k in range(int(plan.move_s / DT))]
+    assert all(not (p[0] > 0.26 and p[2] < obj_b[2] - 0.03) for p in pts)     # back first, then down
+
+
+def test_scan_leaves_free_arms_to_sonic_and_holds_a_held_pose():
+    rig = Rig(pose=_pose())
+    ch = rig.ch
+    rep = ch.handle_scan("s1", {}, OK)
+    assert rep["data"]["arms"] == "ref" and ch.sess.plan.servo_idx == (0,)
+    _run_op(rig, "s1")
+    rig.run(2.0)
+    obj_w = pelvis_to_world([0.30, -0.20, 0.10], rig.pose).tolist()
+    ch.handle_arm_script("g", {"phase": "grasp", "arm": "right", "target_w": obj_w}, OK)
+    _run_op(rig, "g")
+    rep = ch.handle_scan("s2", {"arm_ff": "g0"}, OK)
+    assert rep["data"]["arms"] == "hold" and rep["data"]["arm_ff"]["right_shoulder_yaw_joint"] == -0.7
+    with pytest.raises(ArmError):
+        ch.handle_scan("s3", {"preempt": True, "arm_ff": {"left_knee_joint": 1.0}}, OK)

@@ -25,7 +25,13 @@ import math
 
 import numpy as np
 
+from . import joint_map as jm
 from .arm import ARM_IDX, YAW_IDX, ArmError, _minjerk, _num
+
+# SONIC moves these arm joints with waist yaw (rad per rad of commanded waist yaw; fitted on the live scans
+# outputs/body_wave/20260929-080648-scan, arms held by the servo, r >= 0.8). `arm_ff: "g0"` subtracts them.
+ARM_FF_LIVE = {"left_shoulder_yaw_joint": -0.80, "right_shoulder_yaw_joint": -0.70, "left_wrist_roll_joint": -0.53,
+               "right_wrist_roll_joint": -0.40, "left_shoulder_pitch_joint": -0.23, "right_shoulder_pitch_joint": 0.23}
 
 
 class ScanPlan:
@@ -34,13 +40,16 @@ class ScanPlan:
     progress_hz = 0.0              # scan.hold events come from on_tick
 
     def __init__(self, q0: list[float], hands0: dict, yaws: list[float], move_s: float, hold_s: float,
-                 measure_s: float, return_zero: bool, servo_waist: bool, yaw_ff: float, hold_on_end: str, pose0):
+                 measure_s: float, return_zero: bool, servo_waist: bool, yaw_ff: float, hold_on_end: str, pose0,
+                 arms: str = "hold", arm_ff: dict | None = None):
         self.q0 = list(q0)
         self.q0[YAW_IDX] = 0.0
         self.hands0 = dict(hands0)
         self.yaws, self.move_s, self.hold_s, self.measure_s = yaws, move_s, hold_s, min(measure_s, hold_s)
         self.yaw_ff = yaw_ff
-        self.servo_idx = ARM_IDX + ((YAW_IDX,) if servo_waist else ())
+        self.arms = arms
+        self.arm_ff = {jm.UPPER_BODY_MUJOCO_JOINTS.index(n): float(c) for n, c in (arm_ff or {}).items()}
+        self.servo_idx = (ARM_IDX if arms == "hold" else ()) + ((YAW_IDX,) if servo_waist else ())
         self.hold_on_end = hold_on_end
         self.pose0 = pose0
         # schedule: (t_start, y_from, y_to, t_hold_end, i) per hold; then the return move
@@ -72,7 +81,12 @@ class ScanPlan:
 
     def sample(self, t: float, ref: list[float]):
         q = list(self.q0)
-        q[YAW_IDX] = self.yaw_cmd(t) * self.yaw_ff
+        if self.arms == "ref":
+            q[3:] = ref[3:]
+        y = self.yaw_cmd(t)
+        q[YAW_IDX] = y * self.yaw_ff
+        for k, c in self.arm_ff.items():
+            q[k] += c * y
         return q, self.hands0
 
     def on_tick(self, t: float, now: float, ch) -> list:
@@ -111,7 +125,8 @@ class ScanPlan:
     def brief(self) -> dict:
         return {"yaw_deg": [round(math.degrees(y), 1) for y in self.yaws], "move_s": self.move_s, "hold_s": self.hold_s,
                 "duration_s": round(self.duration_s, 2), "hold_on_end": self.hold_on_end, "yaw_ff": self.yaw_ff,
-                "servo_waist": YAW_IDX in self.servo_idx}
+                "servo_waist": YAW_IDX in self.servo_idx, "arms": self.arms,
+                "arm_ff": {jm.UPPER_BODY_MUJOCO_JOINTS[k]: c for k, c in self.arm_ff.items()}}
 
     def result(self) -> dict:
         errs = [abs(h["yaw_err_deg"]) for h in self.holds if h["n"]]
@@ -135,6 +150,16 @@ def build(ch, args: dict, now: float) -> ScanPlan:
         raise ArmError("bad_args", {"arg": "pitch_deg", "error": "not commanded: SONIC does not move waist pitch under "
                                                                  "the override (docs/arm_tracking.md)"})
     took_hold = ch.hold is not None and ch.hold.kind in ("target", "measured")
+    # arms: "hold" = frozen at the pose being sent with the servo (a CarryLock / a held pose); "ref" = SONIC's own
+    # live reference and no arm servo (nothing drove the arms: leave them exactly as SONIC has them)
+    arms = args.get("arms") or ("hold" if (took_hold or ch.phase != "off") else "ref")
+    if arms not in ("hold", "ref"):
+        raise ArmError("bad_args", {"arg": "arms", "error": "hold | ref"})
+    ff = args.get("arm_ff")
+    if ff == "g0":
+        ff = ARM_FF_LIVE
+    if ff is not None and (not isinstance(ff, dict) or any(n not in jm.UPPER_BODY_MUJOCO_JOINTS[3:] for n in ff)):
+        raise ArmError("bad_args", {"arg": "arm_ff", "error": "{arm joint: rad per rad of waist yaw} or \"g0\""})
     hold = args.get("hold_on_end") or ("target" if took_hold else "stand")
     if hold not in ("target", "measured", "stand"):
         raise ArmError("bad_args", {"arg": "hold_on_end", "error": "target | measured | stand"})
@@ -142,4 +167,4 @@ def build(ch, args: dict, now: float) -> ScanPlan:
     return ScanPlan(ch.continuity_pose(), hands0, yaws, _num(args, "move_s", 0.2, 5.0, 0.8),
                     _num(args, "hold_s", 0.2, 10.0, 0.8), _num(args, "measure_s", 0.05, 2.0, 0.3),
                     bool(args.get("return_zero", True)), bool(args.get("servo_waist", True)),
-                    _num(args, "yaw_ff", 0.5, 2.0, 1.0), hold, ch.gt_pose())
+                    _num(args, "yaw_ff", 0.5, 2.0, 1.0), hold, ch.gt_pose(), arms=arms, arm_ff=ff)

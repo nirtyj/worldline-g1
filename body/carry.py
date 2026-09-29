@@ -42,6 +42,7 @@ class Hold:
     source: str = ""                            # where `pose` came from (evidence)
     t_mono: float = field(default_factory=time.monotonic)
     epoch: int | None = None                    # latched: the halt epoch
+    carry_arm: str | None = None                # the hand the ending session closed on purpose (CarryLock), if any
 
     def closure(self) -> dict:
         """Closure fraction per hand (0 open .. 1 the deploy's fist), None for a hand that is not held."""
@@ -52,14 +53,18 @@ class Hold:
         return out
 
     def is_carry(self, closed_min: float = 0.3) -> bool:
-        """CarryLock = a target hold with at least one hand closed."""
-        return self.kind == "target" and any(c is not None and c >= closed_min for c in self.closure().values())
+        """CarryLock = a target hold whose session closed a hand on purpose (`carry_arm`; a hand only filled in with
+        the deploy's default fist does not count)."""
+        if self.kind != "target" or self.carry_arm not in ("left", "right"):
+            return False
+        c = self.closure().get(self.carry_arm)
+        return c is not None and c >= closed_min
 
     def brief(self, now: float | None = None) -> dict:
         now = time.monotonic() if now is None else now
         return {"kind": self.kind, "stream": self.stream, "op": self.op_id, "source": self.source,
                 "waist": self.waist_mode, "age_s": round(now - self.t_mono, 2), "closure": self.closure(),
-                "carry": self.is_carry(), "epoch": self.epoch,
+                "carry": self.is_carry(), "carry_arm": self.carry_arm, "epoch": self.epoch,
                 "pose_mj17": [round(v, 4) for v in self.pose]}
 
 

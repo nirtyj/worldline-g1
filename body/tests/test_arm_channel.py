@@ -357,3 +357,33 @@ def test_fault_drops_the_override_and_fails_the_session():
     rig.ch.abort("fallen")
     ev = rig.terminal("f")
     assert ev["state"] == "failed" and ev["data"]["ended_by"] == "fault" and rig.mux.upper is None
+
+
+def test_latch_with_servo_does_not_step_the_wire_and_settles_on_the_halt_point():
+    """With the servo on and SONIC leaving an unconverged error (bias 0.15 rad on the elbow, a wrist that barely
+    follows), holding the measured pose must not step the wire at the latch; the arm ends where it was measured."""
+    rig = Rig({"arm_max_vel": 50.0})
+    rig.plant.bias[R_ELBOW] = -0.15
+    k_wp = jm.UPPER_BODY_MUJOCO_JOINTS.index("right_wrist_pitch_joint")
+    rig.plant.bias[k_wp] = -0.5                                  # far beyond servo_max: never converges
+    q0 = rig.ch.reference_mj17()
+    rows = _ramp_rows(q0, R_ELBOW, 0.3)
+    for r in rows:
+        r[k_wp] = 0.4
+    rig.arm({**base(), "chunk": chunk(1, rig.clock(), rows)})
+    rig.run(0.5)
+    rig.arm({**base(), "chunk": chunk(2, rig.clock(), _ramp_rows(q0, R_ELBOW, 0.3, t_off=0.5))})
+    rig.run(0.3)
+    before = rig.sent()
+    q_halt = rig.q()
+    rig.ch.latch(4)
+    steps = []
+    prev = before
+    for _ in range(150):
+        rig.run(DT)
+        cur = rig.sent()
+        steps.append(max(abs(a - b) for a, b in zip(cur[3:], prev[3:])))
+        prev = cur
+    assert max(steps[:5]) < 0.01, steps[:5]                      # no step at the latch
+    assert abs(rig.q()[R_ELBOW] - q_halt[R_ELBOW]) < 0.01          # settled on the halt point (it was moving)
+    assert abs(rig.q()[k_wp] - q_halt[k_wp]) < 0.02                # the untracked wrist stays where it was

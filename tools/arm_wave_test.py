@@ -240,6 +240,7 @@ class Runner:
             if not h.ok:
                 raise RuntimeError(f"stand failed: {h.result}")
         self.epoch = self._epoch(st) + 1
+        self.generation = max(1, int((st.get("fences") or {}).get("generation_floor") or 1))
         self.t_start = time.monotonic()
 
     def _start_fakes(self):
@@ -259,7 +260,8 @@ class Runner:
     @staticmethod
     def _epoch(st: dict) -> int:
         cands = [0]
-        for path in (("fences", "halt_epoch"), ("fences", "epoch_seen"), ("halt", "last", "epoch"), ("arm", "halt_epoch")):
+        for path in (("fences", "halt_epoch"), ("fences", "epoch_seen"), ("fences", "resume_epoch"), ("halt", "last", "epoch"),
+                     ("arm", "halt_epoch")):
             v = st
             for k in path:
                 v = v.get(k) if isinstance(v, dict) else None
@@ -324,7 +326,8 @@ def _jd(o):
 
 # ================================================================================================= chunk sessions
 class Reach:
-    """A smooth synthetic reach (absolute mj17 targets as a function of the time since the session start): out to an
+    """A smooth synthetic reach (absolute mj17 targets as a function of the time since the session start), from the
+    measured arm pose at the start: out to an
     IK keyframe over 1.5 s, a Hann-windowed 0.5 Hz sway (shoulder pitch 0.15 rad, elbow 0.10 rad) with the hand
     closing to 0.6,
     back to SONIC's reference arms from 4.0 s, hand open again."""
@@ -392,10 +395,14 @@ def chunk_test(R: Runner) -> dict:
 
 def _chunk_session(R: Runner, rng, i, sid, side, kind, end_hold) -> dict:
     a = R.a
-    base = {"stream": sid, "session_id": sid, "execution_id": sid, "generation": 1, "control_epoch": R.epoch,
-            "mode": "chunk"}
+    base = {"stream": sid, "session_id": sid, "execution_id": sid, "generation": R.generation,
+            "control_epoch": R.epoch, "mode": "chunk"}
+    # a policy's first rows start from the observed arm state (GR00T's state input), not from SONIC's reference: a
+    # session that takes over a hold starts where the arm physically is
     ref = R.ref_mj17()
-    traj = Reach(ref, side, i)
+    qm = R.q_mj17()
+    start = ref[:3] + qm[3:]
+    traj = Reach(start, side, i)
     t_open = time.monotonic()
     rep = R.arm({**base, "t_wall": time.time(), "hold_on_end": "measured", "watchdog_s": 2.0, "lead_s": a.lead,
                  "left_hand": [0.0] * 7, "right_hand": [0.0] * 7, "hands_blend_s": 0.3}, op_id=f"arm-{sid}")
@@ -635,7 +642,7 @@ def script(R: Runner, args: dict, timeout: float = 20.0) -> dict:
     op_id = f"as-{args.get('phase', 'scan')}-{int(time.time() * 1000) % 10 ** 8}"
     op = "scan" if "phase" not in args else "arm_script"
     t0 = time.monotonic()
-    rep = R.bc.request(op, {**args, "control_epoch": R.epoch}, op_id=op_id)
+    rep = R.bc.request(op, {**args, "control_epoch": R.epoch, "generation": R.generation}, op_id=op_id)
     if not rep.get("ok"):
         return {"op_id": op_id, "reply": rep, "t0": t0}
     ev = R.wait_terminal(op_id, timeout)
@@ -670,6 +677,23 @@ def pick_test(R: Runner) -> dict:
     S["go_to"] = {"state": h.state, "pos_err": (h.result or {}).get("pos_err"),
                   "yaw_err_deg": (h.result or {}).get("yaw_err_deg")}
     time.sleep(1.5)
+    # A* keeps >= 0.25 m from the furniture; the palm needs the object ~reach m ahead: close in with `approach`
+    # (body B.6, a straight strafing reposition on ground truth, no A*)
+    f = np.array([math.cos(syaw), math.sin(syaw)])
+    left = np.array([-f[1], f[0]])
+    sgn = -1.0 if a.arm == "right" else 1.0
+    fx, fy = np.array(grasp_w[:2]) - a.reach * f - sgn * a.lateral * left
+    S["final_stance"] = _r([fx, fy, math.degrees(syaw)], 3)
+    S["approach"] = []
+    for _ in range(2):
+        g = R.mon.last_gt()
+        off = world_to_pelvis(grasp_w, Pose_(g))
+        if abs(off[0] - a.reach) < 0.03 and abs(off[1] - sgn * a.lateral) < 0.04:
+            break
+        ha = R.bc.approach(float(fx), float(fy), yaw=syaw, tol=(0.03, 4.0), timeout=45)
+        S["approach"].append({"state": ha.state, "reason": ha.reason,
+                              **{k: (ha.result or {}).get(k) for k in ("pos_err", "yaw_err_deg", "attempts")}})
+        time.sleep(1.0)
     g = R.mon.last_gt()
     S["pose_at_stance"] = _r([g[1], g[2], math.degrees(g[4])], 3)
     ob = world_to_pelvis(grasp_w, Pose_(g))
@@ -698,7 +722,9 @@ def pick_test(R: Runner) -> dict:
     S["ik_err_m"] = [((tr["grasp"].get("plan") or {}).get("ik_err_m")) for tr in trials]
     # carry: lift, tuck, CarryLock, turn, 2 m walk
     lift = script(R, {"phase": "lift", "arm": a.arm, "lift_m": 0.06})
-    carry = script(R, {"phase": "carry", "arm": a.arm})
+    # the carry pose stays behind the support's front edge (reach - edge distance ahead of the pelvis): back, then down
+    cb = [min(0.16, a.reach - d_edge - 0.06), -0.22 if a.arm == "right" else 0.22, 0.02]
+    carry = script(R, {"phase": "carry", "arm": a.arm, "carry_b": cb})
     st = R.bc.status()
     S["carry_lock"] = (st.get("arm") or {}).get("carry")
     hold_pose = ((st.get("arm") or {}).get("hold") or {}).get("pose_mj17")
@@ -739,11 +765,11 @@ def pick_test(R: Runner) -> dict:
 
 
 # ================================================================================================= scan
-def scan_once(R: Runner, label: str) -> dict:
+def scan_once(R: Runner, label: str, extra: dict | None = None) -> dict:
     t0 = time.monotonic()
     g0 = R.mon.last_gt()
     q0 = R.q_mj17()
-    r = script(R, {"yaw_deg": R.a.yaw_deg}, timeout=20.0)
+    r = script(R, {"yaw_deg": R.a.yaw_deg, **(extra or {})}, timeout=20.0)
     t1 = time.monotonic()
     g1 = R.mon.last_gt()
     dev = 0.0
@@ -752,7 +778,7 @@ def scan_once(R: Runner, label: str) -> dict:
         qm = jm.mj17_from_mujoco(d[1])
         dev = max(dev, max(abs(qm[k] - q0[k]) for k in ARM_K))
     term = r.get("terminal") or {}
-    return {"label": label, "state": term.get("state"), "holds": term.get("holds"),
+    return {"label": label, "args": extra, "arms": term.get("arms"), "state": term.get("state"), "holds": term.get("holds"),
             "yaw_err_deg_max": term.get("yaw_err_deg_max"), "body_arm_dev_rad_max": term.get("arm_dev_rad_max"),
             "tool_arm_dev_rad_max": _r(dev), "waist_roll_pitch_dev_rad_max": term.get("waist_roll_pitch_dev_rad_max"),
             "base_shift_m": _r(math.hypot(g1[1] - g0[1], g1[2] - g0[2]), 4), "falls": R.mon.falls(t0, t1),
@@ -762,6 +788,16 @@ def scan_once(R: Runner, label: str) -> dict:
 def scan_test(R: Runner) -> dict:
     a = R.a
     S = {"standing": scan_once(R, "standing")}
+    if a.scan_hold_variants:
+        # arms held by the servo (as under CarryLock), without and with the feed-forward fitted on the first live scans
+        rep_ = R.arm({"stream": "barm-scan-hold", "upper_body": R.ref_mj17(), "control_epoch": R.epoch})
+        R.arm({"stream": "barm-scan-hold", "end": True, "hold_on_end": "target", "control_epoch": R.epoch})
+        time.sleep(1.5)
+        S["standing_hold"] = scan_once(R, "standing, arms held", {"arms": "hold"})
+        S["standing_hold_ff"] = scan_once(R, "standing, arms held + ff", {"arms": "hold", "arm_ff": "g0"})
+        R.arm({"stream": "barm-scan-hold", "release": True, "control_epoch": R.epoch})
+        S["hold_start_reply"] = rep_.get("state") or rep_.get("error")
+        time.sleep(2.0)
     if a.at_counter:
         scene = R.p1.call("get_scene_info")
         obj, objs = find_object(scene, a.object)
@@ -794,7 +830,8 @@ def main(argv=None) -> int:
     # pick / scan
     ap.add_argument("--object", default=None)
     ap.add_argument("--arm", default="right", choices=["left", "right"])
-    ap.add_argument("--gap", type=float, default=0.26)
+    ap.add_argument("--gap", type=float, default=0.26, help="go_to stance: distance to the support edge (A*-safe)")
+    ap.add_argument("--reach", type=float, default=0.34, help="final stance: the grasp point this far ahead (approach)")
     ap.add_argument("--lateral", type=float, default=0.20)
     ap.add_argument("--grasp-above", type=float, default=0.03)
     ap.add_argument("--trials", type=int, default=3)
@@ -803,6 +840,7 @@ def main(argv=None) -> int:
     ap.add_argument("--walk-s", type=float, default=7.0)
     ap.add_argument("--yaw-deg", type=float, nargs="+", default=[-35.0, 0.0, 35.0])
     ap.add_argument("--at-counter", action="store_true")
+    ap.add_argument("--scan-hold-variants", action="store_true")
     a = ap.parse_args(argv)
     if a.fake and a.port_offset is None:
         a.port_offset = 300

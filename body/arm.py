@@ -331,6 +331,7 @@ class _Session:
         self.last_ref: list[float] | None = None         # the last pose before servo / slew (a "target" hold keeps it)
         self.last_hands: dict = {"left": None, "right": None}
         self.last_waist = "ref"
+        self.carry_prev: str | None = None                # CarryLock arm of the hold this session took over
         self.max_step = 0.0                               # rad: the largest per-tick change of a sent arm value
         # target (v0.5)
         self.target: list[float] | None = None
@@ -418,6 +419,7 @@ class ArmChannel:
     def _reset_servo(self) -> None:
         self.ref_last: list[float] | None = None            # mj17 servo reference of the last tick (pre-correction)
         self.corr = [0.0] * N
+        self.corr_cap: list[float] | None = None            # per-joint |corr| bound after a preload (_preload)
         self._ym: list[float] | None = None
         self._hist: collections.deque = collections.deque(maxlen=120)     # (t, servo reference mj17), ~2.4 s
 
@@ -815,6 +817,7 @@ class ArmChannel:
                 self._end_session(prev, "canceled", "taken_over", "none", reason="taken_over", extra={"by": stream})
         elif self.hold is not None or self.blend is not None:
             self.stats["takeovers"] += 1
+        carry_prev = self.hold.carry_arm if (self.hold is not None and self.hold.kind == "target") else None
         self.hold = self.blend = None
         self._defaults()                    # per-session settings (v0.5); the servo state carries over a take-over
         if not continuing:
@@ -823,6 +826,7 @@ class ArmChannel:
             self.hands_sent = {"left": None, "right": None}
         self.preempted.pop(stream, None)
         s = _Session(kind, op_id, stream, fence, now)
+        s.carry_prev = carry_prev
         s.last_ref = list(self.sent)
         s.last_hands = dict(self.hands_sent)
         self.sess, self.phase = s, "active"
@@ -876,7 +880,8 @@ class ArmChannel:
         self._emit(s.op_id, state, data)
         if hold == "target":
             self.hold = Hold("target", list(s.last_ref if s.last_ref is not None else self.continuity_pose()),
-                             dict(s.last_hands), s.last_waist, s.stream, s.op_id, f"{s.kind}_target", now)
+                             dict(s.last_hands), s.last_waist, s.stream, s.op_id, f"{s.kind}_target", now,
+                             carry_arm=self._carry_arm(s))
             self.phase, self.blend = "hold", None
         elif hold == "measured":
             qm = self.measured_mj17()
@@ -885,12 +890,29 @@ class ArmChannel:
                 qm, src = self.continuity_pose(), "sent"
             self.hold = Hold("measured", qm, dict(s.last_hands), "cmd", s.stream, s.op_id, src, now)
             self.phase, self.blend = "hold", None
+            self._preload(qm)
         elif hold == "stand":
             self._start_blend(now, ended_by, blend_s=s.blend_s)
         elif hold == "drop":
             self._drop()
         if s.kind == "script":
             self.corr[YAW_IDX] = 0.0                    # a scan's waist-yaw correction never outlives it
+
+    @staticmethod
+    def _carry_arm(s: _Session) -> str | None:
+        """Which hand a `target` hold carries with: the arm_script's arm, the hold a scan took over, else the hand the
+        client itself commanded (chunk rows: both; v0.5: the ones it sent) that is closed the most (>= 0.3)."""
+        if s.kind == "script":
+            a = getattr(s.plan, "arm", None)
+            return a if a in SIDES else s.carry_prev
+        given = s.last_hands if s.kind == "chunk" else {k: v for k, v in s.hands.items() if v is not None}
+        best, cb = None, 0.3
+        for side, h in given.items():
+            if h is not None:
+                c = jm.hand_closure_of(side, h)
+                if c >= cb:
+                    best, cb = side, c
+        return best
 
     def _start_blend(self, now: float, why: str, op_sess: _Session | None = None, blend_s: float | None = None) -> None:
         # from the pose on the wire (the correction is baked in there and the servo stops for the blend)
@@ -906,6 +928,24 @@ class ArmChannel:
             op_sess.ended_by = op_sess.ended_by or why
         self._say(f"[arm] {op_sess.op_id if op_sess else '-'} blend back to SONIC's reference ({why}, "
                   f"{self.blend['dur']:.2f} s)")
+
+    def _preload(self, q_hold: list[float], idx: tuple = ARM_IDX) -> None:
+        """A measured / latched hold makes the measured pose the servo reference. Preload the correction so the wire
+        does not move at that instant (corr = sent - measured): a joint at rest stays exactly where it is (its
+        unconverged tracking error is kept, not released), and a joint still moving towards the old target is pulled
+        back to the halt point by the servo afterwards, without a step on the wire. The bound on |corr| starts at the
+        preload and can only shrink back to servo_max."""
+        if self.sent is None or float(self.sv["ki"]) <= 0.0:    # servo off: nothing would pull the arm back
+            return
+        mx = float(self.sv["max"])
+        cap = list(self.corr_cap) if self.corr_cap is not None else [mx] * N
+        for k in idx:
+            c = min(max(self.sent[k] - q_hold[k], -0.8), 0.8)
+            self.corr[k] = c
+            cap[k] = max(mx, abs(c))
+        self.corr_cap = cap
+        self._ym = list(q_hold)
+        self._hist.clear()
 
     def _drop(self) -> None:
         self.mux.clear_upper()
@@ -1025,9 +1065,12 @@ class ArmChannel:
             if s is not None:
                 ended = s.op_id
                 self._end_session(s, "canceled", "halt", "none", reason=reason, label="measured")
+            if self.phase == "blend":             # a blend has no correction: freeze the pose it had reached
+                self._reset_servo()
             self.blend = None
             self.hold = Hold("latched", list(qm), hands, "cmd", None, ended, src, now, self.halt_epoch)
             self.phase, self.latched = "hold", True
+            self._preload(qm)
             # freeze the wire now at the pose being sent: no chunk row / script step after the ack; the ticks then
             # settle on the measured pose (slew-limited)
             if self.sent is None:
@@ -1367,11 +1410,15 @@ class ArmChannel:
             else:
                 w = None
         mx = float(sv["max"])
+        cap = self.corr_cap
         for k in idx:
             e = r[k] - qm[k]
             g = float(sv["ki_waist"]) if k == YAW_IDX else ki
             c = self.corr[k] + (1.0 if w is None else w[k]) * g * dt * e
-            c = min(max(c, -mx), mx)
+            m = mx if cap is None else cap[k]
+            c = min(max(c, -m), m)
+            if cap is not None:
+                cap[k] = max(mx, min(cap[k], abs(c)))
             lo, hi = _LIM[k]
             if (des_ref[k] + c > hi and c > self.corr[k]) or (des_ref[k] + c < lo and c < self.corr[k]):
                 continue

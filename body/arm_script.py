@@ -103,9 +103,20 @@ class ArmScriptPlan:
 
     def __init__(self, phase: str, arm: str, q0: list[float], q1: list[float], hands0: dict, hand_keys: list,
                  move_s: float, settle_s: float, measure_s: float, hold_on_end: str, goal_b: np.ndarray | None,
-                 goal_w: np.ndarray | None, target_w: np.ndarray | None, ik_err: float | None, pose0):
+                 goal_w: np.ndarray | None, target_w: np.ndarray | None, ik_err: float | None, pose0,
+                 via: list | None = None):
         self.phase, self.arm = phase, arm
         self.q0, self.q1 = list(q0), list(q1)
+        # joint-space min-jerk segments [(t_start, t_end, q_from, q_to)]: through the Cartesian via points (IK) first
+        pts = [list(q0)] + [list(q) for q, _ in (via or [])] + [list(q1)]
+        dist = [max((abs(b - a) for a, b in zip(u[3:], v[3:])), default=0.0) for u, v in zip(pts, pts[1:])]
+        tot = sum(dist) or 1.0
+        self.segs, t = [], 0.0
+        for (u, v), d in zip(zip(pts, pts[1:]), dist):
+            dur = move_s * (d / tot) if len(pts) > 2 else move_s
+            self.segs.append((t, t + dur, u, v))
+            t += dur
+        self.via_b = [None if b is None else [round(float(x), 4) for x in b] for _, b in (via or [])]
         self.hands0 = {s: (None if hands0.get(s) is None else list(hands0[s])) for s in ("left", "right")}
         self.hand_keys = hand_keys                  # [(t0, t1, side, from7, to7)]
         self.move_s, self.settle_s, self.measure_s = move_s, settle_s, measure_s
@@ -121,8 +132,12 @@ class ArmScriptPlan:
         self.palm_b_last: np.ndarray | None = None
 
     def sample(self, t: float, ref: list[float]) -> tuple[list[float], dict]:
-        a = 1.0 if self.move_s <= 0 else _minjerk(t / self.move_s)
-        q = [x + (y - x) * a for x, y in zip(self.q0, self.q1)]
+        q = list(self.q1)
+        for t0, t1, u, v in self.segs:
+            if t < t1:
+                a = 1.0 if t1 <= t0 else _minjerk((t - t0) / (t1 - t0))
+                q = [x + (y - x) * a for x, y in zip(u, v)]
+                break
         hands = dict(self.hands0)
         for t0, t1, side, h0, h1 in self.hand_keys:
             if t < t0:
@@ -155,7 +170,8 @@ class ArmScriptPlan:
     def brief(self) -> dict:
         r = lambda v: None if v is None else [round(float(x), 4) for x in v]   # noqa: E731
         return {"phase": self.phase, "arm": self.arm, "target_w": r(self.target_w), "goal_w": r(self.goal_w),
-                "goal_b": r(self.goal_b), "ik_err_m": None if self.ik_err is None else round(self.ik_err, 4),
+                "goal_b": r(self.goal_b), "via_b": self.via_b,
+                "ik_err_m": None if self.ik_err is None else round(self.ik_err, 4),
                 "move_s": round(self.move_s, 2), "duration_s": round(self.duration_s, 2),
                 "hold_on_end": self.hold_on_end}
 
@@ -229,8 +245,34 @@ def build(ch, args: dict, now: float) -> ArmScriptPlan:
         goal_w = None if pose is None else pelvis_to_world(goal_b, pose)
     ik_err = None
     q1 = list(q0)
+    via = []
+    lock = tuple(f"{arm}_{j}_joint" for j in LOCK)
+
+    def solve(pt_b, seed_named):
+        qn, err = K.ik_palm(arm, pt_b, seed_named, q_rest=seed, lock=lock)
+        q = list(q0)
+        for n_ in K.ARM_CHAIN[arm]:
+            q[jm.UPPER_BODY_MUJOCO_JOINTS.index(n_)] = float(qn[n_])
+        return jm.clamp_mj17(q, margin=0.02)[0], qn, err
+
+    if goal_b is not None and args.get("via", True):
+        # Cartesian via points, so the hand does not sweep through the furniture it works on: pregrasp rises (palm
+        # back) before it reaches forward, carry pulls back before it goes down, lower comes from above
+        cands = []
+        if phase == "pregrasp" and palm0_b[2] < goal_b[2] - 0.03:
+            # at the goal height, as far back as the arm reaches there (the palm cannot come close to the shoulder)
+            cands = [np.array([goal_b[0] - dx, goal_b[1], goal_b[2]]) for dx in (0.12, 0.10, 0.08, 0.06)]
+        elif phase == "carry" and palm0_b[0] > goal_b[0] + 0.03:
+            cands = [np.array([goal_b[0] + dx, goal_b[1], max(palm0_b[2], goal_b[2])]) for dx in (0.0, 0.03, 0.06)]
+        elif phase == "lower" and palm0_b[2] < goal_b[2] + 0.04:
+            cands = [np.array([goal_b[0] - 0.05, goal_b[1], goal_b[2] + 0.06])]
+        for vb in cands:
+            qv, qvn, ev = solve(vb, seed)
+            if ev <= 0.015:
+                via.append((qv, vb))
+                seed = {**seed, **qvn}
+                break
     if goal_b is not None:
-        lock = tuple(f"{arm}_{j}_joint" for j in LOCK)
         q_named, ik_err = K.ik_palm(arm, goal_b, seed, q_rest=seed, lock=lock)
         if ik_err > max_ik:
             raise ArmError("ik_unreachable", {"phase": phase, "arm": arm, "goal_b": [round(float(x), 4) for x in goal_b],
@@ -242,6 +284,10 @@ def build(ch, args: dict, now: float) -> ArmScriptPlan:
         q1, _ = jm.clamp_mj17(q1, margin=0.02)
     dq = max(abs(b - a) for a, b in zip(q0[3:], q1[3:]))
     move_s = 0.0 if phase == "release" else _num(args, "duration_s", 0.3, 15.0, min(max(dq / v_joint, 0.8), 4.0))
+    if via and args.get("duration_s") is None:
+        dq_all = sum(max(abs(b - a) for a, b in zip(u[3:], v[3:]))
+                     for u, v in zip([q0] + [q for q, _ in via], [q for q, _ in via] + [q1]))
+        move_s = min(max(dq_all / v_joint, 0.8), 5.0)
     settle_s = _num(args, "settle_s", 0.0, 10.0, 2.0 if phase in ("pregrasp", "grasp", "lower") else 1.0)
     measure_s = min(1.0, max(0.0, settle_s - 0.3))
     # hands
@@ -261,4 +307,4 @@ def build(ch, args: dict, now: float) -> ArmScriptPlan:
         open_s = _num(args, "open_s", 0.1, 5.0, 0.6)
         keys.append((0.0, open_s, arm, h_cur, h_open[arm]))
     return ArmScriptPlan(phase, arm, q0, q1, hands0, keys, move_s, settle_s, measure_s, hold, goal_b, goal_w,
-                         target_w, ik_err, pose)
+                         target_w, ik_err, pose, via=via)
