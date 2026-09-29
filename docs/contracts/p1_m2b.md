@@ -245,7 +245,7 @@ box as P1); `timestamps.ego_view` is the same instant in wall time. A frame olde
 ### 5.3 Frame metadata (P1.10)
 
 `cam_pose_wl`, `stationary`, `hfov`, `vfov` are in every head frame (and every ego_view frame), from the same render.
-`IsaacFrames` can stop stamping poses at receive time: it needs them passed through FrameTap (request in §12).
+`world/frames.py IsaacFrames` reads 5565 with its own SUB and uses them instead of stamping poses at receive time.
 
 ### 5.4 Enabling cameras and setting rates
 
@@ -408,8 +408,10 @@ heavy op while SONIC holds the robot), `internal` (an exception; the text says w
   `robot_fell` / `object_fell`. Tests: `sim_isaac/tests/test_fake_p1_m2b.py`.
 - `tests/fakes/fake_p1_world.py` (world owner) implements P1.1-P1.3 of this wire. Differences to close there are in
   the isaac owner's wave-1 requests.
-- `viz.tap.FrameTap` passes only `t_wall, t_sim, seq` of 5565 frames through `meta("head")`; to use §5.3, FrameTap's
-  `decode_head` must keep the extra keys (request in the wave-1 result), or `IsaacFrames` subscribes 5565 itself.
+- `world/frames.py IsaacFrames` subscribes 5565 itself and keeps the §5.2 metadata. `viz.tap.FrameTap` (the page and
+  recorder) still passes only `t_wall, t_sim, seq` of 5565 frames through `meta("head")`; it shows the head camera
+  correctly (it takes the first image when `ego_view` is absent).
+- `services/executors/groot_arms.py ZmqSensors` reads ego_view from 5566 with `t_capture_mono` (§5.2).
 
 ---
 
