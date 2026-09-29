@@ -9,3 +9,10 @@ runs/
 .env.*
 !.env.example
 .pytest_cache/
+# M2b: sim assets and caches (never tracked), and the source repo's ignores (ludo-runtime .gitignore)
+assets/usd/
+scenes/*/cache/
+.DS_Store
+*.zip
+*.log
+node_modules/

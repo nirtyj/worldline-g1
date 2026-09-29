@@ -1,5 +1,7 @@
 # Robot Harness Landscape
 
+> **Historical (THOR era).** Written for Worldline on AI2-THOR (ludo-runtime@cb4ce53), before the G1 port. Kept as background; where it disagrees with PLAN.md or docs/M2.md, those win.
+
 *Research, September 2026, for this robot runtime. Page version: https://claude.ai/artifact/2SsznG6FoPXGVkpjF2c79j*
 
 *Written when the runtime still had voice (Gemini 3.8 Live as the ears, browser speech) and Claude as the planner. Since then voice was removed (chat is typed, the planner classifies it, replies appear as text), the planner is Gemini 3.8 Flash, and several roadmap items were built: the roadmap below says where each stands. The System 1 / System 2 discussion still applies to a robot that has voice.*
