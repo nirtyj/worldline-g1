@@ -674,6 +674,9 @@ class Hub:
         f = s.frames
         if mode in ("auto", "frames") and f is not None and all(callable(getattr(f, n, None)) for n in ("names", "rev", "jpeg", "meta")):
             return f
+        tap = getattr(f, "tap", None)                 # world.frames.IsaacFrames wraps a FrameTap: share it
+        if mode in ("auto", "frames", "tap") and tap is not None and callable(getattr(tap, "streams", None)):
+            return TapCameras(tap)
         if mode == "none":
             return NoCameras()
         if mode == "world" or (mode == "auto" and s.profile == "lite"):
@@ -725,28 +728,37 @@ class Hub:
                 if ctx != last_ctx and now - last_ctx_t >= 1.0:
                     await s1.update(ctx)
                     last_ctx, last_ctx_t = ctx, now
+                # the head frame: the factory's frame source (CameraFrame with the camera's own pose and
+                # `stationary`, PLAN 8.2) when it has one, else the page's camera source + the robot's pose
+                cf = None
+                latest = getattr(s.frames, "latest_frame", None)
+                if callable(latest):
+                    try:
+                        cf = latest("head")
+                    except Exception:  # noqa: BLE001
+                        cf = None
                 src = self.feed.source
-                if "head" not in src.names():
+                if cf is None and "head" not in src.names():
                     continue
-                rev = src.rev("head")
+                rev = cf.rev if cf is not None else src.rev("head")
                 if rev != last_rev:
                     running = [str(t) for t in (ctx.get("running") or [])]
                     if any(t in ("manipulate", "pick", "place") or t.startswith("manipulate") for t in running):
                         last_own_t = now
                     own = now - last_own_t < S1_OWN_GRACE_S     # and the check right after it
-                    jpeg = src.jpeg("head")
+                    jpeg = cf.jpeg if cf is not None else src.jpeg("head")
                     rgb = _decode_rgb(jpeg) if jpeg else None
-                    meta = src.meta("head")
                     moving = bool(ctx.get("moving") or ctx.get("between"))
-                    stationary = meta.get("stationary")
+                    stationary = getattr(cf, "stationary", None) if cf is not None else src.meta("head").get("stationary")
                     if stationary is None:
                         stationary = not moving
+                    pose = tuple(cf.cam_pose_wl) if cf is not None and any(cf.cam_pose_wl) else s._robot_pose()
                     if self.s1_gate is None:
                         self.s1_gate = self.deps.frame_gate()
                     if rgb is None:                            # no decoder: send at most one frame a second
                         send, reason = now - getattr(self, "_s1_last_send", 0.0) >= 1.0, "no decoder"
                     else:
-                        d = _gate_decide(self.s1_gate, rgb, s._robot_pose(), now, own, stationary)
+                        d = _gate_decide(self.s1_gate, rgb, pose, now, own, stationary)
                         send, reason = d.send, d.reason
                     if reason != "too soon":                   # too soon: look at this frame again next time
                         last_rev = rev
