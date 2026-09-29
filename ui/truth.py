@@ -41,15 +41,35 @@ FALLBACK_LABELS = {
 
 
 def stepping_stones(profile: str | None = None) -> frozenset[str]:
-    """The profile's STEPPING STONE executors from api/ when it is there, else PLAN 12.2's list."""
+    """STEPPING STONE executors from api/ (api.results + the profile's own list), else PLAN 12.2's list."""
+    out = set(STEPPING_STONES)
     try:
+        from api.results import STEPPING_STONE_EXECUTORS  # type: ignore
+        out |= set(STEPPING_STONE_EXECUTORS)
         from api.types import PROFILES  # type: ignore
         p = PROFILES.get(profile or "")
         if p is not None and p.stepping_stones:
-            return frozenset(p.stepping_stones) | STEPPING_STONES
+            out |= set(p.stepping_stones)
     except Exception:  # noqa: BLE001  (api/ not importable: the literal list)
         pass
-    return STEPPING_STONES
+    return frozenset(out)
+
+
+# What each profile uses a STEPPING STONE for (PLAN 2.1, 6.7), if api/ has no list of its own.
+PROFILE_FALLBACKS = {"lite": (), "bringup": ("kinematic_nav", "kinematic_attach"),
+                     "sonic": ("sonic_arm_script",), "full": ("sonic_arm_script",), "real_g1": ()}
+
+
+def profile_fallbacks(profile: str | None) -> tuple[str, ...]:
+    """The STEPPING STONE executors this profile actually uses (for "fallbacks in this profile")."""
+    try:
+        from api.types import PROFILES  # type: ignore
+        p = PROFILES.get(profile or "")
+        if p is not None:
+            return tuple(p.stepping_stones)
+    except Exception:  # noqa: BLE001
+        pass
+    return PROFILE_FALLBACKS.get(profile or "", ())
 
 
 def to_plain(obj: Any) -> Any:
@@ -170,12 +190,15 @@ def world_grid(world: Any) -> GridView | None:
 
 
 def display_cells(grid: GridView, step: float = DISPLAY_STEP, layer: str = "walk",
-                  min_free: float = 0.5) -> set[tuple[int, int]]:
+                  min_free: float | None = None) -> set[tuple[int, int]]:
     """Free cells at the page's resolution, THOR-indexed: (round(x/step), round(z/step)).
 
-    layer "walk": the inflated nav layer (where the robot centre may go: the nav grid);
-    layer "floor": raw free floor (what a camera can see across). A display cell is free
-    when at least `min_free` of the fine cells whose centres fall inside it are free."""
+    layer "walk": the inflated nav layer (where the robot centre may go: the nav grid); a
+    display cell is free when at least half of the fine cells whose centres fall inside it are.
+    layer "floor": raw free floor (what a camera can see across); every fine cell must be free,
+    so a 10 cm wall still blocks the line of sight at 0.25 m."""
+    if min_free is None:
+        min_free = 0.5 if layer == "walk" else 1.0
     arr = grid.walk if layer == "walk" else grid.raw
     ny, nx = grid.shape
     counts: dict[tuple[int, int], list[int]] = {}

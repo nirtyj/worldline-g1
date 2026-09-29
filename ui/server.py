@@ -53,7 +53,7 @@ from ui.interactive_user import InteractiveUser  # noqa: E402
 from ui.recorder import CallRecorder  # noqa: E402
 from ui.robot_map import RobotMap  # noqa: E402
 from ui.truth import (DISPLAY_STEP, FALLBACK_LABELS, GT_LABEL, display_cells, layout_message,  # noqa: E402
-                      stepping_stones, to_plain, truth_payload, world_grid)
+                      profile_fallbacks, stepping_stones, to_plain, truth_payload, world_grid)
 
 INDEX = Path(__file__).resolve().parent / "index.html"
 LOG_DIR = ROOT / "runs" / "playground"
@@ -268,7 +268,17 @@ def _finished(e: Any) -> bool:
 
 
 def derive_tool_state(active: list[dict[str, Any]], paused: bool, reconciling: bool, body_mode: str | None) -> str:
-    """PLAN 5.8's tool state when the runtime does not publish its own (api/state_machine.py)."""
+    """PLAN 5.8's tool state when the runtime does not publish its own: api.state_machine.derive_state
+    over the page's execution entries, or the same rules here if api/ is not importable."""
+    try:
+        from types import SimpleNamespace
+
+        from api.state_machine import derive_state
+        acts = [SimpleNamespace(tool_name=e.get("tool"), status="cancelling" if e.get("cancel_requested")
+                                else str(e.get("status") or "running").lower()) for e in active]
+        return str(derive_state(acts, paused=paused, reconciling=reconciling, body_mode=body_mode).value)
+    except ImportError:
+        pass
     if body_mode in ("FAULT", "ESTOP"):
         return "FAULT"
     if paused:
@@ -420,7 +430,8 @@ class Session:
     def init_message(self) -> dict[str, Any]:
         return {"type": "init",
                 "config": {"scene": self.scene, "agent": self.agent, "model": self.model, "profile": self.profile,
-                           "stepping_stones": sorted(self.stones), "fallback_labels": FALLBACK_LABELS,
+                           "stepping_stones": sorted(self.stones), "profile_fallbacks": list(profile_fallbacks(self.profile)),
+                           "fallback_labels": FALLBACK_LABELS,
                            "truth_label": GT_LABEL},
                 "map": self.map, "layout": self.layout,
                 "events": self._events_from(0), "trace": self._trace_from(0),
@@ -534,7 +545,8 @@ class Session:
         caps = {k: to_plain(v) for k, v in caps.items()} if isinstance(caps, dict) else {}
         health = to_plain(tel.get("health")) or {}
         stack = {"profile": self.profile, "rtf": body.get("rtf", health.get("rtf")), "health": health,
-                 "services": caps, "stepping_stones": sorted(self.stones)}
+                 "services": caps, "stepping_stones": sorted(self.stones),
+                 "profile_fallbacks": list(profile_fallbacks(self.profile))}
         return body, stack, nav
 
     def state(self) -> dict[str, Any]:

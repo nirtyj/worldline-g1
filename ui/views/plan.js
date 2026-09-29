@@ -1,11 +1,15 @@
 // The robot's map, the way a robot vacuum shows it.
 //
-// Layers the robot itself knows: its nav stack's free-space grid, the floor its
-// camera has covered, the path it drove and the route it is on, where it stood when
-// it found things, its named spots (the map service), and belief: a chip per object
-// on the spot the runtime thinks it is on, coloured by where that belief came from.
-// The house outline comes from the simulator and is only a visual aid; "show truth"
-// adds ghost chips where the simulator disagrees with belief.
+// Layers the robot itself knows: its nav stack's free-space grid (the occupancy grid's
+// inflated layer, shown at 0.25 m), the floor its head camera has covered, the path it
+// walked, the route the path follower is on (with its lookahead point, stuck points and
+// blocked edges), the camera's view fan (both scan rows during a scan, each with its own
+// near edge), where it stood when it found things, its named spots (the map service), and
+// belief: a chip per object on the spot the runtime thinks it is on, coloured by where
+// that belief came from. The robot is drawn at its own pose estimate, with the executor
+// that is moving it (amber when it is a labelled sim shortcut).
+// The house outline comes from the world model (sim ground truth) and is only a visual
+// aid; "truth" adds ghost chips where the simulator disagrees with belief.
 (() => {
   "use strict";
   const FRESH_MS = 3000, MAX_CHIPS = 6, CHIP_H = 16;
@@ -23,13 +27,14 @@
     let root = null, svg = null, legend = null, lay = null, VB = null, FULL = null;
     let showTruth = false, prevWhere = null, fresh = {};
     let trail = [], sightings = [], sightKeys = new Set(), explored = new Set(), cell = 4;
-    const LAYERS = [["house", "house outline", "From the simulator's house file: a visual aid only. The robot has no walls or room shapes."],
-                    ["grid", "nav grid", "The free cells its nav stack plans paths on."],
-                    ["explored", "explored", "Floor its head camera has covered this session (in range, in view, clear line of sight)."],
-                    ["path", "path", "Where it drove this session (its own pose), and the route it is on now (dashed)."],
+    const LAYERS = [["house", "house outline", "From the world model (sim ground truth): a visual aid only. The robot has no walls or room shapes."],
+                    ["grid", "nav grid", "The free cells its nav stack plans paths on: the occupancy grid's inflated layer, shown at 0.25 m."],
+                    ["explored", "explored", "Floor its head camera has covered this session (in range, in view, past the near edge, clear line of sight)."],
+                    ["path", "path", "Where it walked this session (its own pose), the route it is on now (dashed), the follower's lookahead, stuck points and blocked edges."],
+                    ["view", "view", "The head camera's view fan now: 90 deg, 2.5 m; both scan rows (waist +-35 deg) while it scans."],
                     ["found", "found", "Where it stood when it verified where something is."],
                     ["belief", "belief", "Chips: what the runtime believes is on each spot."]];
-    const layers = { house: true, grid: true, explored: true, path: true, found: true, belief: true };
+    const layers = { house: true, grid: true, explored: true, path: true, view: true, found: true, belief: true };
 
     function mount(el) {
       root = el;
@@ -77,7 +82,7 @@
     function applyLayers() {
       if (!svg) return;
       const show = { "plan-house": layers.house, "plan-houselabels": layers.house, "plan-grid": layers.grid, "plan-explored": layers.explored,
-                     "plan-trail": layers.path, "plan-route": layers.path, "plan-sight": layers.found,
+                     "plan-trail": layers.path, "plan-route": layers.path, "plan-nav": layers.path, "plan-view": layers.view, "plan-sight": layers.found,
                      "plan-chips": layers.belief, "plan-lines": layers.belief };
       for (const [id, on] of Object.entries(show)) { const g = svg.querySelector("#" + id); if (g) g.style.display = on ? "" : "none"; }
     }
@@ -123,7 +128,7 @@
       for (const [ix, iz] of lay.grid || []) { const [u, v] = api.uv(ix * step, iz * step); h += `<rect x="${u - cell / 2}" y="${v - cell / 2}" width="${cell}" height="${cell}"/>`; }
       h += `</g><g id="plan-explored"></g><g id="plan-houselabels">`;
       for (const [, r] of rooms) { const [u, v] = api.uv(r.x, r.z); h += `<text class="p-roomlabel" x="${u}" y="${v}" text-anchor="middle">${esc(r.label.toUpperCase())}</text>`; }
-      h += `</g><polyline id="plan-trail" points=""/><polyline id="plan-route" points=""/><g id="plan-sight"></g>
+      h += `</g><g id="plan-view"></g><polyline id="plan-trail" points=""/><polyline id="plan-route" points=""/><g id="plan-nav"></g><g id="plan-sight"></g>
             <g id="plan-spots"></g><g id="plan-lines"></g><g id="plan-chips"></g><g id="plan-agents"></g>`;
       svg.innerHTML = h;
       applyVB(); applyLayers();
@@ -219,7 +224,7 @@
         for (const [id, t] of Object.entries(tr.objects || {})) {
           const o = objs[id];
           if (!o) { unseen += 1; continue; }
-          if (!t.where || t.where === o.where || t.where === "hand" || !pos[t.where]) continue;
+          if (!t.where || t.where === o.where || String(t.where).startsWith("hand") || !pos[t.where]) continue;
           wrong += 1;
           const [u, v] = pos[t.where], i = (ghostCount[t.where] = (ghostCount[t.where] || 0) + 1);
           const gx = u - 13 - 60, gy = v + 2 + (i - 1) * 16;
@@ -231,11 +236,35 @@
       svg.querySelector("#plan-chips").innerHTML = chips;
       svg.querySelector("#plan-lines").innerHTML = lines;
 
-      // the path it drove, the route it is on, and where it found things
+      // the path it walked, the route it is on, the follower's lookahead, stuck points, blocked edges
+      const me = msg.view || tr.robot || null;                // its own pose estimate (odometry), else truth
       svg.querySelector("#plan-trail").setAttribute("points", trail.map((p) => api.uv(p[1], p[2]).join(",")).join(" "));
-      const route = (msg.nav && msg.nav.route) || null;
-      const rpts = route && tr.robot ? [[tr.robot.x, tr.robot.z], ...route] : [];
+      const nav = msg.nav || {};
+      const route = nav.route || null;
+      const rpts = route && me ? [[me.x, me.z], ...route] : [];
       svg.querySelector("#plan-route").setAttribute("points", rpts.map(([x, z]) => api.uv(x, z).join(",")).join(" "));
+      let navh = "";
+      if (nav.lookahead) { const [lu, lv] = api.uv(nav.lookahead[0], nav.lookahead[1]); navh += `<circle class="p-look" cx="${lu}" cy="${lv}" r="3.5"><title>path follower lookahead (0.6 m)</title></circle>`; }
+      for (const p of nav.stuck || []) { const [su, sv] = api.uv(p[0], p[1]); navh += `<g class="p-stuck" transform="translate(${su} ${sv})"><path d="M-5 -5L5 5M5 -5L-5 5"/><title>stuck here: a virtual obstacle was added and the path replanned</title></g>`; }
+      for (const e of nav.blocked_edges || []) {
+        const a = lay.keypoints[e[0]], b = lay.keypoints[e[1]]; if (!a || !b) continue;
+        const [au, av] = api.uv(a.x, a.z), [bu, bv] = api.uv(b.x, b.z);
+        navh += `<line class="p-blocked" x1="${au}" y1="${av}" x2="${bu}" y2="${bv}"><title>blocked: ${esc(e[0])} → ${esc(e[1])}</title></line>`;
+      }
+      if (nav.reach_stance) { const [ru, rv] = api.uv(nav.reach_stance.x, nav.reach_stance.z); navh += `<g class="p-stance" transform="translate(${ru} ${rv})"><rect x="-4" y="-4" width="8" height="8" transform="rotate(45)"/><title>reach_stance: the short step check_reachability asked for</title></g>`; }
+      svg.querySelector("#plan-nav").innerHTML = navh;
+      // the head camera's view fan: one wedge per row, from its near edge on the floor out to its range
+      let vh = "";
+      if (msg.view && msg.view.rows) {
+        const v = msg.view, px = (x, z) => api.uv(x, z).join(",");
+        for (const row of v.rows) {
+          const a0 = (v.yaw - row.half) * Math.PI / 180, a1 = (v.yaw + row.half) * Math.PI / 180, n = 16, pts = [];
+          for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; pts.push(px(v.x + Math.sin(a) * v.range, v.z + Math.cos(a) * v.range)); }
+          for (let i = n; i >= 0; i--) { const a = a0 + (a1 - a0) * i / n; pts.push(px(v.x + Math.sin(a) * row.near, v.z + Math.cos(a) * row.near)); }
+          vh += `<polygon class="p-fan" points="${pts.join(" ")}"><title>head camera view, ${row.tilt} deg down: from ${row.near} m to ${v.range} m, ${2 * row.half} deg across</title></polygon>`;
+        }
+      }
+      svg.querySelector("#plan-view").innerHTML = vh;
       let sight = "";
       for (const f of sightings) {
         const p = pos[f.place]; if (!p) continue;
@@ -248,9 +277,13 @@
       // the robot (its own pose) and you
       let ag = "";
       if (lay.human) { const [u, v] = api.uv(lay.human.x, lay.human.z); ag += `<g class="p-human" transform="translate(${u} ${v})"><circle r="11"/><text y="4" text-anchor="middle">you</text></g>`; }
-      if (tr.robot) {
-        const [u, v] = api.uv(tr.robot.x, tr.robot.z);
-        ag += `<g class="p-robot" transform="translate(${u} ${v})"><g transform="rotate(${tr.robot.yaw})"><circle r="11"/><path d="M-5 -9L0 -17L5 -9"/></g>`;
+      if (me) {
+        const [u, v] = api.uv(me.x, me.z);
+        const walking = (rt.active || []).find((e) => e.tool === "navigate");
+        const stones = new Set(api.fallbacks ? api.fallbacks() : ["kinematic_nav", "kinematic_attach", "sonic_arm_script"]);
+        const fb = walking && stones.has(walking.executor);
+        ag += `<g class="p-robot${fb ? " fb" : ""}" transform="translate(${u} ${v})"><g transform="rotate(${me.yaw})"><circle r="11"/><path d="M-5 -9L0 -17L5 -9"/></g>`;
+        if (walking && walking.executor) ag += `<text class="p-exec${fb ? " fb" : ""}" x="0" y="24" text-anchor="middle">${esc(walking.executor)}${fb ? " (fallback)" : ""}</text>`;
         held.forEach(([id, o], i) => { ag += chip(14, -8 + i * CHIP_H, "holds " + nice(o.type || id), kindOf(o).cls, `${id} in the ${o.where.replace("hand:", "")} hand (${o.source}${o.verified ? ", verified" : ""})`); });
         ag += `</g>`;
       }
@@ -262,6 +295,7 @@
         <span title="It looked and the object wasn't there"><i class="sw gone"></i>not there</span>
         <span title="A spot it has never looked at"><i class="sw fogsw"></i>never looked</span>
         <span title="Floor its head camera has covered this session"><i class="sw exsw"></i>explored</span>
+        <span title="The head camera's view fan (both scan rows while scanning)"><i class="sw fansw"></i>view</span>
         ${showTruth ? `<span class="${wrong ? "bad" : ""}" title="Where the simulator disagrees with belief (ghost chips)">truth: ${wrong} wrong · ${unseen} never seen</span>` : ""}`;
       if (legend.dataset.h !== html) { legend.innerHTML = html; legend.dataset.h = html; }
       const stats = root.querySelector("#plan-stats"), st = `· ${explored.size} cells · ${trail.length} poses · ${sightings.length} finds`;

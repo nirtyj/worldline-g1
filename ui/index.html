@@ -55,7 +55,7 @@
   :focus-visible { outline: 2px solid var(--runtime); outline-offset: 2px; }
 
   /* Main grid: two workspaces, the chat column in both.
-     World: chat | head camera over the overhead | the robot's map.
+     World: chat | cameras (head, chase, top) over the ground-truth overhead | the robot's map.
      Brain: chat | live feed and model calls | now, state, memory, procedures. */
   main { min-height: 0; display: grid; gap: 1px; background: var(--line); }
   main[data-ws="world"] { grid-template-columns: minmax(280px, 330px) minmax(420px, min(48vw, calc((100vh - 56px) * .78))) minmax(320px, 1fr);
@@ -222,6 +222,39 @@
   .badge { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
   .badge.stale { background: #4a1c1c; color: var(--bad); }
   .badge.rule { background: #222b3d; color: var(--muted); }
+  /* G1 stack: executor badges (STEPPING STONE = amber), body modes, tool state, header strip */
+  .xb { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 4px; margin-left: 6px; background: #173022; color: var(--robot); white-space: nowrap; }
+  .xb.fb { background: #3a2a14; color: var(--warn); border: 1px dashed var(--warn); }
+  .xb.unofficial { background: #2e1f3a; color: #d3a8ff; }
+  .list .fbk { border-left-color: var(--warn); }
+  .list .latex { text-decoration: line-through; opacity: .75; }
+  .mode { font: 700 11px var(--mono); padding: 2px 8px; border-radius: 4px; background: #222b3d; color: var(--muted); letter-spacing: .05em; }
+  .mode.m-HOLD { background: #2a3140; color: #c4cede; }
+  .mode.m-LOCOMOTION { background: #16304f; color: #8cc4ff; }
+  .mode.m-ARM_SCRIPT { background: #123a38; color: #7fe0d4; }
+  .mode.m-VLA_TOKENS { background: #2e1f4a; color: #c9a8ff; }
+  .mode.m-KINEMATIC { background: repeating-linear-gradient(45deg, #3a2a14 0 6px, #2a1f10 6px 12px); color: var(--warn); }
+  .mode.m-ESTOP, .mode.m-FAULT { background: #4a1c1c; color: var(--bad); }
+  .strip { display: flex; gap: 8px; align-items: center; font: 600 12px var(--mono); color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden;
+           flex: 1 1 320px; }
+  header { flex-wrap: wrap; row-gap: 3px; }
+  .strip b { color: var(--text); font-weight: 600; }
+  .strip .sep { opacity: .4; }
+  .ts { font: 700 11px var(--mono); padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); color: var(--text); letter-spacing: .06em; }
+  .ts.t-NAVIGATING { border-color: #8cc4ff; color: #8cc4ff; } .ts.t-MANIPULATING { border-color: #c9a8ff; color: #c9a8ff; }
+  .ts.t-OBSERVING, .ts.t-WAITING { border-color: var(--s1); color: var(--s1); }
+  .ts.t-CANCELLING, .ts.t-RECONCILING { border-color: var(--warn); color: var(--warn); }
+  .ts.t-STOPPED, .ts.t-FAULT { border-color: var(--bad); color: var(--bad); }
+  .btn.kill { background: #2a0f0f; border-color: #8a2a2a; color: #ffb3b3; font-size: 12px; }
+  .gtcap { color: var(--world) !important; }
+  /* camera pane tabs */
+  .camtabs { position: absolute; left: 8px; bottom: 6px; z-index: 3; display: inline-flex; gap: 2px; background: #0b111bcc; padding: 2px; border-radius: 6px; }
+  .camtabs button { background: none; border: 0; border-radius: 4px; padding: 2px 9px; cursor: pointer; font: 600 11px var(--mono); color: var(--muted); }
+  .camtabs button[aria-selected="true"] { background: var(--raised); color: var(--text); }
+  .camtabs button:disabled { opacity: .35; cursor: default; }
+  .nocam { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font: 600 13px var(--mono); z-index: 1; text-align: center; padding: 20px; }
+  .obj-glyph circle { stroke: #0b111b; stroke-width: 1.5; }
+  .obj-glyph text { font: 600 9px var(--mono); fill: #f3e9b8; paint-order: stroke; stroke: #0b111b; stroke-width: 3px; }
   .callsnote { color: var(--muted); font: 12px var(--sans); padding: 0 14px 6px; }
   .callsnote code { font-family: var(--mono); color: var(--text); }
 
@@ -353,6 +386,15 @@
   .p-robot circle { fill: #0d1d35; stroke: var(--runtime); stroke-width: 2.5; }
   .p-robot path { fill: none; stroke: var(--runtime); stroke-width: 2.5; stroke-linecap: round; }
   .p-human circle { fill: #120d1d; stroke: var(--user); stroke-width: 2.5; }
+  .p-robot.fb circle { stroke: var(--warn); stroke-dasharray: 4 3; } .p-robot.fb path { stroke: var(--warn); }
+  .p-exec { font: 600 8px var(--mono); fill: var(--runtime); paint-order: stroke; stroke: #070b12; stroke-width: 2.5px; }
+  .p-exec.fb { fill: var(--warn); }
+  .p-fan { fill: #7fd8f014; stroke: #7fd8f055; stroke-width: 1; }
+  .sw.fansw { background: #7fd8f022; border-color: #7fd8f077; border-radius: 3px; }
+  .p-look { fill: var(--warn); stroke: #070b12; stroke-width: 1; }
+  .p-stuck path { stroke: var(--bad); stroke-width: 2.2; }
+  .p-blocked { stroke: var(--bad); stroke-width: 2.5; stroke-dasharray: 3 3; }
+  .p-stance rect { fill: none; stroke: var(--persona); stroke-width: 1.8; }
   .p-human text { font: 700 7.5px var(--sans); fill: var(--user); }
 
   /* Memory: inspector and procedure graph */
@@ -398,11 +440,14 @@
       <button type="button" role="tab" data-go="brain" aria-selected="false" title="The live feed, every model call, state and memory (key 2)">Brain<kbd>2</kbd></button>
     </nav>
     <button class="btn ghost" id="btn-how" type="button" title="A picture of the whole system (H)">How it works</button>
+    <div class="strip" id="strip" title="The stack right now: profile, tool state, SONIC body mode, sim real-time factor, services"></div>
     <div class="controls">
-      <label for="sel-scene">Room</label><select id="sel-scene"></select>
+      <label for="sel-scene">House</label><select id="sel-scene"></select>
+      <label for="sel-profile">Profile</label><select id="sel-profile" title="lite: pure Python. bringup: Isaac with a kinematic base and attach grasp (fallbacks). sonic: SONIC walks, arm script + attach grasp (fallback). full: SONIC walks, GR00T manipulates."></select>
       <label for="sel-model">Model</label><select id="sel-model"></select>
       <button class="btn primary" id="btn-reset" type="button">Start new session</button>
-      <button class="btn" id="btn-forget" type="button" title="Start a new session in this room with spatial memory wiped: no remembered objects, landmarks, looks or notes">Forget room</button>
+      <button class="btn" id="btn-forget" type="button" title="Start a new session in this house with spatial memory wiped: no remembered objects, landmarks, looks or notes">Forget house</button>
+      <button class="btn kill" id="btn-kill" type="button" title="Hardware e-stop: kills the SONIC controller (the deploy exits and needs a supervised restart). Not the chat Stop, which only halts.">Kill controller</button>
     </div>
   </header>
 
@@ -441,9 +486,16 @@
 
     <section class="pane campane" data-ws="world">
       <div class="viewbox" id="cam-box">
+        <div class="nocam" id="nocam">No camera frames yet</div>
         <img id="cam" alt="The robot's head camera">
-        <span class="viewlabel">Head camera</span>
+        <span class="viewlabel" id="cam-label">Head camera</span>
         <span class="holding" id="holding" hidden></span>
+        <span class="camtabs" id="camtabs" role="tablist" aria-label="Camera">
+          <button type="button" role="tab" data-cam="head" aria-selected="true" title="Head camera (5565): what System 1 sees">head</button>
+          <button type="button" role="tab" data-cam="chase" aria-selected="false" title="Chase camera (5602): a sim viz camera behind the robot, not a robot sensor">chase</button>
+          <button type="button" role="tab" data-cam="top" aria-selected="false" title="Top view (5602): the sim's own render, ground truth">top</button>
+          <button type="button" role="tab" data-cam="ego" aria-selected="false" title="Ego camera: what GR00T sees (full profile)">ego</button>
+        </span>
         <div class="hud" id="hud" aria-live="polite"></div>
         <div class="subtitle off" id="subtitle"></div>
         <div class="loading" id="loading" hidden>Loading the room…</div>
@@ -452,13 +504,16 @@
 
     <section class="pane toppane" data-ws="world">
       <div class="viewbox" id="top-box">
-        <svg id="map" viewBox="0 0 640 480" role="img" aria-label="The house from above: the robot, where you are, and rings where the runtime believes objects are"></svg>
-        <span class="viewlabel">Overhead <span class="muted">· reality</span></span>
+        <svg id="map" viewBox="0 0 640 480" role="img" aria-label="The house from above, from the simulator's ground truth: occupancy, rooms, the robot's true pose, every object, where you are, and rings where the runtime believes objects are"></svg>
+        <span class="viewlabel gtcap" id="map-label" title="Drawn from the world model (world/), the only ground-truth reader. The planner never sees any of this.">Overhead · sim ground truth <span class="muted">· not visible to the planner</span></span>
         <span class="vtools">
           <button class="mini" type="button" id="z-in" title="Zoom in (or scroll)">+</button>
           <button class="mini" type="button" id="z-out" title="Zoom out">−</button>
           <button class="mini" type="button" id="z-fit" title="Show the whole house">Fit</button>
           <label title="Keep the robot in the middle"><input type="checkbox" id="chk-follow"> follow</label>
+          <label title="The sim's occupancy grid: obstacles (light), floor too close for the robot centre (brown), free floor (blue)"><input type="checkbox" id="chk-occ" checked> occupancy</label>
+          <label title="The sim's top-down render (5602), when a top camera publishes one"><input type="checkbox" id="chk-render" checked> render</label>
+          <label title="Every object where the simulator has it (ground truth)"><input type="checkbox" id="chk-objs" checked> objects</label>
           <label title="Dashed rings where the runtime believes an object is. Red: it isn't there."><input type="checkbox" id="chk-belief" checked> belief rings</label>
         </span>
       </div>
@@ -514,7 +569,7 @@
 </div>
 
 <div class="howto" id="howto" hidden role="dialog" aria-label="How it works">
-  <header><h3>How Worldline works</h3><span class="sub">what runs where, and what each part talks to</span>
+  <header><h3>How Worldline on G1 works</h3><span class="sub">what runs where, and what each part talks to</span>
     <div class="controls"><button class="btn" type="button" id="how-close" title="Close (Esc)">Close</button></div>
   </header>
   <div class="diagram" id="diagram"></div>
@@ -534,25 +589,53 @@
   const S = { meta: null, map: null, config: null, lastEv: -1, lastTr: -1, state: null,
               chatByUid: {}, lastRobotMsg: {}, showBelief: true, ws: null,
               calls: {}, traceAll: [], callsCleared: 0, callsLog: null, follow: false, tab: "feed", openCall: null,
-              layout: null, space: "world", rtab: "now", hud: { label: null, noticed: null } };
+              layout: null, space: "world", rtab: "now", hud: { label: null, noticed: null },
+              cam: "head", cams: {}, showOcc: true, showRender: true, showObjs: true };
+  // STEPPING STONE executors (PLAN 12.2): amber badges everywhere they appear
+  const FALLBACK = () => new Set((S.config && S.config.stepping_stones) || ["kinematic_nav", "kinematic_attach", "sonic_arm_script"]);
+  const isOk = (st) => ["succeeded", "SUCCEEDED"].includes(st);
+  const isBad = (st) => ["cancelled", "failed", "timed_out", "rejected", "dropped", "CANCELED", "ABORTED", "REJECTED", "TIMEOUT", "FAILED"].includes(st);
+  const SPEECH = new Set(["speak", "say"]);
+  function xbadge(executor, skill) {
+    if (!executor && !skill) return "";
+    const fb = FALLBACK().has(executor);
+    const lab = fb ? (((S.config || {}).fallback_labels || {})[executor] || executor + " (fallback)") : executor;
+    const unoff = skill && /community|unofficial/.test(skill);
+    return `<span class="xb${fb ? " fb" : ""}" title="${fb ? "STEPPING STONE: a labelled sim shortcut, counted as a fallback pass" : "target executor"}">${esc(lab || "")}${skill ? " · " + esc(skill) : ""}</span>` +
+      (unoff ? `<span class="xb unofficial" title="Community checkpoint: Inspire-hand data vs Dex3 deploy">UNOFFICIAL · hand mismatch</span>` : "");
+  }
+  const whatOf = (a) => (a || {}).location || (a || {}).object_id || (a || {}).object_type || (a || {}).target || (a || {}).to || (a || {}).object || (a || {}).query || "";
   const FULL = { x: 0, y: 0, w: 640, h: 480 };
   const wsSend = (o) => { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(o)); };
   const setHTML = (el, html) => { if (el && el.__h !== html) { el.innerHTML = html; el.__h = html; } };
   // the views in ui/views/: they get the page's helpers, and the state through ingest()
-  const api = { esc, args, nice, uv: (x, z) => uv(x, z), send: wsSend, rerender: () => renderSpace() };
+  const api = { esc, args, nice, uv: (x, z) => uv(x, z), send: wsSend, rerender: () => renderSpace(), fallbacks: () => [...FALLBACK()] };
   const V = { diagram: window.RobotViews.diagram(api), plan: window.RobotViews.plan(api), memory: window.RobotViews.memory(api) };
   let VB = { ...FULL };
 
-  // ------------------------------------------------------------------ views: head camera + overhead
-  // Overhead pixels from room coordinates (metres): an orthographic camera looking down.
+  // ------------------------------------------------------------------ views: cameras + ground-truth overhead
+  // Overhead units from house coordinates (metres, Worldline frame: x right, z up): an orthographic view.
   function uv(x, z) {
     const t = S.layout.topdown, k = t.h / (2 * t.size);
     return [t.w / 2 + (x - t.cx) * k, t.h / 2 - (z - t.cz) * k];
   }
+  // An image covering [xmin, zmin, xmax, zmax] (image up = +z), placed in overhead units.
+  function extentRect(e) {
+    const [u0, v0] = uv(e[0], e[3]), [u1, v1] = uv(e[2], e[1]);
+    return { x: u0, y: v0, width: u1 - u0, height: v1 - v0 };
+  }
+  const rectAttrs = (r) => `x="${r.x}" y="${r.y}" width="${r.width}" height="${r.height}"`;
   function drawStatic() {
     const lay = S.layout, svg = $("map");
-    let h = `<image id="top-img" x="0" y="0" width="640" height="480" preserveAspectRatio="none"/>`;
-    for (const r of Object.values(lay.rooms || {})) {            // a ProcTHOR house: name each room
+    let h = "";
+    const occ = lay.occupancy;                                   // the sim's occupancy grid: ground truth
+    if (occ && occ.png) h += `<image id="occ-img" ${rectAttrs(extentRect(occ.extent))} preserveAspectRatio="none" href="data:image/png;base64,${occ.png}" style="image-rendering:pixelated"${S.showOcc ? "" : ' display="none"'}><title>sim occupancy grid (${esc(occ.source || "")}, ${occ.resolution} m): ground truth</title></image>`;
+    h += `<image id="top-img" x="0" y="0" width="0" height="0" preserveAspectRatio="none" opacity="0.85"/>`;
+    for (const r of Object.values(lay.rooms || {})) {            // room outlines from the world model
+      const poly = (r.polygon || []).map(([x, z]) => uv(x, z).join(",")).join(" ");
+      if (poly) h += `<polygon points="${poly}" fill="none" stroke="#6a7ea6" stroke-width="1.5" stroke-dasharray="6 4" opacity=".8"/>`;
+    }
+    for (const r of Object.values(lay.rooms || {})) {            // a house: name each room
       const [u, v] = uv(r.x, r.z);
       h += `<text x="${u}" y="${v}" text-anchor="middle" class="room-label">${esc(r.label.toUpperCase())}</text>`;
     }
@@ -578,7 +661,7 @@
         </g>
       </g>`;
     }
-    h += `<g id="dyn-ghosts"></g>
+    h += `<g id="dyn-objs"></g><g id="dyn-ghosts"></g>
           <g id="robot-g" data-role="robot-position">
             <g id="robot-marker">
               <circle r="15" fill="#0d1d35e8" stroke="var(--runtime)" stroke-width="3"/>
@@ -598,8 +681,19 @@
             </g>
           </g>`;
     svg.innerHTML = h;
+    const top = S.cams.top;
+    if (top) placeTop(top.b64, top.meta);
     applyVB();
   }
+  // The sim's own top render, when a top camera publishes one: laid under the overlays by its extent.
+  function placeTop(b64, meta) {
+    const img = $("top-img"); if (!img || !S.layout || !meta || !meta.extent) return;
+    const r = extentRect(meta.extent);
+    for (const [k, v] of Object.entries(r)) img.setAttribute(k, v);
+    img.setAttribute("href", "data:image/jpeg;base64," + b64);
+    img.setAttribute("display", S.showRender ? "inline" : "none");
+  }
+  const TYPE_COLOR = (t) => `hsl(${[...String(t)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7)} 60% 62%)`;
   function drawDynamic() {
     const st = S.state; if (!st || !S.layout) return;
     const tr = st.truth, rt = st.runtime;
@@ -611,7 +705,18 @@
     const held = Object.entries(tr.arms).find(([, a]) => a.holding);
     const hb = $("holding");
     hb.hidden = !held;
-    if (held) hb.textContent = `holding ${held[1].holding}`;
+    if (held) hb.textContent = `holding ${held[1].holding} (${held[0]} hand)`;
+    // every object where the simulator has it: a dot per object, coloured by type, id on hover
+    let objs = "";
+    if (S.showObjs) {
+      for (const [id, o] of Object.entries(tr.objects || {})) {
+        if (o.x == null || o.z == null || String(o.where || "").startsWith("hand")) continue;
+        const [ou, ov] = uv(o.x, o.z);
+        objs += `<g class="obj-glyph" transform="translate(${ou} ${ov})"><circle r="3.2" fill="${TYPE_COLOR(o.type)}"/>
+          <title>${esc(id)} (${esc(o.label || o.type)}) on ${esc(o.where || "?")}${o.y != null ? " · " + o.y + " m high" : ""}${o.visible ? " · visible now" : ""}\nsim ground truth</title></g>`;
+      }
+    }
+    $("dyn-objs").innerHTML = objs;
     let ghosts = "";
     if (S.showBelief && rt && rt.belief && rt.belief.objects) {
       const perSurface = {};
@@ -630,10 +735,22 @@
     }
     $("dyn-ghosts").innerHTML = ghosts;
   }
-  function setCamera(which, b64) {
-    const url = "data:image/jpeg;base64," + b64;
-    if (which === "head") $("cam").src = url;
-    else { const img = $("top-img"); if (img) img.setAttribute("href", url); }
+  // Camera panes: head (5565, what System 1 sees), chase and top (5602, sim viz), ego (GR00T).
+  function setCamera(which, b64, meta) {
+    S.cams[which] = { b64, meta: meta || {} };
+    if (which === "top") placeTop(b64, meta);
+    if (which === S.cam) showCam();
+    for (const b of $("camtabs").querySelectorAll("[data-cam]")) b.disabled = !S.cams[b.dataset.cam];
+  }
+  function showCam() {
+    const c = S.cams[S.cam];
+    $("nocam").hidden = !!c;
+    if (!c) { $("cam").removeAttribute("src"); $("nocam").textContent = `No ${S.cam} frames (${S.cam === "head" ? "P1 camera on 5565" : S.cam === "ego" ? "full profile only" : "start P1 with --viz or --tp-camera"})`; }
+    else $("cam").src = "data:image/jpeg;base64," + c.b64;
+    const m = (c && c.meta) || {};
+    $("cam-label").innerHTML = `${esc(m.caption || S.cam)}${m.age_s != null ? ` <span class="muted">· ${m.age_s} s old</span>` : ""}`;
+    $("cam").style.objectFit = S.cam === "top" ? "contain" : "cover";
+    for (const b of $("camtabs").querySelectorAll("[data-cam]")) b.setAttribute("aria-selected", String(b.dataset.cam === S.cam));
   }
 
   // What the robot is doing, over the head camera: the planner, the steps running, System 1's
@@ -658,10 +775,11 @@
       if (rt.paused) items.push({ k: "paused", c: "bad", html: "paused by stop" });
       if (step.waiting) items.push({ k: "step", c: "warn", html: "planner waiting for Step ▶" });
       else if (rt.thinking) items.push({ k: "think", c: "brain", html: `<span class="dot"></span>planner thinking` });
-      for (const e of (rt.active || []).filter((e) => e.tool !== "say").slice(0, 2)) {
-        const a = e.args || {}, what = a.to || a.object || a.at || a.surface || "";
-        items.push({ k: "act" + e.id, c: e.cancel_requested ? "bad" : "runtime",
-                     html: `${esc(e.tool)}${what ? ` → <b>${esc(nice(what))}</b>` : ""}${e.source === "persona" ? " · own goal" : ""}` });
+      for (const e of (rt.active || []).filter((e) => !SPEECH.has(e.tool)).slice(0, 2)) {
+        const a = e.args || {}, what = whatOf(a);
+        const fb = FALLBACK().has(e.executor);
+        items.push({ k: "act" + e.id, c: e.cancel_requested ? "bad" : fb ? "warn" : "runtime",
+                     html: `${esc(e.tool)}${e.action && e.tool === "manipulate" ? " " + esc(e.action) : ""}${what ? ` → <b>${esc(nice(what))}</b>` : ""}${e.executor ? ` · ${esc(e.executor)}${fb ? " (fallback)" : ""}` : ""}${e.source === "persona" ? " · own goal" : ""}` });
       }
       const lab = S.hud.label;
       if (lab && t - lab.t < HUD_S) {
@@ -688,26 +806,36 @@
       case "speech_started": return ["robot", `says "${e.text}"`];
       case "speech_cut": return ["robot", `speech cut off after ${Math.round(100 * (e.played || 0))}%: "${e.text}"`, "hot"];
       case "speech_overlap": return ["robot", `talks over itself: "${e.text || ""}"`, "hot"];
-      case "goal_accepted":
-        if (e.skill === "say" || e.skill === "chunk") return null;
-        return ["robot", `#${e.goal} ${e.skill}(${args(e.args)}) started`];
-      case "goal_done": {
-        if (e.skill === "say" || e.skill === "chunk") return null;
+      case "goal_accepted": case "tool_started": case "execution_started": {
+        const tool = e.tool || e.tool_name || e.skill;
+        if (SPEECH.has(tool) || tool === "chunk") return null;
+        const x = e.executor ? ` [${e.executor}${FALLBACK().has(e.executor) ? ", fallback" : ""}]` : "";
+        return ["robot", `${e.execution_id || "#" + e.goal} ${tool}(${args(e.args)}) started${x}`];
+      }
+      case "goal_done": case "tool_result": case "execution_done": {
+        const tool = e.tool || e.tool_name || e.skill;
+        if (SPEECH.has(tool) || tool === "chunk") return null;
         const d = e.data || {};
         let brief;
-        if (e.skill === "look") {
+        if ((tool === "look" || tool === "observe" || tool === "wait_and_observe") && d.surfaces) {
           const seen = Object.entries(d.surfaces || {}).map(([s, os]) => `${s}: [${os.map((o) => o.id).join(", ")}]`).join("; ");
           brief = `at ${d.at} sees ${seen || "nothing"}; hands ${JSON.stringify(d.hands || {})}`;
         } else {
-          const keys = ["reason", "at", "between", "reachable", "arm", "suggest", "holding", "chunks", "blocked_edge"];
-          brief = keys.filter((k) => k in d).map((k) => `${k}=${JSON.stringify(d[k])}`).join(" ");
+          const keys = ["reason", "at", "between", "reachable", "preferred_arm", "arm", "suggest_location", "suggest", "holding",
+                        "blocked_edge", "executor", "skill", "walked_m", "duration_s", "final_err_m", "base_shift_m"];
+          brief = e.summary || keys.filter((k) => k in d).map((k) => `${k}=${JSON.stringify(d[k])}`).join(" ");
         }
-        const hot = e.status !== "SUCCEEDED";
-        return ["robot", `#${e.goal} ${e.skill} → ${e.status} ${brief}`, hot ? "amber" : ""];
+        const hot = !isOk(e.status);
+        const fb = FALLBACK().has(d.executor || e.executor) ? " [fallback]" : "";
+        return ["robot", `${e.execution_id || "#" + e.goal} ${tool} → ${e.status}${fb} ${brief}`, hot ? "amber" : ""];
       }
-      case "goal_rejected": return ["robot", `robot rejected ${e.skill}(${args(e.args)}): ${e.reason}`, "hot"];
-      case "cancel_requested": return ["robot", `#${e.goal} ${e.skill}: cancel requested (it stops at its next safe point)`, "amber"];
-      case "halted": return ["robot", "HALT: hardware stop, motion frozen", "hot"];
+      case "body_mode": return ["robot", `SONIC body ${e.mode}${e.lease ? " · lease " + (e.lease.owner || e.lease) : ""}${e.reason ? " · " + e.reason : ""}`];
+      case "safety_event": return ["world", `SAFETY ${e.kind || e.reason || ""} ${e.detail || ""}`, "hot"];
+      case "sim_recovery": return ["world", `sim recovery path ${e.path} (${e.outcome || ""}): a labelled sim-only step`, "amber"];
+      case "capability_changed": return ["robot", `capability changed: ${e.service || ""} ${e.state || ""} ${e.detail || ""}`, "amber"];
+      case "goal_rejected": return ["robot", `robot rejected ${e.tool || e.skill}(${args(e.args)}): ${e.reason || e.message}`, "hot"];
+      case "cancel_requested": return ["robot", `${e.execution_id || "#" + e.goal} ${e.tool || e.skill}: cancel requested (it stops at its next safe point)`, "amber"];
+      case "halted": return ["robot", `HALT: body HOLD latched${e.stopped === false ? " (not acknowledged yet)" : ""}${e.at_rest != null ? (e.at_rest ? ", at rest" : ", still settling") : ""}`, "hot"];
       case "chunk_started": return ["robot", `${e.arm} arm: ${e.phase}${obj}`];
       case "chunk_aborted": return ["robot", `${e.arm} arm chunk aborted: ${e.reason || ""}`, "amber"];
       case "base_moving": return ["robot", `base moving${e.to ? " toward " + e.to : ""}`];
@@ -747,7 +875,7 @@
       case "brain_error": return ["brain", `model call failed: ${r.error}`, "hot"];
       case "brain_malformed": return ["brain", `model reply was not a tool call: ${r.got}`, "hot"];
       case "say_queued": return ["runtime", `queues speech for v${r.version}: "${r.text}"`];
-      case "started": return ["runtime", `starts ${r.tool}(${args(r.args)}) for v${r.version}`];
+      case "started": return ["runtime", `starts ${r.execution_id ? r.execution_id + " " : ""}${r.tool}(${args(r.args)}) for v${r.version ?? r.generation}${r.executor ? " [" + r.executor + (FALLBACK().has(r.executor) ? ", fallback" : "") + "]" : ""}`];
       case "rejected": return ["runtime", `rejects ${r.tool}(${args(r.args)}): ${r.why}`, "hot"];
       case "correction": return ["runtime", `CORRECTION → v${r.version}. cancels [${(r.canceled || []).join(", ")}], drops speech [${(r.dropped || []).join(" | ")}]`, "key"];
       case "stop": return ["runtime", `STOP without asking the model: halt(), cancels [${(r.canceled || []).join(", ")}], cuts [${(r.cut || []).join(" | ")}]`, "hot"];
@@ -756,9 +884,10 @@
       case "held_for_reconcile": return ["runtime", `holds ${r.tool}(${args(r.args)}) until the cancelled action settles`, "amber"];
       case "stale_decision": return ["runtime", `drops stale decision ${r.tool}(${args(r.args)}), made for v${r.made_for}`, "amber"];
       case "result": {
-        const d = r.data || {};
-        const saw = r.skill === "look" && d.saw ? `  · saw ${d.saw.length ? d.saw.join(", ") : "nothing"}${d.landmarks && d.landmarks.length ? " · landmarks " + d.landmarks.join(", ") : ""}` : "";
-        return ["runtime", `result: ${r.skill} ${r.status}${r.late ? "  LATE (updates belief, not the plan)" : ""}${saw}`, r.late ? "amber" : ""];
+        const d = r.data || {}, tool = r.tool || r.skill, ex = d.executor || r.executor;
+        const saw = d.saw ? `  · saw ${d.saw.length ? d.saw.join(", ") : "nothing"}${d.landmarks && d.landmarks.length ? " · landmarks " + d.landmarks.join(", ") : ""}` : "";
+        const x = ex ? `  [${ex}${d.skill ? " " + d.skill : ""}${FALLBACK().has(ex) ? ", fallback" : ""}]` : "";
+        return ["runtime", `result: ${r.execution_id ? r.execution_id + " " : ""}${tool}${r.action ? " " + r.action : ""} ${r.status}${x}${r.summary ? " · " + r.summary : ""}${r.late ? "  LATE (updates belief, not the plan)" : ""}${saw}`, r.late || FALLBACK().has(ex) ? "amber" : ""];
       }
       case "persona_goal": return ["persona", `own goal (${r.drive}): ${r.text}`, "persona"];
       case "persona_goal_end": return ["persona", `own goal ${r.drive} ${r.target}: ${{ done: "done", gave_up: "gave up", dropped: "dropped, the user comes first", off: "switched off" }[r.outcome] || r.outcome}`, r.outcome === "done" ? "persona" : "amber"];
@@ -797,11 +926,11 @@
     heard: "The brain labelled what you said. Click to see the model call.",
     decision: "The model's answer to next_action: exactly one tool call. Click to see its full input and output.",
     say_queued: "Speech goes into a first-in-first-out queue, tagged with the request version it serves, so a correction can drop lines that are now wrong.",
-    started: "navigate, pick and place run as background tasks, so the runtime keeps listening and thinking while the robot moves.",
+    started: "navigate and manipulate run as background executions (nav-…, man-…), so the runtime keeps listening and thinking while the G1 walks or grasps. The badge names the executor; amber means a labelled sim shortcut (STEPPING STONE).",
     rejected: "Every tool call is checked against the runtime's rules before it runs. The reason is sent back to the model as a NOTE on its next turn.",
     correction: "Only a correction cancels anything. The request version goes up, every action made for an older version is cancelled, old queued speech is dropped, and any hand a cancelled arm used becomes UNKNOWN.",
-    stop: "“Stop” is caught by a keyword match before any model call: halt() freezes the robot in about 0.1 s, speech is cut, and the runtime pauses until you say to continue.",
-    reconcile_start: "cancel() is only a request: a pick still finishes its current ~1 s chunk. Until every cancelled action has ended, only speech is allowed to start.",
+    stop: "“Stop” is caught by a keyword match before any model call: halt() latches SONIC in HOLD (acknowledged within 30 ms; at rest within about 1.5 s), speech is cut, and the runtime pauses until you say to continue. It never kills the controller; that is the separate Kill button.",
+    reconcile_start: "cancel() is only a request: SONIC decelerates (up to about 1.5 s) and a grasp blends out. Until every cancelled execution has ended, only speech is allowed to start.",
     reconcile_done: "The cancelled actions have ended and the runtime has looked, so it knows what the hands hold again.",
     held_for_reconcile: "The model asked for a new action while a cancelled one was still moving, so the runtime holds it back.",
     stale_decision: "The request version changed while the model was thinking. This answer was for the old request, so it is thrown away.",
@@ -809,11 +938,15 @@
     brain_error: "The model call failed. The runtime retries a few times, then carries on.",
     speech_started: "The robot starts speaking a queued line.",
     speech_cut: "A line was cut off, usually because a correction made it wrong or you said stop.",
-    goal_accepted: "The runtime sent a goal to the robot API (send_goal).",
-    goal_done: "The robot reports a goal's result: SUCCEEDED, ABORTED or CANCELED, plus data. The runtime doesn't simply trust SUCCEEDED; it looks after every pick and place.",
+    goal_accepted: "The runtime started an execution through the robot facade (robot.start).",
+    tool_started: "The runtime started an execution through the robot facade (robot.start).",
+    goal_done: "The robot reports an execution's result envelope: succeeded, failed, cancelled, timed_out or rejected, plus data. The runtime doesn't simply trust succeeded; it looks after every pick and place.",
+    tool_result: "The robot reports an execution's result envelope: succeeded, failed, cancelled, timed_out or rejected, plus data and the executor. The runtime doesn't simply trust succeeded; it looks after every pick and place.",
     cancel_requested: "cancel() was called. It returns at once; the skill stops at its next safe point.",
-    halted: "Hardware stop: base and arms freeze within about 0.1 s, even mid-chunk.",
-    chunk_started: "pick and place run as timed chunks (about 1 s each) on the THOR robot. A chunk always runs to its end; cancel is honoured only between chunks.",
+    halted: "halt(): the body server latches SONIC in HOLD (planner IDLE, token stream cut). 'stopped' means latched; 'at rest' is reported separately.",
+    body_mode: "The SONIC body server's mode: HOLD, LOCOMOTION (walking), ARM_SCRIPT (scan or scripted reach), VLA_TOKENS (GR00T), KINEMATIC (bring-up fallback), FAULT/ESTOP.",
+    sim_recovery: "A sim-only recovery after a fall: path A (soft, the deploy stays alive) or path B (supervised restart). Labelled in results and eval.",
+    chunk_started: "A manipulation phase started (approach, grasp, lift…).",
     grasp_closed: "Ground truth: the gripper really closed on this object. The runtime doesn't see this event; it has to find out by looking.",
     object_slipped: "Ground truth: the object fell out of the gripper. The pick may still report success, which is why the runtime looks afterwards.",
     object_placed: "Ground truth: the object is now on this surface.",
@@ -897,6 +1030,36 @@
     } else if (!on && el) el.remove();
   }
 
+  // ------------------------------------------------------------------ body + stack (G1)
+  // The header strip: profile, tool state, SONIC body mode, RTF, services.
+  function renderStrip(msg) {
+    const rt = msg.runtime || {}, body = msg.body || {}, stack = msg.stack || {};
+    const prof = stack.profile || (S.config && S.config.profile) || "?";
+    const rtf = stack.rtf ?? body.rtf;
+    const svc = Object.entries(stack.services || {}).map(([k, v]) => `${esc(k)} <b class="${v && v.ok === false ? "bad" : "ok"}">${v && v.ok === false ? esc(v.state || "down") : "ok"}</b>`).join(" · ");
+    const s1 = S.s1 || {};
+    const h = `<span>profile <b>${esc(prof)}</b></span><span class="sep">·</span>
+      <span class="ts t-${esc(rt.tool_state || "IDLE")}" title="Tool state (PLAN 5.8), derived from what is running">${esc(rt.tool_state || "IDLE")}</span>
+      ${body.mode ? `<span class="mode m-${esc(body.mode)}" title="SONIC body mode">${esc(body.mode)}</span>` : ""}
+      ${rtf != null ? `<span class="sep">·</span><span title="Isaac real-time factor (the SONIC deploy needs >= 1)">RTF <b class="${rtf < 0.85 ? "bad" : rtf < 0.95 ? "warn" : ""}">${Number(rtf).toFixed(2)}</b></span>` : ""}
+      ${svc ? `<span class="sep">·</span><span>${svc}</span>` : ""}
+      <span class="sep">·</span><span>System 1 <b class="${s1.status === "ready" ? "ok" : s1.status === "error" ? "bad" : ""}">${esc(s1.status || "off")}</b></span>`;
+    setHTML($("strip"), h);
+  }
+  // The body panel: SONIC mode, lease, carry lock, halt latch, deploy health, band, RTF, services.
+  function renderBody(st) {
+    const body = st.body || {}, stack = st.stack || {}, tr = st.truth || {};
+    const lease = body.lease ? (typeof body.lease === "object" ? `${esc(body.lease.owner || body.lease.lease_id || "?")} · g${body.lease.generation ?? "?"}/e${body.lease.control_epoch ?? "?"}` : esc(body.lease)) : "none";
+    const fb = (stack.profile_fallbacks || []).length ? `<div><span class="id">fallbacks</span> <span class="warn">${(stack.profile_fallbacks || []).map(esc).join(", ")}</span> <span class="muted">(STEPPING STONE executors this profile uses; their passes count as fallback passes)</span></div>` : "";
+    const svc = Object.entries(stack.services || {}).map(([k, v]) => `${esc(k)} <span class="${v && v.ok === false ? "bad" : "ok"}">${esc((v && v.state) || (v && v.ok === false ? "down" : "ok"))}</span>${v && v.detail ? ` <span class="muted">${esc(v.detail)}</span>` : ""}`).join(" · ");
+    return `<div class="block"><h3>Body · SONIC <span class="muted" style="text-transform:none;letter-spacing:0">profile ${esc(stack.profile || "?")}</span></h3><div class="list">
+      <div><span class="id">mode</span> ${body.mode ? `<span class="mode m-${esc(body.mode)}">${esc(body.mode)}</span>` : '<span class="muted">unknown</span>'} · lease ${lease}${body.halt_epoch != null ? ` · halt latch e${esc(body.halt_epoch)}` : ""}</div>
+      <div><span class="id">carry</span> ${body.carry ? esc(typeof body.carry === "object" ? JSON.stringify(body.carry) : body.carry) : '<span class="muted">none</span>'}${body.upright === false || tr.robot.upright === false ? ' · <span class="bad">NOT UPRIGHT</span>' : ""}${body.band ? ' · <span class="warn">elastic band ON</span>' : ""}</div>
+      <div><span class="id">deploy</span> ${body.gdebug_age_ms != null ? `g1_debug ${body.gdebug_age_ms} ms old` : '<span class="muted">n/a</span>'}${stack.rtf != null ? ` · RTF ${Number(stack.rtf).toFixed(2)}` : ""}${body.falls != null ? ` · falls ${body.falls}` : ""}</div>
+      ${svc ? `<div><span class="id">services</span> ${svc}</div>` : ""}${fb}
+    </div></div>`;
+  }
+
   // ------------------------------------------------------------------ state panel
   function handLabel(h) {
     if (h === null || h === undefined) return "empty";
@@ -936,7 +1099,7 @@
       </div></div>`;
     }
 
-    // Latest fused observation. THOR fills the same adapter boundary that a
+    // Latest fused observation. The G1 facade (GT-backed in sim) fills the same adapter boundary that a
     // hardware telemetry + perception stack would fill later.
     if (fused.revision != null) {
       const pose = sensor.pose || {};
@@ -960,8 +1123,9 @@
     }
 
     // hands
-    h += `<div class="block"><h3>Robot</h3><div class="list"><div>truth: ${tr.robot.moving ? "moving" : "at " + esc(tr.robot.at || "?")}${tr.robot.between ? " (between " + esc(tr.robot.between.join(" and ")) + ")" : ""} · belief: ${esc(rt.belief.robot ? (rt.belief.robot.at || (rt.belief.robot.between ? "between " + rt.belief.robot.between.join(" and ") : "unknown")) : "?")}</div></div></div>`;
-    h += `<div class="block"><h3>Hands · truth vs belief <span class="muted" style="text-transform:none;letter-spacing:0">(one object at a time)</span></h3><table><tr><th>Arm</th><th>Truth</th><th>Runtime believes</th></tr>`;
+    h += renderBody(st);
+    h += `<div class="block"><h3>Robot</h3><div class="list"><div>truth: ${tr.robot.moving ? "moving" : "at " + esc(tr.robot.at || "?")}${tr.robot.between ? " (between " + esc(tr.robot.between.join(" and ")) + ")" : ""}${tr.robot.pelvis_z != null ? ` · pelvis ${Number(tr.robot.pelvis_z).toFixed(2)} m` : ""}${tr.robot.upright === false ? ' · <span class="bad">not upright</span>' : ""} · belief: ${esc(rt.belief.robot ? (rt.belief.robot.at || (rt.belief.robot.between ? "between " + rt.belief.robot.between.join(" and ") : "unknown")) : "?")}</div></div></div>`;
+    h += `<div class="block"><h3>Hands · <span class="gtcap">sim ground truth</span> vs belief <span class="muted" style="text-transform:none;letter-spacing:0">(one object at a time)</span></h3><table><tr><th>Arm</th><th>Truth</th><th>Runtime believes</th></tr>`;
     for (const arm of ["left", "right"]) {
       const t = tr.arms[arm], b = (rt.belief.hands || {})[arm] || {};
       const bh = b.holding === undefined ? null : b.holding;
@@ -974,14 +1138,15 @@
 
     // running
     h += `<div class="block"><h3>Running now</h3><div class="list">`;
-    const act = rt.active.filter((e) => e.tool !== "say");
-    if (!act.length && !tr.goals.filter((g) => g.skill !== "say").length) h += `<div class="empty" style="border:0;background:none;padding:0">nothing</div>`;
+    const act = rt.active.filter((e) => !SPEECH.has(e.tool));
+    const rex = (tr.executions || []).filter((g) => !SPEECH.has(g.tool));
+    if (!act.length && !rex.length) h += `<div class="empty" style="border:0;background:none;padding:0">nothing</div>`;
     for (const e of act) {
       const stale = e.v < rt.version;
-      h += `<div class="${e.cancel_requested ? "cxl" : stale ? "stale" : "run"}">#${e.id} ${esc(e.tool)}(${esc(args(e.args))}) · for v${e.v} · ${esc(e.status)}${e.cancel_requested ? " · cancel requested" : ""}${e.source === "harness" ? " · harness" : e.source === "persona" ? " · own goal" : ""}</div>`;
+      h += `<div class="${e.cancel_requested ? "cxl" : stale ? "stale" : e.fallback ? "fbk" : "run"}">${esc(e.id)} · g${e.v}/e${e.e ?? "?"} · ${esc(e.tool)}(${esc(args(e.args))}) · ${esc(e.status)}${xbadge(e.executor, e.skill)}${e.cancel_requested ? " · cancel requested" : ""}${e.source === "harness" ? " · harness" : e.source === "persona" ? " · own goal" : ""}</div>`;
     }
-    for (const g of tr.goals.filter((g) => g.skill !== "say")) {
-      h += `<div class="${g.status === "CANCELING" ? "cxl" : ""}"><span class="muted">robot goal</span> #${g.id} ${esc(g.skill)}(${esc(args(g.args))}) · ${esc(g.status)}</div>`;
+    for (const g of rex) {
+      h += `<div class="${["cancelling", "CANCELING"].includes(g.status) ? "cxl" : ""}"><span class="muted">robot facade</span> ${esc(g.id)} ${esc(g.tool)}(${esc(args(g.args))}) · ${esc(g.status)}${xbadge(g.executor, g.skill)}</div>`;
     }
     h += `</div></div>`;
 
@@ -995,7 +1160,7 @@
     }
 
     // objects
-    h += `<div class="block"><h3>Objects · truth vs belief</h3><table><tr><th>Object</th><th>Truth</th><th>Runtime believes</th></tr>`;
+    h += `<div class="block"><h3>Objects · <span class="gtcap">sim ground truth</span> vs belief <span class="muted" style="text-transform:none;letter-spacing:0">(the planner sees belief only)</span></h3><table><tr><th>Object</th><th>Truth</th><th>Runtime believes</th></tr>`;
     const heldBy = {};
     for (const [arm, a] of Object.entries(tr.arms)) if (a.holding) heldBy[a.holding] = arm;
     const ids = new Set(Object.keys(rt.belief.objects || {}));
@@ -1022,12 +1187,12 @@
     </div></div>`;
 
     // recent actions
-    h += `<div class="block"><h3>Recent actions (history the brain sees)</h3><div class="list">`;
+    h += `<div class="block"><h3>Executions (history the brain sees) <span class="muted" style="text-transform:none;letter-spacing:0">id · g generation / e epoch · tool · status · executor</span></h3><div class="list">`;
     const rec = rt.recent.slice().reverse();
     if (!rec.length) h += `<div class="empty" style="border:0;background:none;padding:0">none yet</div>`;
     for (const e of rec) {
-      const cls = e.late ? "late" : (["CANCELED", "ABORTED", "REJECTED", "TIMEOUT", "FAILED"].includes(e.status) ? "cxl" : (e.status === "running" ? "run" : ""));
-      h += `<div class="${cls}">${e.t.toFixed(1)} · v${e.v} ${esc(e.tool)}(${esc(args(e.args))}) → ${esc(e.status)}${e.late ? " · late" : ""}${e.source === "harness" ? " · harness" : e.source === "persona" ? " · own goal" : ""}</div>`;
+      const cls = e.late ? "late latex" : (isBad(e.status) ? "cxl" : (e.status === "running" ? "run" : e.fallback ? "fbk" : ""));
+      h += `<div class="${cls}" title="${e.late ? "late: from an older generation; applied to belief, never counted as progress" : ""}">${e.t.toFixed(1)} · ${esc(e.id)} · g${e.v}/e${e.e ?? "?"} ${esc(e.tool)}(${esc(args(e.args))}) → ${esc(e.status)}${xbadge(e.executor, e.skill)}${e.late ? " · late" : ""}${e.source === "harness" ? " · harness" : e.source === "persona" ? " · own goal" : ""}</div>`;
     }
     h += `</div></div>`;
 
@@ -1048,6 +1213,7 @@
   // Every frame: what is visible in all workspaces (clock, persona and step controls).
   function renderAlways(msg) {
     $("simt").textContent = msg.t.toFixed(1);
+    renderStrip(msg);
     const rt = msg.runtime;
     const per = rt && rt.persona, sel = $("sel-persona");
     if (per && document.activeElement !== sel && sel.value !== per.level) sel.value = per.level;
@@ -1108,7 +1274,9 @@
       ${rt.paused ? `<span class="pill paused">paused by stop</span>` : ""}
       ${rt.thinking ? `<span class="pill think"><span class="dot"></span>thinking</span>` : ""}
       ${rt.reconciling ? `<span class="pill rec">reconciling a cancel</span>` : ""}
-      <span class="pill">${stats.calls ?? 0} model calls${stats.latency_ms_p50 ? " · p50 " + (stats.latency_ms_p50 / 1000).toFixed(1) + " s" : ""}</span></div>`;
+      <span class="pill">${stats.calls ?? 0} model calls${stats.latency_ms_p50 ? " · p50 " + (stats.latency_ms_p50 / 1000).toFixed(1) + " s" : ""}</span>
+      <span class="ts t-${esc(rt.tool_state || "IDLE")}">${esc(rt.tool_state || "IDLE")}</span></div>`;
+    h += renderBody(st);
     const s1 = S.s1 || { status: "off" };
     const lastLabel = S.traceAll.slice().reverse().find((r) => r.type === "classified");
     const noticed = S.traceAll.filter((r) => r.type === "observation").slice(-3).reverse();
@@ -1120,8 +1288,8 @@
       ${task.goal ? `<div><span class="muted">goal</span> ${esc(task.goal)}</div>` : ""}</div></div>`;
     h += `<div class="block"><h3>Planner</h3><div class="list"><div>${rt.thinking ? '<span style="color:var(--brain)">thinking…</span>' : step.waiting ? '<span class="warn">waiting for Step</span>' : '<span class="muted">idle</span>'}</div>
       ${lastDec ? `<div><span class="muted">last</span> ${esc(lastDec.tool)}(${esc(args(lastDec.args))})${lastDec.latency != null ? ` <span class="muted">· ${lastDec.latency.toFixed(1)} s · t=${lastDec.t.toFixed(1)}</span>` : ""}</div>` : ""}</div></div>`;
-    const act = (rt.active || []).filter((e) => e.tool !== "say");
-    h += `<div class="block"><h3>Running now</h3><div class="list">${act.length ? act.map((e) => `<div class="${e.cancel_requested ? "cxl" : "run"}">#${e.id} ${esc(e.tool)}(${esc(args(e.args))}) · for v${e.v}${e.source === "persona" ? " · own goal" : ""}</div>`).join("") : '<div class="empty" style="border:0;background:none;padding:0">nothing</div>'}</div></div>`;
+    const act = (rt.active || []).filter((e) => !SPEECH.has(e.tool));
+    h += `<div class="block"><h3>Running now</h3><div class="list">${act.length ? act.map((e) => `<div class="${e.cancel_requested ? "cxl" : e.fallback ? "fbk" : "run"}">${esc(e.id)} · g${e.v}/e${e.e ?? "?"} · ${esc(e.tool)}(${esc(args(e.args))})${xbadge(e.executor, e.skill)}${e.source === "persona" ? " · own goal" : ""}</div>`).join("") : '<div class="empty" style="border:0;background:none;padding:0">nothing</div>'}</div></div>`;
     if (rt.speech) {
       const sp = rt.speech;
       h += `<div class="block"><h3>Speech queue</h3><div class="list">${!sp.current && !sp.queued.length ? '<div class="empty" style="border:0;background:none;padding:0">silent</div>' : ""}
@@ -1138,6 +1306,7 @@
     const m = S.meta, c = S.config;
     const opt = (v, label, sel) => `<option value="${esc(v)}"${v === sel ? " selected" : ""}>${esc(label)}</option>`;
     $("sel-scene").innerHTML = m.scenes.map(([v, l]) => opt(v, `${l} (${v})`, c.scene)).join("");
+    $("sel-profile").innerHTML = (m.profiles || []).map(([v, l]) => opt(v, l, c.profile || m.profile)).join("");
     $("sel-model").innerHTML = m.models.map(([v, l]) => opt(v, l, c.model)).join("");
     renderWorldCard();
   }
@@ -1161,14 +1330,14 @@
     if (surfNames.length) lines.push(`What's on ${lay.surfaces[surfNames[0]].desc}?`);
     lines.push("How long will that take?");
     $("world-card").innerHTML = `<div class="t">${esc(label)}</div>
-      <div class="d">${Object.keys(lay.keypoints).length} named spots, ${onSurf.length} objects on surfaces. You are at <b>${esc(lay.human ? lay.human.keypoint : "start")}</b>. Type to the robot.</div>
+      <div class="d">A Unitree G1 (${esc((S.config && S.config.profile) || "?")} profile). ${Object.keys(lay.keypoints).length} named spots, ${onSurf.length} objects on surfaces. You are at <b>${esc(lay.human ? lay.human.keypoint : "start")}</b>. Type to the robot.${(S.config && (S.config.profile_fallbacks || []).length) ? ` <span class="warn">Labelled sim shortcuts in this profile: ${(S.config.profile_fallbacks || []).map(esc).join(", ")}.</span>` : ""}</div>
       <div class="chips">${lines.map((l) => `<button type="button" class="chip">${esc(l)}</button>`).join("")}</div>`;
     for (const c of $("world-card").querySelectorAll(".chip")) c.addEventListener("click", () => send(c.textContent));
   }
   function banner() {
     const slot = $("banner-slot");
     const msgs = [];
-    if (S.meta && !S.meta.gemini_key) msgs.push("GEMINI_API_KEY is missing from .env, so the Gemini planner can't run.");
+    if (S.meta && !S.meta.gemini_key) msgs.push("GEMINI_API_KEY is missing ($WORLDLINE_ENV, .env or ~/.config/ludo-g1/secrets.env), so the Gemini planner can't run.");
     if (S.error) msgs.push(S.error);
     slot.innerHTML = msgs.length ? `<div class="banner">${msgs.map(esc).join("\n")}</div>` : "";
   }
@@ -1213,6 +1382,7 @@
       S.meta = msg.meta || S.meta; S.map = msg.map; if (S.meta && S.meta.system1) S.s1 = S.meta.system1; S.layout = msg.layout; S.config = msg.config; S.error = msg.error;
       S.lastEv = -1; S.lastTr = -1; S.chatByUid = {}; S.lastRobotMsg = {};
       S.calls = {}; S.traceAll = []; S.callsCleared = 0; S.callsLog = msg.calls_log; S.hud = { label: null, noticed: null }; closeDrawer();
+      if (S.cams.__scene !== msg.config.scene) { S.cams = { __scene: msg.config.scene }; showCam(); }
       $("chat").innerHTML = ""; $("feed").innerHTML = ""; $("calls").innerHTML = "";
       $("loading").hidden = true;
       VB = { ...FULL }; S.fitted = true;
@@ -1221,10 +1391,10 @@
     } else if (msg.type === "frame") {
       if (S.layout) { V.plan.robotMap(msg.robot_map, false); ingest(msg); }
     } else if (msg.type === "camera") {
-      setCamera(msg.which, msg.jpeg);
+      setCamera(msg.which, msg.jpeg, msg.meta);
     } else if (msg.type === "loading") {
       if (msg.meta) { S.meta = msg.meta; }
-      $("loading").hidden = false; $("loading").textContent = `Loading ${msg.scene}…`;
+      $("loading").hidden = false; $("loading").textContent = `Loading ${msg.scene}${msg.profile ? " (" + msg.profile + ")" : ""}…`;
     } else if (msg.type === "system1") {
       S.s1 = { status: msg.status, detail: msg.detail };
       if (msg.status === "error") toast("System 1: " + (msg.detail || "error"));
@@ -1419,12 +1589,22 @@
   $("btn-stop").addEventListener("click", () => send("stop"));
   $("btn-forget").addEventListener("click", () => {
     if (!S.ws || S.ws.readyState !== 1) return;
-    S.ws.send(JSON.stringify({ type: "reset", forget: true, scene: $("sel-scene").value, model: $("sel-model").value }));
+    S.ws.send(JSON.stringify({ type: "reset", forget: true, scene: $("sel-scene").value, model: $("sel-model").value, profile: $("sel-profile").value || undefined }));
   });
   $("btn-reset").addEventListener("click", () => {
     if (!S.ws || S.ws.readyState !== 1) return;
-    S.ws.send(JSON.stringify({ type: "reset", scene: $("sel-scene").value, model: $("sel-model").value }));
+    S.ws.send(JSON.stringify({ type: "reset", scene: $("sel-scene").value, model: $("sel-model").value, profile: $("sel-profile").value || undefined }));
   });
+  // The operator kill button: a hardware e-stop, separate from the chat Stop (PLAN 9.4)
+  $("btn-kill").addEventListener("click", () => {
+    if (!S.ws || S.ws.readyState !== 1) return;
+    if (!window.confirm("Kill the SONIC controller?\n\nThis is the hardware e-stop: the deploy exits, the robot is caught by the band (sim) and needs a supervised restart. To just stop the robot, use the chat Stop instead.")) return;
+    S.ws.send(JSON.stringify({ type: "estop", confirm: true }));
+  });
+  $("camtabs").addEventListener("click", (e) => { const b = e.target.closest("[data-cam]"); if (b && !b.disabled) { S.cam = b.dataset.cam; showCam(); remember("cam", S.cam); } });
+  $("chk-occ").addEventListener("change", (e) => { S.showOcc = e.target.checked; const i = $("occ-img"); if (i) i.setAttribute("display", S.showOcc ? "inline" : "none"); });
+  $("chk-render").addEventListener("change", (e) => { S.showRender = e.target.checked; const i = $("top-img"); if (i) i.setAttribute("display", S.showRender ? "inline" : "none"); });
+  $("chk-objs").addEventListener("change", (e) => { S.showObjs = e.target.checked; drawDynamic(); });
   $("sel-scene").addEventListener("change", () => { if (S.meta) renderWorldCard($("sel-scene").value); });
   window.addEventListener("resize", refit);
   $("chk-belief").addEventListener("change", (e) => { S.showBelief = e.target.checked; drawDynamic(); });
@@ -1444,7 +1624,8 @@
   // How it works: a static picture of the system, full screen
   function showHow(on) {
     $("howto").hidden = !on;
-    if (on) V.diagram.render($("diagram"), { planner: ((S.meta && S.meta.models) || []).find(([v]) => S.config && v === S.config.model), system1: S.s1 });
+    if (on) V.diagram.render($("diagram"), { planner: ((S.meta && S.meta.models) || []).find(([v]) => S.config && v === S.config.model), system1: S.s1,
+                                             profile: S.config && S.config.profile, stones: (S.config && S.config.profile_fallbacks) || [] });
   }
   $("btn-how").addEventListener("click", () => showHow($("howto").hidden));
   $("how-close").addEventListener("click", () => showHow(false));
@@ -1475,7 +1656,9 @@
     if (e.key === "n" || e.key === "N") { const st = S.state && S.state.runtime && S.state.runtime.step; if (st && st.waiting) wsSend({ type: "step", mode: "next" }); }
   });
   let saved = {};
-  try { saved = { space: localStorage.getItem("worldline.space"), rtab: localStorage.getItem("worldline.rtab") }; } catch { /* private window: fine */ }
+  try { saved = { space: localStorage.getItem("worldline.space"), rtab: localStorage.getItem("worldline.rtab"), cam: localStorage.getItem("worldline.cam") }; } catch { /* private window: fine */ }
+  if (["head", "chase", "top", "ego"].includes(saved.cam)) S.cam = saved.cam;
+  showCam();
   setRtab(["now", "state", "memory", "proc"].includes(saved.rtab) ? saved.rtab : "now");
   setSpace(saved.space === "brain" ? "brain" : "world");
   connect();
