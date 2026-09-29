@@ -76,7 +76,7 @@ class G1Robot:
                                        observation=self.obs, nav=self.nav, body=body)
         self.manip = ManipulationService(world, self.skill_registry, self.reach, self.executors, clock,
                                          ManipConfig.from_dict(manip_cfg), nav=self.nav, observation=self.obs,
-                                         gate=self.gate, events=self.sink)
+                                         gate=self.gate, events=self.sink, policy=profile.manip_policy)
         self.speech = SpeechService(clock, self.sink, observation_id=self.observation_id)
         self.policy = CapabilityPolicy(world, nav=self.nav, manip=self.manip, body=body,
                                        observation_detail=lambda: f"{self.world.source} "
@@ -305,9 +305,13 @@ class G1Robot:
                 t = min(t, float(args["timeout_s"]))
             return t
         if tool == "manipulate":
-            s = self.skill_registry.select(str(args.get("action") or "pick"), str(args.get("object_type")),
-                                           args.get("arm") if args.get("arm") in ARMS else None)
-            return s.timeout_s() if s else 20.0
+            action, otype = str(args.get("action") or "pick"), str(args.get("object_type"))
+            arm = args.get("arm") if args.get("arm") in ARMS else None
+            s = self.skill_registry.select(action, otype, arm)
+            if s is None:
+                return 20.0
+            fb = self.manip.fallback_for(s, action, otype, arm)       # groot_then_script: room for the fallback
+            return s.timeout_s() + (fb.max_duration_s + self.manip.cfg.verify_hold_s if fb is not None else 0.0)
         if tool == "check_reachability":
             return 12.0
         if tool in ("observe", "look"):

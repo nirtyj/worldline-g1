@@ -818,12 +818,21 @@ async def e5_groot_plumbing(r: StackRun, o: Outcome, trials: tuple[str, ...] = E
         d = (res or {}).get("data") or {}
         await asyncio.sleep(1.0)
         stop = next((x for x in r.rows("stop") if t_act is not None and (x.get("t") or 0) >= t_act), None)
+        # groot_then_script (profile full): a failed GR00T attempt hands over to a labelled fallback, and the result
+        # is the fallback's; the GR00T attempt is data.attempts[0]. Only a GR00T attempt that succeeded counts as a
+        # GR00T success (a kinematic-attach fallback also ends with the object in hand).
+        att = [a for a in (d.get("attempts") or []) if isinstance(a, dict)]
+        g = att[0] if att else {"executor": d.get("executor"), "skill": d.get("skill"),
+                                "status": (res or {}).get("status"), "reason": d.get("reason")}
         row.update(status=(res or {}).get("status"), reason=d.get("reason"), executor=d.get("executor"),
                    skill=d.get("skill"), holding=d.get("holding"), gt_where=r.where(oid), fell=r.fell(t0),
                    inferences=d.get("inferences"), took_s=None if (res is None or t_act is None)
                    else round(float(res.get("t") or 0) - t_act, 2),
                    receipt=(stop or {}).get("receipt"), late=(res or {}).get("late"),
-                   gt_success=str(r.where(oid) or "").startswith("hand"))
+                   groot_executor=g.get("executor"), groot_skill=g.get("skill"), groot_status=g.get("status"),
+                   groot_reason=g.get("reason"), fallback=(d.get("fallback_from") or {}).get("executor") is not None,
+                   gt_success=g.get("executor") in GROOT_EXECUTORS and g.get("status") == "succeeded"
+                   and str(r.where(oid) or "").startswith("hand"))
         rows.append(row)
         if kind == "halt":
             await r.say("Okay, carry on.")
@@ -842,10 +851,12 @@ async def e5_groot_plumbing(r: StackRun, o: Outcome, trials: tuple[str, ...] = E
             f"{len(halt)} (receipt stopped, result failed(halted))",
             bool(halt) and all((x.get("receipt") or {}).get("stopped") and x.get("status") == "failed"
                                and x.get("reason") == "halted" for x in halt))
-    o.check("every result names groot_arms, the skill and the GT outcome",
-            bool(ran) and all(x.get("executor") == "groot_arms" and str(x.get("skill") or "").startswith("groot.")
+    o.check("every result names groot_arms (or its GR00T attempt, before a labelled fallback), the skill and the GT "
+            "outcome",
+            bool(ran) and all(x.get("groot_executor") == "groot_arms"
+                              and str(x.get("groot_skill") or "").startswith("groot.")
                               and x.get("gt_where") is not None for x in ran),
-            [(x.get("executor"), x.get("skill")) for x in ran][:3])
+            [(x.get("groot_executor"), x.get("groot_skill"), x.get("executor")) for x in ran][:3])
     succ = [x for x in rows if x["kind"] == "plain"]
     o.extra["success"] = f"{sum(bool(x.get('gt_success')) for x in succ)}/{len(succ)} plain picks ended in hand (GT); " \
                          "reported, not required (experimental checkpoint)"

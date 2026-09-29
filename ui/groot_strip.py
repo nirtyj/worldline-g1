@@ -116,7 +116,18 @@ class GrootStrip:
             text += f" · in hand (GT): {'yes' if holding else 'no'}"
         if gt and _num(gt.get("lift_max_m")) is not None:
             text += f" · lifted at most {float(gt['lift_max_m']) * 100:.0f} cm"
-        s["outcome"] = {"status": s["status"], "reason": reason, "holding": holding, "gt": gt,
+        fb = data.get("fallback_from") if isinstance(data.get("fallback_from"), dict) else None
+        if fb:                             # groot_then_script: the GR00T attempt failed, a labelled fallback ran
+            g = data.get("groot") if isinstance(data.get("groot"), dict) else {}
+            gt = g.get("gt") if isinstance(g.get("gt"), dict) else gt
+            text = (f"{fb.get('executor')} {fb.get('status')} · {fb.get('reason')} -> fallback "
+                    f"{s['executor']} (STEPPING STONE) {text}")
+            lat = g.get("latency_ms")
+            if isinstance(lat, dict) and _num(lat.get("p50")) is not None:
+                s["latency_p50_result"] = _num(lat.get("p50"))
+            if _num(g.get("clamped_frac")) is not None:
+                s["clamped_frac"] = _num(g.get("clamped_frac"))
+        s["outcome"] = {"status": s["status"], "reason": reason, "holding": holding, "gt": gt, "fallback_from": fb,
                         "late": bool(r.get("late")), "summary": r.get("summary"), "text": text,
                         "cancel_ack_ms": data.get("cancel_ack_ms"), "carry": data.get("carry")}
 
