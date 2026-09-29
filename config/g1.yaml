@@ -11,7 +11,9 @@ workspace:                      # PLAN §6.4 G1Workspace (object positions in th
   shoulder_lat_m: 0.136         # ... 0.136 m out on the reaching arm's side (shoulder pitch + roll joint offsets)
   shoulder_fwd_m: 0.0           # ... fit 0.004 m forward
   arm_reach_m: 0.405            # reach-sphere radius: the IK boundary 0.4255 minus 2 cm (live: the only 2 IK misses of 24
-                                # grasps were on the boundary itself)
+                                # grasps were on the boundary itself). R.7b (docs/calibration.md §3.4): live under
+                                # SONIC the palm (2.5 cm, tilt < 5 deg) reaches a 0.37-0.38 sphere at 0.95-1.30 m,
+                                # 0.40-0.41 at 0.80-0.85 m: no room for a 1 cm buffer; kept
   grasp_above_top_m: 0.03       # sonic_arm_script's grasp point = the object's AABB top centre + this (B.7 top grasp)
   obj_z_min_m: 0.70             # object centre below this -> too_low (grasp point < ~0.78 m: the palm reaches <= 0.30 m
                                 # ahead there, IK envelope; squat mode deferred)

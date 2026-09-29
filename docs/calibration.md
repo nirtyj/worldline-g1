@@ -132,6 +132,95 @@ These are the three arm-script sequences above a counter from a reach stance, wi
 
 A pick that needs a reach stance adds the approach (15 s mean, §2).
 
+### 3.4 R.7b: the live reach under SONIC, and whether the 2 cm buffer can shrink
+
+The question: can `arm_reach_m` keep 1 cm inside the arm's **measured** reach instead of 2 cm inside the IK fit, so
+fewer objects answer `too_far`? Answer: **no; every limit stays as it is.** Live, the arm stops short of the IK
+sphere at counter height, so the configured limits already sit at or past the measured edge there.
+
+**Data** (laptop copy, not in git): `outputs/reach_recal/sweep-20260929-212623/`. It holds 1011 live `arm_script
+grasp` goals under SONIC from a standing rest pose:
+
+- both arms; grasp heights 0.70-1.30 m; lateral 0-0.40 m to the arm's side; forward 0.30-0.475 m in 2.5 cm steps,
+  outward until two fails;
+- `points.jsonl` holds each point, `rows.jsonl` each row, `log.txt` the run.
+
+`outputs/reach_recal/refine-20260929-222116/` is a stopped refine: 33 points, 1 cm steps, two trials each. The
+offline IK envelope is in `outputs/reach_recal/ik_envelope/`.
+
+**Criterion.** A point is OK when the goal succeeded, the palm ended within **2.5 cm** (the grasp tolerance) and the
+torso tilt stayed under **5°**. A row's edge is its last OK forward before the first miss, contiguous from 0.30 m.
+
+The edge is taken conservatively:
+
+- the minimum over the lateral cells 0.10 / 0.15 / 0.20 (the shoulder line) and over both arms;
+- never the lateral-0 rows. In the refine, the same centre-line target came out 1.2 cm off once and 15-21 cm off the
+  next time, from a different preceding pose (right arm, 0.85 m, 0.325-0.335 m). Near the midline the reach depends
+  on the path taken, and the sweep's outermost single successes there cannot be trusted.
+
+The live misses past the edge are not IK rejections. The IK solves them (1-2 cm), and SONIC's tracking puts the palm
+3-12 cm off, often with the tilt near 5°.
+
+Forward reach (m) at lateral 0.15, the shoulder line:
+
+| Grasp height | Config from here (`arm_reach_m` 0.405) / stance (−`stance_margin_m` = 0.385) | Live edge (both arms) | Live − 1 cm | Buffer supported? |
+|---|---|---|---|---|
+| 0.80 | 0.289 / 0.261 | ≥ 0.30 (right; the left only at lateral 0.10; the grid starts at 0.30) | 0.29 | stance only, no live data below 0.30 |
+| 0.85 | 0.331 / 0.306 | 0.325 (refine: 0.335, 2/2 on each arm) | 0.315-0.325 | stance +1-2 cm; from-here no |
+| 0.90 | 0.361 / 0.338 | 0.35 | 0.34 | no (from-here already 1 cm past) |
+| 0.95 | 0.382 / 0.361 | 0.35 | 0.34 | no: both past the live edge |
+| 1.00 | 0.396 / 0.376 | 0.375 | 0.365 | no |
+| 1.05 | 0.403 / 0.383 | 0.325 (a dip on both arms; 0.35-0.40 at other laterals) | 0.315 | no |
+| 1.10 | 0.404 / 0.384 | 0.375 | 0.365 | no |
+| 1.15 | 0.399 / 0.379 | 0.35 | 0.34 | no |
+| 1.20 | 0.387 / 0.367 | 0.35 | 0.34 | no |
+| 1.25 | 0.369 / 0.347 | 0.325 | 0.315 | no |
+| 1.30 | 0.342 / 0.318 | 0.30 | 0.29 | no |
+
+In reach-sphere terms (p10 over laterals 0.05-0.25), the live edge is:
+
+- **0.41** at 0.80 m;
+- **0.40** at 0.85 m;
+- **0.39** at 0.90 m;
+- **0.37-0.38** from 0.95 to 1.30 m.
+
+The configured spheres are 0.405 from here and 0.385 for a stance. Read even optimistically (the true edge lies
+within 2.5 cm past the last OK point, so take the midpoint), the live edge minus 1 cm is still 0-1 cm inside the
+stance sphere at 0.95-1.20 m. The IK envelope reaches 0.41-0.43 m at 1.00-1.20 m. At full extension, SONIC loses
+the last ~5 cm to tracking error and tilt.
+
+The data supports a smaller buffer only for the stance check at grasp heights ≤ 0.85 m (+1-3 cm). A single sphere
+cannot widen those heights alone. Only low table-top items would gain, and the one coverage candidate there (H38
+`pencil_1`, stance forward 0.15-0.21 m at 0.79 m) lies where the sweep has no live points. So nothing changes.
+
+**Coverage** (in-band pickables, counting far stances; `world/workspace_cal.py coverage`, same code, overrides
+only):
+
+| Workspace | Coverage | too_far | beyond_reach |
+|---|---|---|---|
+| **Config (kept)**: 0.405 / stance margin 0.02 | **38.2 %** | 25 | 43 |
+| 1 cm inside the IK fit (0.4155 / margin 0.01) | 44.5 % | 20 | 41 |
+| Stance margin 0.01 only | 40.0 % | 23 | 43 |
+| Live edge − 1 cm at counter height (0.375 / margin 0.01) | 30.9 % | 23 | 53 |
+
+"1 cm inside the IK fit" is not backed by the live data. Its new stances put objects at:
+
+- forward 0.29 and lateral ±0.40 at 1.0-1.1 m, where the live edge is 0.30 and 0.325 is `ik_unreachable`;
+- forward 0.33 and lateral 0.35, where the live edge is 0.325.
+
+The last row is what the live data would ask for: at counter height the arm is ~2-3 cm shorter from here than
+configured. That is a tightening for the owner to decide on, not part of this change.
+
+The owner's H40 cases are the same in all four rows:
+
+- `butter_knife_2` is `beyond_reach`: 0.80 m to the nearest stand against 0.49 m of horizontal reach;
+- `lettuce_1` is `too_far`: 0.30 m from a stand, but no walkable stance puts it in the arm. That is the stance
+  search, not the buffer;
+- `bowl_1` is `beyond_reach`: 0.52 m against 0.48 m;
+- `bottle_1` is reachable from a `far_stance`.
+
+None of them turns on the reach buffer.
+
 ## 4. What a G1 can reach in the houses
 
 `world/workspace_cal.py coverage` runs every pickable that starts on a map surface through the runtime's own
