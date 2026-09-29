@@ -3,34 +3,78 @@
 # the session. "@vocab:pickupable" expands the FIXED vocabulary (config/vocab/pickupable_types.yaml), never scene GT.
 version: 1
 skills:
+  # GR00T (backend groot -> executor groot_arms, services/executors/groot_arms.py). The off-the-shelf Arena N1.7 G1
+  # checkpoint: arm + Dex3 joint chunks through the body `arm` op, SONIC keeps the legs (owner decision (b)). Trained
+  # on ONE scene (apple to plate, left hand; 8/37 = 22 % in its own scene, docs/arena_vs_sonic.md §2.1), so every entry
+  # is label `experimental` and a house grasp is not expected zero-shot (PLAN §0.8). The trained stance is unknown,
+  # so `stance` is empty (the generic G1 workspace window). PolicyServer: scripts/groot_server.sh (docs/groot_serving.md).
+  - skill_id: groot.pick.apple.arena_static_experimental.v0
+    action: pick
+    object_types: [apple]
+    arms: [left]                 # the checkpoint's hand (right-hand action std 0.018 vs left 0.598, design §2.7)
+    backend: groot
+    label: experimental
+    status: available
+    embodiment_tag: new_embodiment
+    checkpoint: nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace@7f78bebf1a90131e7304beacfcd47eb27bad16ab
+    policy_port: 5550
+    policy_endpoint: tcp://127.0.0.1:5550
+    prompt_template: "move the apple to the plate"   # the trained instruction = groot.obs.ARENA_PROMPT (a test pins it)
+    hand_type: dex3
+    action_horizon: 40
+    control_hz: 50.0
+    replan_hz: 2.5
+    max_duration_s: 25.0
+    success: {kind: gt_lifted, min_lift_m: 0.05, max_dist_m: 0.12, hold_s: 1.0}
+    licence: "NVIDIA Open Model License Agreement; the model card says non-commercial use only (OD2)"
+
+  - skill_id: groot.pick.any.arena_static_experimental.v0
+    action: pick
+    object_types: ["@vocab:pickupable"]
+    arms: [left]
+    backend: groot
+    label: experimental
+    status: available
+    embodiment_tag: new_embodiment
+    checkpoint: nvidia/GN1x-Tuned-Arena-G1-Static-PickNPlace@7f78bebf1a90131e7304beacfcd47eb27bad16ab
+    policy_port: 5550
+    policy_endpoint: tcp://127.0.0.1:5550
+    prompt_template: "move the {label} to the plate"   # the trained sentence with the object swapped in (untrained)
+    hand_type: dex3
+    action_horizon: 40
+    control_hz: 50.0
+    replan_hz: 2.5
+    max_duration_s: 25.0
+    success: {kind: gt_lifted, min_lift_m: 0.05, max_dist_m: 0.12, hold_s: 1.0}
+    licence: "NVIDIA Open Model License Agreement; the model card says non-commercial use only (OD2)"
+
+  - skill_id: groot.pick.household.isaac.v1
+    action: pick
+    object_types: [alarm_clock, apple, mug]
+    arms: [left, right]
+    backend: groot
+    label: target
+    status: planned              # deferred (PLAN §0.8): fine-tuned on scripted Isaac Dex3 demos (design §3-§4)
+    embodiment_tag: new_embodiment
+    policy_port: 5552
+    prompt_template: "pick up the {label} with the {arm} hand"
+    max_duration_s: 25.0
+
   - skill_id: groot.pick.bottle.cloudwalk.v0
     action: pick
     object_types: [bottle]
     arms: [right]
     backend: groot
     label: experimental
-    status: unofficial
+    status: planned              # RETIRED with groot_sonic: a SONIC-token checkpoint (UNITREE_G1_SONIC, Inspire hands);
+                                 # groot_arms serves joint-space new_embodiment checkpoints only
     embodiment_tag: UNITREE_G1_SONIC
     checkpoint: cloudwalk-research/gr00t-n17-g1-grab-bottle-rh-210ep-v2-finetune/checkpoint-20000
     policy_port: 5550
     prompt_template: "grab the bottle"
-    hand_type: inspire           # trained with Inspire hands; the deploy drives Dex3 -> UI flag hand_mismatch
+    hand_type: inspire
     max_duration_s: 25.0
-    stance: {stand_off_m: 0.40, lateral_m: -0.12, yaw_to_object: 0.0, tol: [0.05, 5.0]}
-    success: {kind: gt_lifted, min_lift_m: 0.05, max_dist_m: 0.12, hold_s: 1.0}
     licence: "NVIDIA Open Model License (GR00T N1.7 base); community fine-tune"
-
-  - skill_id: groot.pick.household.isaac.v1
-    action: pick
-    object_types: [alarm_clock, apple, bottle]
-    arms: [left, right]
-    backend: groot
-    label: target
-    status: planned              # M6: fine-tuned off-box on Isaac Dex3 demos; not loaded until it exists
-    embodiment_tag: UNITREE_G1_SONIC
-    policy_port: 5552
-    prompt_template: "pick up the {label} with the {arm} hand"
-    max_duration_s: 25.0
 
   - skill_id: sonic.script.pick.v0
     action: pick
