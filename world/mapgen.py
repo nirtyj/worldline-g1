@@ -69,7 +69,9 @@ class MapParams:
     max_reach_height_m: float = 1.20
     min_reach_height_m: float = 0.55
     grid_step: float = 0.25                 # UI / RobotMap lattice
-    user_max_stand_off_m: float = 0.45      # the delivery surface must be placeable from its stand
+    user_surface_rule: str = "thor"         # "thor": nearest stand to the start (Worldline/eval parity);
+                                            # "placeable": the same among surfaces a G1 can place on from the stand
+    user_max_stand_off_m: float = 0.45      # "placeable": regular stand-off at most this
     room_keypoints: bool = True
 
     @classmethod
@@ -292,12 +294,12 @@ def build_static_map(scene: SceneData, grid: WorldGrid, params: MapParams | None
     landmarks = _name_landmarks(scene, keypoints)
     edges = _edges(grid, keypoints)
     if user_surface not in surfaces:
-        # THOR's rule (the surface whose stand is nearest the start), restricted to surfaces a G1 can place on
-        # from their stand: a regular stand-off and a height inside the reach band
+        # THOR's rule (the surface whose stand is nearest the start); with user_surface_rule "placeable" (the G1
+        # profiles, config/g1.yaml) restricted to surfaces a G1 can place on from their stand
         user_surface = None
         good = [s for s in surfaces.values() if not s.relaxed and s.stand_off_m <= p.user_max_stand_off_m + 1e-6
                 and p.min_reach_height_m <= s.height <= p.max_reach_height_m]
-        pool = good or list(surfaces.values())
+        pool = (good if p.user_surface_rule == "placeable" else []) or list(surfaces.values())
         if pool:
             user_surface = min(pool, key=lambda s: math.dist(s.stand, (sx, sy))).name
     return StaticMap(scene=scene_key or scene.house_id, house_id=scene.house_id, params=p, floor_z=scene.floor_z,

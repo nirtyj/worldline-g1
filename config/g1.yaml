@@ -82,3 +82,4 @@ mapgen:                         # world/mapgen.py MapParams (PLAN §7.1 table)
   nav_speed_mps: 0.40
   max_reach_height_m: 1.20
   min_reach_height_m: 0.55
+  user_surface_rule: placeable  # THOR's nearest-to-start rule among surfaces a G1 can place on from the stand
