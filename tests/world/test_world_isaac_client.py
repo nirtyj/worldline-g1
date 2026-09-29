@@ -4,7 +4,6 @@ M1 P1 (no object-pose / attach ops): objects keep their scene_info poses, attach
 M2b P1 (get_objects / attach / detach listed in ping.ops): live poses and attach work.
 """
 
-import math
 import time
 
 import pytest

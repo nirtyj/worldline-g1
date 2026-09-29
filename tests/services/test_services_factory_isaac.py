@@ -73,3 +73,52 @@ def test_sonic_profile_builds_over_the_wire(fake_stack):
             await robot.shutdown()
             world.close()
     asyncio.run(main())
+
+
+def test_bringup_pick_through_p1_attach_ops_m2b(monkeypatch):
+    """The M2b contract: a P1 that lists get_objects/attach/detach makes kinematic_attach healthy, and a pick
+    attaches through P1 (STEPPING STONE, labelled)."""
+    from robot.factory import build
+    from sim.clock import SimClock
+    off = OFF + 5
+    monkeypatch.setenv("WL_PORT_OFFSET", str(off))
+    p1 = FakeP1World("procthor-train-38", port_offset=off, m2b=True).start()
+    fbody = FakeBodyServer(port_offset=off, motion_s=0.2).start()
+
+    async def main():
+        clock = SimClock(4.0)
+        world, robot, _ = build("bringup", "procthor-train-38", clock, None, frames=None)
+        try:
+            assert robot.capabilities()["manipulation"].ok
+            async def teleport(x, y, yaw):
+                p1.set_pose(x, y, yaw)
+                t0 = time.monotonic()
+                while abs(world.robot_pose().x - x) > 1e-6 and time.monotonic() - t0 < 2.0:
+                    await asyncio.sleep(0.02)
+            k = world.map.keypoints["kitchen_counter_1c"]
+            await teleport(k.x, k.y, k.yaw)
+            o = world.object("fork_1")
+            st = robot.reach.find_stance(o.pos[:2], None, o.pos[2])
+            assert st is not None
+            await teleport(st["x"], st["y"], st["yaw"])
+            robot.nav._anchor = ("kitchen_counter_1c", st["x"], st["y"])
+            em = ExecutionManager(clock)
+            mk = lambda tool, args: em.create(tool, args, generation=1, control_epoch=0)   # noqa: E731
+            await robot.start(mk("observe", {"mode": "glance"})).result()
+            r = await robot.start(mk("check_reachability", {"object_type": "fork", "object_id": "fork_1"})).result()
+            assert r.data["reachable"], r.summary
+            pick = await asyncio.wait_for(robot.start(mk("manipulate", {"action": "pick", "object_type": "fork",
+                                                                        "object_id": "fork_1"})).result(), 20.0)
+            assert pick.status == "succeeded", pick.summary
+            assert pick.data["executor"] == "kinematic_attach" and pick.data["stepping_stone"] is True
+            assert "attach" in p1.calls
+            assert world.object("fork_1").where.startswith("hand:")
+            assert k.name == "kitchen_counter_1c"
+        finally:
+            await robot.shutdown()
+            world.close()
+    try:
+        asyncio.run(main())
+    finally:
+        fbody.stop()
+        p1.stop()

@@ -2,8 +2,6 @@
 
 import math
 
-import pytest
-
 from api.results import validate_envelope
 from services.reachability import G1Workspace, ReachabilityModel
 from tests.services.conftest import Stack, run

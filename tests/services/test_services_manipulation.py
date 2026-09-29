@@ -1,8 +1,6 @@
 """ManipulationService with the lite / kinematic_attach executors: pick, place, stance check, cancel, halt, place
 failures, capability rejections, and STEPPING STONE labels."""
 
-import math
-
 import pytest
 
 from api.execution import Rejected

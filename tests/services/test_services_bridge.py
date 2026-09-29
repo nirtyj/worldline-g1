@@ -2,8 +2,6 @@
 and a scripted F1 fetch (bring the alarm clock) that ends with truth on the user surface. Every ToolResult is
 validated against the envelope schema and carries an observation id."""
 
-import asyncio
-
 import pytest
 
 from api.results import validate_envelope

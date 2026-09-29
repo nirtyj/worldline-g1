@@ -20,7 +20,7 @@ detector (§13); the output shape stays the same.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np

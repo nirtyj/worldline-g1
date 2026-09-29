@@ -139,14 +139,3 @@ def start_execution(execution: Execution, work: Callable[[ResultHandle], Awaitab
 
     handle.task = asyncio.ensure_future(runner())       # type: ignore[attr-defined]
     return handle
-
-
-async def wait_any(*aws: Awaitable, timeout: float | None = None, clock: Any = None) -> set:
-    """Wait for the first of several awaitables; returns the done set (others keep running)."""
-    tasks = [asyncio.ensure_future(a) for a in aws]
-    t = None if timeout is None else (timeout / getattr(clock, "speed", 1.0) if clock is not None else timeout)
-    done, pending = await asyncio.wait(tasks, timeout=t, return_when=asyncio.FIRST_COMPLETED)
-    for p in pending:
-        if not getattr(p, "_keep", False):
-            p.cancel()
-    return done

@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.fakes.fixtures import fresh_lite  # noqa: E402
+from tests.fakes.fixtures import fresh_lite  # noqa: E402,F401
 
 SPEED = 40.0          # sim seconds per wall second for lite runs
 

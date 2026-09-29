@@ -1,7 +1,6 @@
 """NavigationService on the lite stack: envelopes, aliases, timeouts, cancel / halt / blocked / fell / timeout
 mapping, reach_stance repositions, and the body-reason mapping table."""
 
-import asyncio
 import math
 
 import pytest

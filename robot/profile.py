@@ -15,7 +15,6 @@ import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from api.results import STEPPING_STONE_EXECUTORS
 from api.types import PROFILES, RobotProfile

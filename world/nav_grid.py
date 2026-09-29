@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import numpy as np
-from scipy import ndimage
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
 
@@ -230,8 +229,3 @@ def _passes(dy: int, dx: int) -> Iterable[tuple[int, int]]:
         sx = 1 if dx > 0 else -1
         return [(0, sx), (dy, sx)]
     return []
-
-
-def morphology_structure(occ: np.ndarray, items_mask: np.ndarray) -> np.ndarray:
-    """Blocked cells not explained by any scene item footprint = walls/structure (used as full-height occluders)."""
-    return occ & ~ndimage.binary_dilation(items_mask, iterations=1)
