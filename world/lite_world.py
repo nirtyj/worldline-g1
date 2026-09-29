@@ -70,8 +70,8 @@ class LiteWorld(GTWorld):
 
     # ------------------------------------------------------------------ SimControl (in-process)
     def capabilities(self) -> dict[str, bool]:
-        return {"teleport_robot": True, "attach": True, "detach": True, "band": False, "reset_robot": True,
-                "object_poses": True}
+        return {**super().capabilities(), "teleport_robot": True, "attach": True, "detach": True, "band": False,
+                "reset_robot": True, "object_poses": True}
 
     def teleport_robot(self, pose, y: float | None = None, yaw: float | None = None) -> None:
         self.teleports += 1

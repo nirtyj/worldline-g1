@@ -167,7 +167,10 @@ class ObservationService:
             if rows is None:                          # the body could not turn: a glance instead (labelled)
                 mode = "glance"
         if mode != "scan":
-            rows, views = [self.world.detections()], []
+            rows, views = [self._live_detections()], []
+        methods = sorted({getattr(d, "method", "gt-geometric") for row in rows for d in row})
+        if methods:
+            extra["method"] = "+".join(methods)
         look_d = self.world.look(views, at=at, detections=rows)
         snap = _snapshot(look_d)
         seen = {oid for oid, w in snap.items() if not w.startswith("hand")}
@@ -193,6 +196,14 @@ class ObservationService:
         self.events.emit("visual_observation", observation_id=oid, mode=mode, at=at, sees=sorted(seen),
                          views=len(look.views), **{k: v for k, v in extra.items() if k != "source"})
         return obs
+
+    def _live_detections(self) -> list:
+        """What the camera sees from where the robot really stands: the world's most faithful source (on Isaac,
+        P1's instance-id segmentation when it has it, P1.6; GT geometry otherwise)."""
+        try:
+            return self.world.detections(method="best")
+        except TypeError:                              # a world without the `method` keyword
+            return self.world.detections()
 
     async def _scan(self, handle: ResultHandle | None):
         """Returns (rows, views, info) or (None, None, info) when the scan could not run."""
@@ -232,7 +243,7 @@ class ObservationService:
             await self.clock.sleep(c.settle_s)
             cp = self.world.camera_pose()
             views.append(self.world.view_spec(cp))
-            rows.append(self.world.detections(cam_pose=cp))
+            rows.append(self._live_detections())          # the body really turned: the live view
         # face the surface again
         if abs(coords.ang_diff(yaw0, self.world.robot_pose().yaw)) > math.radians(c.turn_tol_deg) and \
                 not self.gate.halted_since(epoch):

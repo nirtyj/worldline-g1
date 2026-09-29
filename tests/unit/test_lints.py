@@ -4,6 +4,13 @@
   test_status_vocab    no uppercase THOR status literals
   test_gt_confinement  agent/, brains/, llmkit/ never import world/, robot/, services/, body/, the sim
                        process packages, or sim.log (the ground-truth event log)
+  test_gt_reads_live_in_world
+                       outside world/ (agent/, brains/, llmkit/, robot/, services/, ui/) nothing reads P1's
+                       ground truth directly: no import of P1's GT client (body.p1_client) or the sim process
+                       packages, no `gt_pose` field access (.gt_pose, ["gt_pose"], .get("gt_pose")), no P1 GT topic
+                       literal (gt.pose, gt.event(s), gt.objects, sim.health), and no viz.tap.FrameTap built without
+                       gt_pose=False (the tap subscribes to gt.pose by default). World owns GT (PLAN §6.2): RTF is
+                       WorldModel.sim_health, speed WorldModel.planar_speed, frames world.frames.IsaacFrames.
 """
 
 from __future__ import annotations
@@ -104,6 +111,82 @@ def test_gt_confinement():
                 if n.split(".")[0] in FORBIDDEN_IMPORTS or n == "sim.log" or n.startswith("sim.log."):
                     bad.append(f"{path.relative_to(ROOT)}:{node.lineno} imports {n}")
     assert bad == []
+
+
+# ------------------------------------------------------------------ GT reads outside world/
+GT_DIRS = RUNTIME_DIRS + ("robot", "services", "ui")
+GT_IMPORTS = {"body.p1_client", "sim_isaac", "isaac_host", "scenes", "thor"}
+GT_TOPICS = {"gt.pose", "gt.event", "gt.events", "gt.objects", "sim.health", "gt_pose"}
+
+
+def _docstrings(tree: ast.AST) -> set[int]:
+    """ids of string constants that are statements (docstrings, bare strings): prose, not reads."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            out.add(id(node.value))
+    return out
+
+
+def gt_read_violations(tree: ast.AST, where: str) -> list[str]:
+    bad = []
+    prose = _docstrings(tree)
+    for node in ast.walk(tree):
+        line = getattr(node, "lineno", 0)
+        mods = []
+        if isinstance(node, ast.Import):
+            mods = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            mods = [node.module or ""]
+            mods += [f"{node.module}.{a.name}" for a in node.names]
+        hit = next((m for m in mods if any(m == g or m.startswith(g + ".") for g in GT_IMPORTS)), None)
+        if hit:
+            bad.append(f"{where}:{line} imports {hit}")
+        if isinstance(node, ast.Attribute) and node.attr == "gt_pose":
+            bad.append(f"{where}:{line} reads .gt_pose")
+        if isinstance(node, ast.Constant) and id(node) not in prose:
+            v = node.value.decode("utf-8", "replace") if isinstance(node.value, bytes) else node.value
+            if isinstance(v, str) and v in GT_TOPICS:
+                bad.append(f"{where}:{line} uses the P1 GT name {v!r}")
+        if isinstance(node, ast.Call):
+            fn = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if fn == "FrameTap":
+                kw = {k.arg: k.value for k in node.keywords}
+                off = kw.get("gt_pose")
+                if not (isinstance(off, ast.Constant) and off.value is False):
+                    bad.append(f"{where}:{line} builds a FrameTap that subscribes to gt.pose (pass gt_pose=False)")
+    return bad
+
+
+def test_gt_reads_live_in_world():
+    bad = []
+    for d in GT_DIRS:
+        for path in sorted((ROOT / d).rglob("*.py")):
+            bad += gt_read_violations(ast.parse(path.read_text()), str(path.relative_to(ROOT)))
+    assert bad == []
+
+
+def test_the_gt_lint_catches_the_m2a_findings():
+    """The patterns the M2a verifier found (robot/body_client.py health and speed from the body's copy of gt.pose,
+    robot/bridge.py telemetry, ui/cameras.py's FrameTap) and the allowed forms."""
+    src = (
+        'rtf = (st.get("gt_pose") or {}).get("rtf")\n'
+        'gp = st["gt_pose"]\n'
+        'v = state.gt_pose.speed\n'
+        'from body.p1_client import PoseSub\n'
+        'import body.p1_client\n'
+        's.setsockopt(zmq.SUBSCRIBE, b"gt.pose")\n'
+        'tap = FrameTap(port_offset=0)\n'
+        'tap = viz.tap.FrameTap(port_offset=0, gt_pose=True)\n'
+    )
+    hits = gt_read_violations(ast.parse(src), "x.py")
+    assert sorted(int(h.split(":")[1].split(" ")[0]) for h in hits) == list(range(1, 9)), hits
+    ok = ('"""Docs may say gt.pose."""\n'
+          'tap = FrameTap(port_offset=0, gt_pose=False)\n'
+          'h = world.sim_health()\n'
+          'v = world.planar_speed()\n'
+          'from body.client import BodyClient\n')
+    assert gt_read_violations(ast.parse(ok), "y.py") == []
 
 
 @pytest.mark.parametrize("d", RUNTIME_DIRS + ("api",))

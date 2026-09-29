@@ -11,8 +11,10 @@
                      where == target.
 Never walks (PLAN §1.3 #26): the base is where check_reachability judged it. `base_shift_m` reports any drift.
 
-Executors (services/executors/): lite / kinematic_attach (STEPPING STONE, labelled everywhere), sonic_arm_script and
-groot_sonic (stubs until M3/M4, unhealthy -> CAPABILITY rejections via `capability()`).
+Executors (services/executors/, built by name through services/executors/registry.py): lite / kinematic_attach
+(STEPPING STONE, labelled everywhere), sonic_arm_script (stub until the body's arm script), groot_arms (owner groot_rt,
+experimental) and groot_sonic (the retired token route, a stub). An unhealthy executor makes its skills unhealthy ->
+CAPABILITY rejections via `capability()`. Every result names the executor that actually ran (`executor.name`).
 """
 
 from __future__ import annotations
@@ -136,8 +138,10 @@ class ManipulationService:
         action = str(a.get("action") or execution.action or "pick")
         skill, _ = self.capability(action, str(a.get("object_type")), a.get("arm"))
         work = self._pick if action == "pick" else self._place
+        exe = self.executor_for(skill) if skill is not None else None
+        name = getattr(exe, "name", None) or (skill.executor if skill else None)
         h = start_execution(execution, lambda handle: work(execution, handle, skill), clock=self.clock,
-                            observation_id=self._obs, executor=skill.executor if skill else None)
+                            observation_id=self._obs, executor=name)
         self._handles[execution.execution_id] = h
         return h
 
@@ -156,7 +160,8 @@ class ManipulationService:
         now = self.clock.now()
         p = self.world.robot_pose()
         shift = math.hypot(p.x - pose0[0], p.y - pose0[1]) if pose0 else 0.0
-        executor = skill.executor if skill else "lite"
+        exe = self.executor_for(skill) if skill is not None else None
+        executor = getattr(exe, "name", None) or (skill.executor if skill else "lite")
         r = ManipulationResult(execution_id=ex.execution_id, status=status, skill=skill.skill_id if skill else "",   # type: ignore[arg-type]
                                object_type=object_type, reason=reason, action=action, arm=arm, object_id=object_id,   # type: ignore[arg-type]
                                target=target, holding=holding, executor=executor, phase=phase,   # type: ignore[arg-type]
@@ -212,7 +217,7 @@ class ManipulationService:
         if hands.get(arm):
             return self._result(ex, "failed", skill, reason="hand_full", phase="select_skill", holding=False, **kw)
         exe = self.executor_for(skill)
-        job = ManipJob("pick", oid, arm, skill.skill_id, epoch=self.gate.epoch)
+        job = ManipJob("pick", oid, arm, skill.skill_id, epoch=self.gate.epoch, **self._fence(ex, skill, otype))
         out = await self._run_executor(exe, job, h, skill)
         holding = self.world.hands().get(arm) == oid
         extra = {"phases": out.phases, **({"detail": out.detail} if out.detail else {})}
@@ -280,7 +285,8 @@ class ManipulationService:
             reason = "no_room_in_reach" if self.world.free_spot(target, oid) is not None else "no_room_on_surface"
             return self._result(ex, "failed", skill, reason=reason, phase="free_spot", holding=True, **kw)
         exe = self.executor_for(skill)
-        job = ManipJob("place", oid, arm, skill.skill_id, spot=spot, target=target, epoch=self.gate.epoch)
+        job = ManipJob("place", oid, arm, skill.skill_id, spot=spot, target=target, epoch=self.gate.epoch,
+                       **self._fence(ex, skill, otype))
         out = await self._run_executor(exe, job, h, skill)
         holding = self.world.hands().get(arm) == oid
         extra = {"phases": out.phases, "spot": [round(spot.x, 3), round(spot.y, 3), round(spot.z, 3)],
@@ -298,6 +304,12 @@ class ManipulationService:
                                 extra=extra, **kw)
         return self._result(ex, "failed", skill, reason=out.reason, phase=out.phase, holding=holding, extra=extra,
                             **kw)
+
+    @staticmethod
+    def _fence(ex: Execution, skill: SkillSpec, object_type: str) -> dict:
+        """What an executor that leases the body needs to fence its commands (PLAN §6.6)."""
+        return {"execution_id": ex.execution_id, "generation": ex.generation, "control_epoch": ex.control_epoch,
+                "object_type": object_type, "skill": skill}
 
     async def _run_executor(self, exe: Any, job: ManipJob, h: ResultHandle, skill: SkillSpec):
         from .executors.kinematic_attach import ManipOutcome

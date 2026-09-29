@@ -109,12 +109,19 @@ def test_place_with_nothing_in_hand():
 
 
 def test_capability_rejections_for_unhealthy_backends():
+    """A profile whose only executor is down (the retired groot_sonic stub): its skills stay in the frozen enum and
+    every call is rejected at CAPABILITY with the doc's wording (the skills themselves are config/skills.yaml's)."""
+    from services.skills import load_skill_specs
     s = Stack(overrides={"manipulation": {"executors": ["groot_sonic"]}})
-    assert s.robot.registry().loaded_object_types() == ["bottle"]
+    types = s.robot.registry().loaded_object_types()
+    groot = [x for x in load_skill_specs() if x.backend == "groot" and x.status != "planned"]
+    assert types and types == sorted(types) and all(x.skill_id in {k.skill_id for k in s.robot.registry().skills()}
+                                                    for x in groot)
+    t = "apple" if "apple" in types else types[0]
     with pytest.raises(Rejected) as e:
-        s.robot.start(s.ex("manipulate", {"action": "pick", "object_type": "bottle"}))
+        s.robot.start(s.ex("manipulate", {"action": "pick", "object_type": t}))
     assert e.value.stage == "capability" and e.value.message.startswith("policy unavailable:")
-    assert "M4" in e.value.message
+    assert s.robot.executors["groot"].name == "groot_sonic" and not s.robot.executors["groot"].health().ok
 
 
 def test_kinematic_attach_needs_p1_attach_ops():

@@ -146,13 +146,15 @@ def test_too_far_suggests_another_stretch():
     run(main())
 
 
-def test_no_skill_when_the_registry_lacks_the_type():
+def test_no_skill_when_the_registry_lacks_the_type(tmp_path):
     from services.skills import build_registry
     s = Stack()
+    (tmp_path / "skills.yaml").write_text(
+        "skills:\n  - {skill_id: only.bottle.v0, action: pick, object_types: [bottle], backend: lite}\n")
 
     async def main():
         await _scan_at(s, "kitchen_counter_1c")
-        reg = build_registry(["groot_sonic"], s.world)       # only the (unofficial) bottle skill loads
+        reg = build_registry(["lite"], s.world, path=tmp_path / "skills.yaml")   # a registry with bottles only
         assert reg.loaded_object_types() == ["bottle"]
         m = ReachabilityModel(s.world, G1Workspace(reach_fwd_m=(0.0, 3.0), reach_lat_max_m=3.0, arm_reach_m=9.0),
                               registry=reg, observation=s.robot.obs, nav=s.robot.nav)

@@ -24,9 +24,10 @@ from . import coords, vocab
 from .mapgen import MapParams, StaticMap, build_static_map
 from .model import Detection, GraspState, NotSupported, ObjectState, RobotPose, TruthSnapshot, xyyaw, xyz
 from .nav_grid import OccupancyData, WorldGrid
-from .perception import (CAMERAS, EGO_D435, CameraModel, CameraPose, Occluders, Perception, Target, camera_pose,
-                         is_closed_container, structure_mask)
+from .perception import (CAMERAS, EGO_D435, EGO_VIEW, CameraModel, CameraPose, Occluders, Perception, Target,
+                         camera_pose, is_closed_container, structure_mask)
 from .scene import SceneData
+from .sim_health import SimHealth, fixed
 from .where import WhereModel
 
 HAND_OFFSET = {"left": (0.30, 0.20), "right": (0.30, -0.20)}   # held object centre in the pelvis frame (m)
@@ -83,12 +84,40 @@ class GTWorld:
         self.occluders = Occluders.build({**things, **self._boxes}, closed_keys=closed, structure=struct,
                                          res=occ.res, origin=occ.origin)
         self.perceiver = Perception(self.cam, self.occluders, floor_z=self.map.floor_z)
+        self._perceivers: dict[str, Perception] = {self.cam.name: self.perceiver}
         self._landmark_targets = [Target(l.name, "landmark", l.aabb, frozenset(l.scene_ids))
                                   for l in self.map.landmarks.values()]
+        self._sim_health_pin: SimHealth | None = None
 
     # ================================================================== to override
     def robot_pose(self) -> RobotPose:
         raise NotImplementedError
+
+    # ================================================================== motion and sim health (GT; world owns both)
+    def planar_speed(self) -> float | None:
+        """The pelvis's planar speed (m/s) from the GT pose, or None when unknown. robot/ judges a halt
+        receipt's `at_rest` on this, never on the body's copy of gt.pose (GT confinement)."""
+        try:
+            return float(self.robot_pose().speed)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def sim_health(self) -> SimHealth:
+        """The simulator's real-time health (world/sim_health.py): ok | degraded | unsafe, with the RTF. A GT world
+        without a real-time constraint (lite) is always ok."""
+        if self._sim_health_pin is not None:
+            return self._sim_health_pin
+        return self._live_sim_health()
+
+    def _live_sim_health(self) -> SimHealth:
+        return fixed("ok", None, source=self.source)
+
+    def set_sim_health(self, health: SimHealth | None) -> None:
+        """Fixture hook (tests, eval fault injection): pin the sim health; None returns to the live value."""
+        self._sim_health_pin = health
+
+    def rtf(self) -> float | None:
+        return self.sim_health().rtf
 
     # ================================================================== static map
     def static_map(self) -> StaticMap:
@@ -249,10 +278,30 @@ class GTWorld:
             self._pose_source[object_id] = source
 
     # ================================================================== perception
+    # the robot's cameras by the names callers use: "head" is the profile's perception camera (System 1, scans);
+    # "ego_view" / "ego" is GR00T's camera (OD1: Arena's G1 head camera, docs/contracts/p1_m2b.md §5.1)
+    CAMERA_ALIASES = {"head": None, "ego": "ego_view", "ego_view": "ego_view"}
+
+    def camera_model(self, camera: str | None = "head") -> CameraModel:
+        name = self.CAMERA_ALIASES.get(camera or "head", camera)
+        if name is None or name == self.cam.name:
+            return self.cam
+        if name == "ego_view":
+            return EGO_VIEW
+        if name in CAMERAS:
+            return CAMERAS[name]
+        raise KeyError(f"unknown camera {camera!r}")
+
+    def _perceiver(self, cam: CameraModel) -> Perception:
+        p = self._perceivers.get(cam.name)
+        if p is None:
+            p = self._perceivers[cam.name] = Perception(cam, self.occluders, floor_z=self.map.floor_z)
+        return p
+
     def camera_pose(self, *, yaw_offset: float = 0.0, waist_yaw: float = 0.0, waist_pitch: float = 0.0,
-                    pose: RobotPose | None = None) -> CameraPose:
+                    pose: RobotPose | None = None, camera: str | None = None) -> CameraPose:
         pose = pose or self.robot_pose()
-        return camera_pose(self.cam, (pose.x, pose.y, pose.z), pose.yaw, waist_yaw=waist_yaw,
+        return camera_pose(self.camera_model(camera), (pose.x, pose.y, pose.z), pose.yaw, waist_yaw=waist_yaw,
                            waist_pitch=waist_pitch, yaw_offset=yaw_offset)
 
     def _targets(self) -> list[Target]:
@@ -266,14 +315,18 @@ class GTWorld:
             return self.perceiver.sight_all(cp, self._targets())
 
     def detections(self, camera: str = "head", *, yaw_offset: float = 0.0, waist_yaw: float = 0.0,
-                   waist_pitch: float = 0.0, cam_pose: CameraPose | None = None) -> list[Detection]:
-        """What the camera sees now (GT, method gt-geometric). Held objects are always reported (in hand)."""
+                   waist_pitch: float = 0.0, cam_pose: CameraPose | None = None,
+                   method: str | None = None) -> list[Detection]:
+        """What the camera ("head", or GR00T's "ego_view") sees now. Held objects are always reported (in hand).
+        method None: GT geometry (`gt-geometric`, cheap, every caller); "best": the most faithful source the world
+        has (IsaacGTWorldModel: P1's instance-id segmentation of the live view, P1.6); here it is the geometry."""
+        cam = self.camera_model(camera)
         with self._lock:
             pose = self.robot_pose()
             self._update_held(pose)
             cp = cam_pose or self.camera_pose(yaw_offset=yaw_offset, waist_yaw=waist_yaw, waist_pitch=waist_pitch,
-                                              pose=pose)
-            sights = self.perceiver.sight_all(cp, self._targets())
+                                              pose=pose, camera=camera)
+            sights = self._perceiver(cam).sight_all(cp, self._targets())
             wh = self._wheres()
             out = []
             for oid, arm in self._held.items():
@@ -409,7 +462,21 @@ class GTWorld:
     # ================================================================== SimControl defaults
     def capabilities(self) -> dict[str, bool]:
         return {"teleport_robot": False, "attach": False, "detach": False, "band": False, "reset_robot": False,
-                "object_poses": False}
+                "object_poses": False, "link_poses": False, "segmentation": False, "enable_camera": False,
+                "reset_scene": False, "detections:head": True, "detections:ego_view": True}
+
+    # ------------------------------------------------------------------ hands, cameras, sim events (M2b surface)
+    def palm_position(self, arm: str) -> tuple[float, float, float] | None:
+        """World position of a palm (P1.5 link poses); None where the world has no palm poses."""
+        return None
+
+    def enable_camera(self, camera: str, on: bool, *, consumer: str = "runtime", ttl_s: float | None = None) -> dict:
+        """Render a P1 camera only while someone needs it (OD1: ego_view protects RTF)."""
+        raise NotSupported("enable_camera")
+
+    def drain_events(self) -> list[dict]:
+        """Simulator events since the last call (P1 gt.event: robot_fell, object_fell, ...); none here."""
+        return []
 
     def teleport_robot(self, pose, y: float | None = None, yaw: float | None = None) -> None:
         raise NotSupported("teleport_robot")

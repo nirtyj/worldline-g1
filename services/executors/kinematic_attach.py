@@ -29,7 +29,13 @@ class ManipJob:
     skill_id: str
     spot: Any = None                     # place: api Pose3D of the object's centre on the target
     target: str | None = None
-    epoch: int = 0
+    epoch: int = 0                       # the runtime halt epoch at start (HaltGate.epoch)
+    # the fence an executor that leases the body needs (groot_arms: session = execution_id, PLAN §6.6)
+    execution_id: str = ""
+    generation: int = 0
+    control_epoch: int = 0
+    object_type: str = ""
+    skill: Any = None                    # api.skills.SkillSpec (prompt_template, max_duration_s, success, ...)
 
 
 @dataclass

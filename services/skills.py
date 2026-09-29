@@ -4,12 +4,14 @@ The object_type tool enum is the union of object_types over the skills whose BAC
 with the FIXED pickupable vocabulary, and frozen at session start (Invariant 9). Health never changes the enum; it
 only decides CAPABILITY rejections (`policy unavailable: ...`) and which backend runs.
 
-Backend health in M2a (honest, per backend):
+Backend health: G1Robot passes each loaded executor's own health() (`health=` below; services/executors/registry.py
+builds them), so a skill is exactly as healthy as the executor that would run it (groot_arms: PolicyServer reachable,
+body arm op present). Without an executor for a backend, the fallbacks below apply (honest, per backend):
     lite               ok (pure Python)
     kinematic_attach   ok only when the world's SimControl can attach AND detach (LiteWorld: yes; P1: only when it
                        lists the M2b ops), else down "P1 has no attach/detach op (M2b)"
-    sonic_arm_script   planned: needs the BodyServer arm_script op + attach (M3)
-    groot              down: needs BodyServer vla_start + a PolicyServer (M4)
+    sonic_arm_script   planned: needs the BodyServer arm_script op + attach
+    groot              down: no GR00T executor loaded
 """
 
 from __future__ import annotations
@@ -39,8 +41,16 @@ def load_skill_specs(path: str | Path | None = None) -> list[SkillSpec]:
 
 
 def backends_for(executors: Iterable[str]) -> tuple[str, ...]:
-    """Profile executor names (lite, kinematic_attach, sonic_arm_script, groot_sonic) -> registry backends."""
-    return tuple(BACKEND_OF_EXECUTOR.get(e, e) for e in executors)
+    """Profile executor names (lite, kinematic_attach, sonic_arm_script, groot_arms, groot_sonic) -> registry
+    backends, in order, without repeats (services/executors/registry.py knows each executor's backend)."""
+    from .executors.registry import registered
+    known = registered()
+    out: list[str] = []
+    for e in executors:
+        b = known.get(e) or BACKEND_OF_EXECUTOR.get(e, e)
+        if b not in out:
+            out.append(b)
+    return tuple(out)
 
 
 def backend_health(world: Any, extra: dict[str, Callable[[], ServiceHealth]] | None = None

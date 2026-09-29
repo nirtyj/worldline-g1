@@ -89,6 +89,16 @@ def yaw_from_quat_wxyz(q: Sequence[float]) -> float:
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def quat_wxyz_to_R(q: Sequence[float]) -> tuple[tuple[float, float, float], ...]:
+    """World-from-body rotation matrix of a unit quaternion [w, x, y, z] (P1 `quat_wxyz`)."""
+    w, x, y, z = (float(v) for v in q)
+    n = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+    w, x, y, z = w / n, x / n, y / n, z / n
+    return ((1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)),
+            (2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)),
+            (2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)))
+
+
 def rot_z(yaw: float) -> tuple[tuple[float, float, float], ...]:
     c, s = math.cos(yaw), math.sin(yaw)
     return ((c, -s, 0.0), (s, c, 0.0), (0.0, 0.0, 1.0))

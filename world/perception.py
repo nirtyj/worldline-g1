@@ -77,7 +77,14 @@ EGO_D435 = CameraModel("ego_d435", 640, 480, 45.0, (0.0576235, 0.01753, 0.41987)
 # PLAN §1.3 #7 / §7.2 target: sim-added head camera ~1.35 m standing, 15 deg down, 90 deg HFOV (VFOV 73.7 at 4:3)
 HEAD_SIM = CameraModel("head_sim", 640, 480, 2 * math.degrees(math.atan(math.tan(math.radians(45)) * 3 / 4)),
                        (0.06, 0.0, 0.526), math.radians(15.0), sim_added=True)
-CAMERAS = {c.name: c for c in (EGO_D435, HEAD_SIM)}
+# OD1 (docs/contracts/p1_m2b.md §5.1): GR00T's camera = IsaacLab-Arena's G1 head camera exactly. Mount on torso_link
+# (0.0488135, 0, 0.30925) (head_link + Arena's offset), 35.00 deg down, f 15 mm on a 20.955 x 15.71625 mm aperture
+# (HFOV 69.87, VFOV 55.30), clipping 0.1-5 m. Rendered by P1 on 5566 only while a consumer enables it.
+EGO_VIEW = CameraModel("ego_view", 640, 480, math.degrees(2 * math.atan(15.71625 / 2 / 15.0)),
+                       (0.0488135, 0.0, 0.30925), math.radians(35.0), near=0.1)
+CAMERAS = {c.name: c for c in (EGO_D435, HEAD_SIM, EGO_VIEW)}
+# the P1 camera each model is rendered by (docs/contracts/p1_m2b.md §5.1): name on the wire
+P1_CAMERA = {"head_sim": "head", "ego_view": "ego_view", "ego_d435": "d435"}
 
 
 @dataclass(frozen=True)
