@@ -535,7 +535,7 @@
           <label title="The sim's occupancy grid: obstacles (light), floor too close for the robot centre (brown), free floor (blue)"><input type="checkbox" id="chk-occ" checked> occupancy</label>
           <label title="The sim's top-down render (5602), when a top camera publishes one"><input type="checkbox" id="chk-render" checked> render</label>
           <label title="Every object where the simulator has it (ground truth): a dot coloured by type; held ones at the robot's hands"><input type="checkbox" id="chk-objs" checked> objects</label>
-          <label title="Object names next to their dots: at most one per 0.25 m, where it covers no other name; hover a dot for the rest"><input type="checkbox" id="chk-labels" checked> labels</label>
+          <label title="Object names next to their dots, where each covers no other name; &quot;+N&quot; counts the nearby ones left out; hover a dot for the rest"><input type="checkbox" id="chk-labels" checked> labels</label>
           <label title="Dashed rings where the runtime believes an object is. Red: it isn't there."><input type="checkbox" id="chk-belief" checked> belief rings</label>
         </span>
       </div>
@@ -743,10 +743,11 @@
   }
   // ---- objects on the overhead (sim ground truth, from world/ via the session state)
   // A dot per object coloured by type and its name beside it, in screen px (1 local unit = 1 px, like the robot
-  // marker), so zooming changes the spacing, not the glyphs. Labels: at most one per 0.25 m cell (smaller once a
-  // cell is wider than 48 px; the others are named in its tooltip and counted as "+N"), right/left/above/below the
-  // dot (then the diagonals) where it covers no other label, dot, room or spot name or the robot, else left out (the
-  // dot and its tooltip stay); bigger clusters are labelled first. Held objects ride with the robot marker, at its hands.
+  // marker), so zooming changes the spacing, not the glyphs. Labels: right/left/above/below the dot (then the
+  // diagonals) where it covers no other label, dot, room or spot name, the robot or the pane's caption and tool bar,
+  // else left out (the dot and its tooltip stay). Objects are grouped per 0.25 m cell (smaller once a cell is wider
+  // than 48 px), bigger clusters first; the cell's first named object counts the ones left out ("+N", named in its
+  // tooltip). Held objects ride with the robot marker, at its hands.
   const OBJ_R = 5, LABEL_CELL_M = 0.25, LABEL_CELL_PX = 48, LABEL_CH = 6.1, LABEL_MAX = 18;
   const shortName = (n) => (n.length > LABEL_MAX ? n.slice(0, LABEL_MAX - 1) + "…" : n);
   const LABEL_AT = [[OBJ_R + 3, 3.5, "start"], [-(OBJ_R + 3), 3.5, "end"], [0, -(OBJ_R + 4), "middle"], [0, OBJ_R + 12, "middle"],
@@ -775,7 +776,7 @@
     return (lay.__labelRects = out);
   }
   let objTimer = null, objLast = 0;
-  function scheduleObjs() {                        // zoom and resize: one redraw per 120 ms at most
+  function scheduleObjs() {                        // zoom, pan and resize: one redraw per 120 ms at most
     if (objTimer) return;
     objTimer = setTimeout(() => { objTimer = null; drawObjects(); }, Math.max(0, 120 - (performance.now() - objLast)));
   }
@@ -798,7 +799,7 @@
         pts.push({ id, o, u, v, x: u / s, y: v / s });
       }
       pts.sort((a, b) => (b.o.visible ? 1 : 0) - (a.o.visible ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-      // one label per 0.25 m cell; zoomed in far enough that a cell is wider than LABEL_CELL_PX, per LABEL_CELL_PX
+      // groups per 0.25 m cell; zoomed in far enough that a cell is wider than LABEL_CELL_PX, per LABEL_CELL_PX
       const t = S.layout.topdown, pxPerM = t.h / (2 * t.size) / s, cell = Math.min(LABEL_CELL_M, LABEL_CELL_PX / pxPerM);
       const cells = new Map();
       for (const q of pts) {
@@ -813,25 +814,46 @@
         taken.push([ru / s - w, rv / s + 29 + 12 * i, ru / s + w, rv / s + 40 + 12 * i]);
       });
       for (const r of staticLabelRects()) taken.push([r[0] / s, r[1] / s, r[2] / s, r[3] / s]);   // room and spot names
+      const ctm = $("map").getScreenCTM();        // the pane's caption and tool bar sit over the map (applyVB redraws on pan)
+      if (ctm) {
+        const inv = ctm.inverse();
+        for (const el of [$("map-label"), document.querySelector("#top-box .vtools")]) {
+          const b = el && el.getBoundingClientRect();
+          if (!b || !b.width) continue;
+          const a = new DOMPoint(b.left, b.top).matrixTransform(inv), c = new DOMPoint(b.right, b.bottom).matrixTransform(inv);
+          taken.push([a.x / s, a.y / s, c.x / s, c.y / s]);
+        }
+      }
       const groups = [...cells.values()];
       groups.sort((a, b) => (b[0].o.visible ? 1 : 0) - (a[0].o.visible ? 1 : 0) || b.length - a.length);   // stable: then by id
-      for (const group of groups) {
-        const [q, ...rest] = group;
-        const tip = `${objTip(q.id, q.o)}${rest.length ? `\nalso here: ${rest.map((o) => o.id).join(", ")}` : ""}\nsim ground truth`;
-        for (const o of group) {
-          dots += `<g class="obj-glyph" transform="translate(${f2(o.u)} ${f2(o.v)}) scale(${sc})"><circle r="${OBJ_R}" fill="${TYPE_COLOR(o.o.type)}"/>` +
-            `<title>${esc(o === q ? tip : objTip(o.id, o.o) + "\nsim ground truth")}</title></g>`;
-        }
-        if (!S.showLabels) continue;
-        const name = shortName(q.id), more = rest.length ? ` +${rest.length}` : "", w = (name.length + more.length) * LABEL_CH;
+      const placeLabel = (q, w) => {                    // the first free spot around q's dot for a w px name, or null
         for (const [dx, dy, anchor] of LABEL_AT) {
           const x0 = q.x + dx - (anchor === "start" ? 0 : anchor === "end" ? w : w / 2);
           const r = [x0 - 1, q.y + dy - 9, x0 + w + 1, q.y + dy + 2];
           if (overlaps(r, taken)) continue;
-          taken.push(r);
+          taken.push(r); return [dx, dy, anchor];
+        }
+        return null;
+      };
+      for (const group of groups) {
+        // every object of the cell gets its own name where one fits; the first named one counts the rest ("+N")
+        const placed = [], left = [];
+        let lead = null;
+        if (S.showLabels) for (const q of group) {
+          const name = shortName(q.id), resv = lead || group.length === 1 ? "" : ` +${group.length - 1}`;
+          const at = placeLabel(q, (name.length + resv.length) * LABEL_CH);
+          if (at) { lead = lead || q; placed.push([q, name, at]); } else left.push(q);
+        }
+        const carrier = lead || group[0], others = (S.showLabels ? left : group).filter((o) => o !== carrier);
+        const tipOf = (o) => `${objTip(o.id, o.o)}${o === carrier && others.length ? `\nalso here: ${others.map((a) => a.id).join(", ")}` : ""}\nsim ground truth`;
+        for (const o of group) {
+          dots += `<g class="obj-glyph" transform="translate(${f2(o.u)} ${f2(o.v)}) scale(${sc})"><circle r="${OBJ_R}" fill="${TYPE_COLOR(o.o.type)}"/>` +
+            `<title>${esc(tipOf(o))}</title></g>`;
+        }
+        for (const [q, name, [dx, dy, anchor]] of placed) {
+          const more = q === lead && left.length ? ` +${left.length}` : "";
           labels += `<g transform="translate(${f2(q.u)} ${f2(q.v)}) scale(${sc})"><text class="obj-label" x="${dx}" y="${dy}" text-anchor="${anchor}">` +
-            `${esc(name)}${more ? `<tspan class="more">${more}</tspan>` : ""}<title>${esc(tip)}</title></text></g>`;
-          break;
+            `${esc(name)}${more ? `<tspan class="more">${more}</tspan>` : ""}<title>${esc(tipOf(q))}</title></text></g>`;
         }
       }
       // held: at the hand in the robot's frame (forward = up at yaw 0, right = +x), rotated by its yaw; names below it
@@ -1708,7 +1730,8 @@
       const marker = $(id);
       if (marker) marker.setAttribute("transform", `scale(${scale})`);
     }
-    if (Math.abs(scale - S.mapScale) > 0.01 * scale) { S.mapScale = scale; if (S.state) scheduleObjs(); }
+    if (Math.abs(scale - S.mapScale) > 0.01 * scale) S.mapScale = scale;
+    if (S.state) scheduleObjs();                   // zoom resizes the glyphs; pan moves the caption and tool bar over them
   }
   function toSvg(cx, cy) { const svg = $("map"), pt = svg.createSVGPoint(); pt.x = cx; pt.y = cy; return pt.matrixTransform(svg.getScreenCTM().inverse()); }
   function zoomAt(x, y, f) {
@@ -1728,11 +1751,12 @@
     }
     if (!pts.length || !box.width || !box.height) { VB = { ...FULL }; applyVB(); return; }
     const pad = 28, xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
-    let x = Math.min(...xs) - pad, y = Math.min(...ys) - pad - 30, w = Math.max(...xs) + pad - x, h = Math.max(...ys) + pad - y;
+    let x = Math.min(...xs) - pad, y = Math.min(...ys) - pad - 30, w = Math.max(...xs) + pad - x, h = Math.max(...ys) + pad + 30 - y;   // caption, tool bar
     const ar = box.width / box.height;
     if (w / h < ar) { const nw = h * ar; x -= (nw - w) / 2; w = nw; } else { const nh = w / ar; y -= (nh - h) / 2; h = nh; }
-    const inside = (v, len, max) => (len <= max ? Math.min(Math.max(v, 0), max - len) : (max - len) / 2);   // no dark strip past the render
-    VB = { x: inside(x, w, FULL.w), y: inside(y, h, FULL.h), w, h };
+    // no dark strip past the render, except under the tool bar at the bottom (so it covers no object near the wall)
+    const inside = (v, len, max, over = 0) => (len <= max ? Math.min(Math.max(v, 0), max + over - len) : (max - len) / 2);
+    VB = { x: inside(x, w, FULL.w), y: inside(y, h, FULL.h, 30), w, h };
     applyVB();
   }
   const refit = () => (S.fitted ? fitHouse() : applyVB());

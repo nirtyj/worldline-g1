@@ -152,7 +152,7 @@
         <button id="t-occ" class="on" title="occupancy grid from P1 get_occupancy">occ</button>
         <button id="t-traj" class="on" title="trajectory from gt.pose">traj</button>
         <button id="t-rooms" class="on" title="room outlines from get_scene_info">rooms</button>
-        <button id="t-items" class="on" title="items: the sim's loose objects (gt.objects; load poses until it arrives), coloured by type; held ones at the robot's hands. One name per 0.25 m where it fits; hover a dot for all">items</button>
+        <button id="t-items" class="on" title="items: the sim's loose objects (gt.objects; load poses until it arrives), coloured by type; held ones at the robot's hands. Names where they fit; "+N" counts the nearby ones left out; hover a dot for all">items</button>
         <button id="t-clear" title="clear the trajectory">clear</button>
       </div>
     </div>
@@ -307,10 +307,11 @@
     $("cap-top").textContent = (S.top.img ? `${(S.fps.top ? S.fps.top.v : 0).toFixed(1)} fps` : (S.topdown ? "P1 render_topdown" : "")) +
       `  ${(ext[2] - ext[0]).toFixed(1)}×${(ext[3] - ext[1]).toFixed(1)} m`;
   }
-  // ---- items: a dot per loose object (colour by type), its name beside it. Labels: at most one per 0.25 m cell
-  // (smaller once a cell is wider than 48 px; the others are listed in the hover tip and counted as "+N"), placed
-  // right/left/above/below (then diagonally) where they cover no other label, dot or the robot, else left out; bigger
-  // clusters first. Held items are drawn at the robot's hands. Glyphs are in screen px, whatever the pane's size.
+  // ---- items: a dot per loose object (colour by type), its name beside it. Labels: placed right/left/above/below
+  // (then diagonally) where they cover no other label, dot, the robot or the pane's caption/buttons and stay inside
+  // the canvas, else left out; items are grouped per 0.25 m cell (smaller once a cell is wider than 48 px), bigger
+  // clusters first, and the cell's first named item counts the ones left out ("+N", listed in its hover tip). Held
+  // items are drawn at the robot's hands. Glyphs are in screen px, whatever the pane's size.
   const ITEM_R = 4.5, ITEM_CELL_M = 0.25, ITEM_CELL_PX = 48, ITEM_FONT = "600 10px ui-monospace, SFMono-Regular, Menlo, monospace";
   const ITEM_LABEL_MAX = 18;
   const typeOf = (name) => String(name || "").replace(/_\d+$/, "");
@@ -362,22 +363,40 @@
         taken.push([ru - w - 1, y - 9, ru + w + 1, y + 2]);
       });
     }
-    const groups = [...cells.values()].sort((a, b) => b.length - a.length);   // bigger clusters first, then by name
-    for (const group of groups) {
-      const [q, ...rest] = group;
-      const text = shortName(q.it.name) + (rest.length ? ` +${rest.length}` : "");
-      const w = labelWidth(text), g = ITEM_R + 3, d = ITEM_R + 2;
-      for (const [dx, dy, align] of [[g, 3.5, "left"], [-g, 3.5, "right"], [0, -(ITEM_R + 4), "center"], [0, ITEM_R + 12, "center"],
-                                     [d, -d, "left"], [d, ITEM_R + 10, "left"], [-d, -d, "right"], [-d, ITEM_R + 10, "right"]]) {
+    // labels stay inside the canvas and off the pane's caption and buttons (they sit on the map)
+    const cr = canvas.getBoundingClientRect(), W = cr.width, H = cr.height;
+    for (const el of $("pane-top").querySelectorAll(".cap, .maptools")) {
+      const b = el.getBoundingClientRect();
+      if (b.width) taken.push([b.left - cr.left - 2, b.top - cr.top - 2, b.right - cr.left + 2, b.bottom - cr.top + 2]);
+    }
+    const g = ITEM_R + 3, d = ITEM_R + 2;
+    const AT = [[g, 3.5, "left"], [-g, 3.5, "right"], [0, -(ITEM_R + 4), "center"], [0, ITEM_R + 12, "center"],
+                [d, -d, "left"], [d, ITEM_R + 10, "left"], [-d, -d, "right"], [-d, ITEM_R + 10, "right"]];
+    const place = (q, w) => {                               // the first free spot around q's dot for a w px label
+      for (const [dx, dy, align] of AT) {
         const x0 = align === "left" ? q.u + dx : align === "right" ? q.u + dx - w : q.u + dx - w / 2;
         const r = [x0 - 1, q.v + dy - 9, x0 + w + 1, q.v + dy + 2];
-        if (overlaps(r, taken)) continue;
-        taken.push(r); itemLabel(text, q.u + dx, q.v + dy, align);
-        break;
+        if (r[0] < 0 || r[1] < 0 || r[2] > W || r[3] > H || overlaps(r, taken)) continue;
+        taken.push(r); return [dx, dy, align];
       }
-      const also = rest.length ? `\n  also here: ${rest.map((o) => o.it.name).join(", ")}` : "";
-      S.itemPts.push({ u: q.u, v: q.v, tip: itemTip(q.it) + also });
-      for (const o of rest) S.itemPts.push({ u: o.u, v: o.v, tip: itemTip(o.it) });
+      return null;
+    };
+    const groups = [...cells.values()].sort((a, b) => b.length - a.length);   // bigger clusters first, then by name
+    for (const group of groups) {
+      // every item of the cell gets its own name where one fits; the first named one counts the rest ("+N")
+      const placed = [], left = [];
+      let lead = null;
+      for (const q of group) {
+        const name = shortName(q.it.name), resv = lead || group.length === 1 ? "" : ` +${group.length - 1}`;
+        const at = place(q, labelWidth(name + resv));
+        if (at) { lead = lead || q; placed.push([q, name, at]); } else left.push(q);
+      }
+      for (const [q, name, [dx, dy, align]] of placed) {
+        itemLabel(name + (q === lead && left.length ? ` +${left.length}` : ""), q.u + dx, q.v + dy, align);
+      }
+      const carrier = lead || group[0], others = left.filter((o) => o !== carrier);
+      const also = others.length ? `\n  also here: ${others.map((o) => o.it.name).join(", ")}` : "";
+      for (const o of group) S.itemPts.push({ u: o.u, v: o.v, tip: itemTip(o.it) + (o === carrier ? also : "") });
     }
     ctx.textAlign = "left";
     return held;
