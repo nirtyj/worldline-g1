@@ -114,7 +114,7 @@ svg.bd { display: block; width: 100%; min-width: 820px; height: auto; color: var
   <h1>Worldline G1 Architecture</h1>
   <p class="lede">How GEAR-SONIC, Isaac Sim, the ProcTHOR house and our drive API fit together to make a simulated Unitree G1 walk through a home, and where Worldline and GR00T plug in next.</p>
   <div class="meta">
-    <span>Revision <b>r7</b></span>
+    <span>Revision <b>r8</b></span>
     <span>Updated <b>2026-09-28</b></span>
     <span>Milestone <b>M1 verified · M2 in progress</b></span>
     <span>Box <b>Brev ludo-g1-brev2 · 1× L40S</b></span>
@@ -489,10 +489,10 @@ sequenceDiagram
         <tr><td class="num">1</td><td>Infra: Brev main box, scripts, pinned upstream stacks</td><td>–</td><td><span class="pill ok">Done</span></td></tr>
         <tr><td class="num">2</td><td>M1: SONIC G1 walks a ProcTHOR house in Isaac through the drive API; viz + recorder</td><td>1</td><td><span class="pill ok">Verified</span></td></tr>
         <tr><td class="num">3</td><td>Decisions: walk diagnosis, Arena spike → GR00T drives arms, SONIC keeps legs</td><td>2</td><td><span class="pill ok">Done</span></td></tr>
-        <tr><td class="num">4</td><td>M2a: Worldline port offline (api contract, world model, services, UI, runtime, eval)</td><td>2</td><td><span class="pill warn">In progress</span></td></tr>
+        <tr><td class="num">4</td><td>M2a: Worldline port offline (api contract, world model, services, UI, runtime, eval); offline fetch episode passes, 477 tests</td><td>2</td><td><span class="pill ok">Done</span></td></tr>
         <tr><td class="num">5</td><td>Arm channel + SONIC arm-tracking test + GR00T arm design (GO/NO-GO)</td><td>2</td><td><span class="pill warn">In progress</span></td></tr>
         <tr><td class="num">6</td><td>Dev box: full-stack install and verification (backup)</td><td>1</td><td><span class="pill warn">In progress</span></td></tr>
-        <tr><td class="num">7</td><td><b>Whole loop, end to end:</b> M2b live integration (System 1 live, planner, navigate → SONIC on A*, scripted arms) + <code>groot_arms</code> with the off-the-shelf N1.7 G1 checkpoint + GR00T inside <code>manipulate</code>. Tests prove plumbing and control semantics; grasp success is reported honestly, not expected</td><td>4, 5</td><td><span class="pill todo">Next</span></td></tr>
+        <tr><td class="num">7</td><td><b>Whole loop, end to end:</b> M2b live integration (System 1 live, planner, navigate → SONIC on A*, scripted arms) + <code>groot_arms</code> with the off-the-shelf N1.7 G1 checkpoint + GR00T inside <code>manipulate</code>. Tests prove plumbing and control semantics; grasp success is reported honestly, not expected</td><td>4, 5</td><td><span class="pill warn">Wave 1 running</span></td></tr>
         <tr><td class="num">8</td><td>Hardening, demo recordings, interview snapshot</td><td>7</td><td><span class="pill todo">After 7</span></td></tr>
         <tr><td class="num">–</td><td>Deferred: Nav2 on real SONIC; GR00T demo collection + fine-tuning; COMPASS; no-GT perception</td><td>–</td><td><span class="pill todo">Deferred</span></td></tr>
       </tbody>
@@ -504,6 +504,7 @@ sequenceDiagram
 <section>
   <h2>Status log</h2>
   <div class="log">
+    <div class="entry"><time>2026-09-29</time><p><b>r8.</b> M2a done: the offline "bring me the alarm clock" episode passes on the lite G1 with the real harness and page (477 tests). Its verifier flagged ground-truth reads in <code>robot/</code> and gaps in the M2b list; both are in wave 1. Dev box verified as a full replica (M1 drive test passes there). Wave 1 of the whole-loop build started on branch <code>m2b-wave1</code>: P1 ops and the Arena-matched GR00T camera, world/runtime fixes, the <code>groot_arms</code> executor, the GR00T server on the dev box, dev-box bring-up, UI/eval. Wave 2 (body arm/halt work and the live loop on the main box) waits for the arm-tracking GO/NO-GO.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r7.</b> Build order changed by the owner: Nav2 deferred (A* stays the <code>go_to</code> backend); GR00T demo collection and fine-tuning deferred. Next is one combined build, M2b + <code>groot_arms</code> + GR00T in the Worldline loop, tested end to end with the off-the-shelf N1.7 G1 checkpoint.</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r6.</b> Added the build order. Decision (b): GR00T will drive arms and hands through SONIC's upper-body channel; SONIC keeps the legs. Arena spike closed: official G1 checkpoints do not navigate houses (N1.6 walks one memorized route; N1.7 static ~22%) and need Isaac Sim 6. The second Brev box becomes a full-stack dev box. Nav2 fixes verified on fakes (16/16 goals incl. the narrow doorway).</p></div>
     <div class="entry"><time>2026-09-29</time><p><b>r5. M1 verified.</b> Independent verification from a clean state passed E1–E7 and adversarial checks. Across 9 integrated runs: 0 falls, go_to 27/27 legs through kitchen, bedroom and living room (position error 3–16 cm, heading 0.4–4.9°), walk 3.3–3.6 m, strafe 1.5–1.7 m, stop 0.9–1.2 s, 90° turns within 0.5–5°. Proof of SONIC walking: rt/lowcmd 499 Hz with leg targets changing at 50 Hz, planner mode in the deploy log, alternating single support, no root-pose writes. Up in 58 s, down in 6 s. Next: M2 (Worldline on this stack) and Nav2 as the go_to backend.</p></div>
