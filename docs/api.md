@@ -194,3 +194,19 @@ It moves the real robot (navigate to a surface, a scan, a halt within 30 ms, a c
 under the box's stack lock, with P5 stopped (two runtimes on one body share its epoch space).
 `tests/contract/test_box_runtime.py` adds the R.2 exit: 20 runtime halts mid-walk (`$WL_BOX_OUT/halts.json`), the
 waist scan, the approach reposition, a stale fence and the pushed body events.
+
+## 9. Live on the main box (M2b wave 2, owner robot, 2026-09-29)
+
+`ludo-g1-brev2`, H40 (`procthor-train-40`), `sonic` profile, unmodified deploy, body = master at 69d0748..91eebb6
+(`body/` unchanged by this wave's robot work), runtime = master + the robot commits, run from a snapshot tree
+`/work/robot-wl` (so other owners' uncommitted work was not on the box). Under the main stack lock `robot`, no other
+GPU job, P5 stopped during the `-m box` runs. Evidence: `outputs/m2b_wave2/robot/` (laptop).
+
+| Check | Result | Evidence |
+|---|---|---|
+| E0 `-m box tests/contract` (WL_BOX=1) | 11 passed, 1 skipped (`policy_down` fault injection is fake-only by design); run 1 had one failure (`check_reachability` right after the waist scan answered `base_moving`: SONIC sways the pelvis while the waist returns), fixed by waiting for the base to be still after the scan (`scan_rest_s`, 0.1-0.46 s live) | `box/box2/pytest_box_2.log`, run 1 `box/box/` |
+| 20 runtime halts mid-walk (`G1Robot.halt`, B.1 lane) | 20/20 stopped, 20/20 `failed(halted)`; `halt()` p50 0.82 / max 1.77 ms, body.halted round trip max 1.64 ms, body handling ~0.1 ms; speed at the halt 0.24-0.95 m/s; at rest (5 GT samples < 0.05 m/s) within 1.5 s 19/20 (the 20th 1.67 s); 0 falls, pelvis z min 0.741 m; sim RTF 1.007; 42 `body_mode` events reached `robot.events()` | `box/box2/halts.json` |
+| Waist scan (F1 arrival scans) | achieved waist yaw -36.3..+36.3 deg at the three holds, `yaw_err_deg_max` 0.8-1.3 | `f1-sonic-r2/episode.jsonl` |
+| Reach stance by `approach` | 0.254 m, final error 1.5 cm / 2.1 deg in 3 attempts | same |
+| Scripted pick (R.1) from a set stance (0.30 m ahead, 0.18 m right) | succeeded in 15.4 s: grasp palm error median 2.35 cm, GT gate 2.56 cm, `fixed_joint` attach, lifted 0.148 m, carry pose; a 7.4 m carry walk kept it; the place then failed `ik_unreachable` at the service's spot (the IK-envelope retry was added after this run) | pick4 (box only, printed in the log above; the box was stopped before the pull) |
+| F1 with the scripted planner | not passed: navigate, waist scan, check_reachability (`needs_reposition`), the approach reposition and the second check (`reachable`, right arm) ran; the pick failed `ik_unreachable` because HEAD's workspace model put the object 0.456 m ahead (the arm script's IK reaches about 0.42 m at that height, and SONIC stepped the pelvis back ~12 cm during the pregrasp). The calibrated workspace (R.7, owner world-cal, uncommitted at the time) targets 0.22-0.36 m | `f1-sonic-r1/`, `f1-sonic-r2/` (episode, recording: head/chase/top/composite mp4) |
