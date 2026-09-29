@@ -70,6 +70,20 @@
   .log .e-ok { color: var(--ok); } .log .e-bad { color: var(--bad); } .log .e-info { color: var(--accent); }
   .recinfo { font-size: 12px; color: var(--muted); } .recinfo a { color: var(--accent); }
   .extras { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  /* Desktop: fit the window (no page scroll). The panes share the height left after the header and the panels;
+     images are letterboxed by object-fit, and drawMap already fits the map to whatever box the pane gets. */
+  @media (min-width: 901px) {
+    html, body { height: 100%; overflow: hidden; }
+    body { display: flex; flex-direction: column; }
+    header { position: static; flex: 0 0 auto; }
+    main { flex: 1 1 auto; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+    .col { min-height: 0; }
+    .col > .pane { flex: 1 1 0; min-height: 120px; aspect-ratio: auto !important; }
+    .col > .panel { flex: 0 0 auto; }
+    .log { max-height: 64px; }
+    .extras { flex: 0 1 auto; max-height: 24vh; overflow: auto; }
+    .extras:empty { display: none; }
+  }
   @media (max-width: 900px) {
     main { grid-template-columns: 1fr; padding: 10px; } header { padding: 8px 10px; }
     .drive { grid-template-columns: 1fr; }
