@@ -502,6 +502,10 @@ def test_fresh_spawns_the_restart_under_the_lock(tmp_path, monkeypatch):
     assert ("bash scripts/m2_down.sh --session wl-m2 && bash scripts/m2_up.sh --profile sonic "
             "--scene procthor-train-40 --viz low --p5-port 8766 --session wl-m2") in cmd
     assert "ui-demo-fresh" in cmd and "trap" in cmd and str(tmp_path / "locks" / "stack.d") in cmd
+    assert "--groot" not in cmd, "sonic has no GR00T"
+    r_full, _ = _runner(tmp_path, Sim(), host=Host(Sim(), profile="full"), spawn=spawn)
+    assert r_full.fresh_command().endswith("--viz low --p5-port 8766 --session wl-m2 --groot off"), \
+        "full + groot off: as demo.sh --fresh, a GR00T link that is down cannot stop the restart"
     assert log.parent == tmp_path / "out" and log.name.startswith("fresh-")
     fr = [m for m in host.msgs if m["type"] == "demo_fresh"]
     assert fr[0]["state"] == "restarting" and fr[0]["detail"].startswith("restarting the stack")

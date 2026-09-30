@@ -589,6 +589,8 @@ class DemoRunner:
         session = tmux_session()
         up = (f"bash scripts/m2_up.sh --profile {q(profile)} --scene {q(scene)} --viz low --p5-port {port} "
               f"--session {q(session)}" + (f" --port-offset {offset}" if offset else ""))
+        if profile == "full" and (self.demo is None or self.demo.groot == "off"):
+            up += " --groot off"       # as scripts/demo.sh --fresh: a GR00T link that is down cannot stop the restart
         body = f"bash scripts/m2_down.sh --session {q(session)} && {up}"
         lock = StackLock.for_profile(profile) if self._lock is None else self._lock
         if lock.path is None:
