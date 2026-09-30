@@ -32,6 +32,9 @@ defaults:
   idle_ignores_wait: true   # tools.say --idle-ignores-wait: a running wait_and_observe does not count as busy
   ready_s: 240              # before the first step: wait this long for System 1 ready and an idle runtime
   between_s: 2              # pause between steps
+  groot: off                # the Demo panel, like scripts/demo.sh --groot off (its default): on the box's full profile the
+                            # GR00T link is down while the steps run, so the pick goes straight to the labelled SONIC arm
+                            # script (the zero-shot GR00T attempt can spoil it, docs/demo.md); restored after. on: keep it
 
 steps:
   - id: 1
@@ -93,8 +96,8 @@ steps:
     pass_text: a check_reachability result with beyond_reach, then speech
 
   - id: 8
-    title: pick (GR00T -> script)
-    shows: "reach stance, then manipulate: GR00T arms (experimental) first, the SONIC arm script as the labelled fallback"
+    title: pick (reach stance + arm)
+    shows: "walks round the table to a reach stance, checks again, then picks with the SONIC arm script (labelled fallback)"
     lines: ["pick up the white bottle"]
     if_asked: [["which (one|bottle|of)", "the white one"]]
     needs: empty hands

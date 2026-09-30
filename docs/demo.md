@@ -35,6 +35,11 @@ Outputs go to `/work/worldline-g1/outputs/demo/run-<ts>/`: `stepN.log` (what `to
 
 ## The steps
 
+The steps, their timing and their PASS rules live in one file, `config/demo_steps.yaml` (the rules' code:
+`tools/demo_steps.py`). This script reads it (`python -m tools.demo_steps bash` for the lines, `results` for the
+table), and so does the Worldline UI's Demo panel (below), so both run the same lines and judge them the same way.
+Edit the file, not the script.
+
 | # | Said | What it shows | PASS when the trace has |
 |---|---|---|---|
 | 1 | "my keys are usually on the kitchen counter" | System 1 labels a statement about the home; it is kept word for word as a note | a `note_saved` row |
@@ -46,6 +51,25 @@ Outputs go to `/work/worldline-g1/outputs/demo/run-<ts>/`: `stepN.log` (what `to
 | 7 | "pick up the bowl" | honest refusal: the robot walks to the table and checks; bowl_1 is beyond the arm's reach from every place the robot can stand, and it says so (the check gives the distances) | a `check_reachability` result with `beyond_reach`, then speech |
 | 8 | "pick up the white bottle" (if asked which: "the white one") | navigate, check_reachability, reach_stance on the far side of the table (about 3.4 m round it), check again, then manipulate with the SONIC arm script (labelled `fallback`; with `--groot on`, after the GR00T attempt); held and lifted. If the grasp misses (`ik_unreachable`), the planner repositions a few cm and picks again | a pick result `succeeded` with `holding: true` |
 | 9 | "what are you holding?", then "thanks" | a state question and chitchat | speech naming the bottle |
+
+## From the page: the Demo panel
+
+The same steps run from the Worldline UI: press **Demo** in the chat header (http://localhost:8766 through
+`tunnel.sh 8766 8765`). The steps live in one file, `config/demo_steps.yaml`, which this script reads too
+(`python -m tools.demo_steps list|bash|results`), so the panel and the script always run the same lines with the
+same PASS rules. Hover a step to see its lines and its PASS rule.
+
+| Control | What it does |
+|---|---|
+| **Run** (a step) / **Run all** | P5 says each line through the chat's own path (a stop word halts first, then System 1 labels the line, then the runtime hears it), so the chat shows it as if typed. The timing is `tools/say.py`'s: a plain line waits until the robot has been idle for 5 s; "@N text" goes N s after the previous line. Each step then shows PASS or FAIL from the same rule as the script, with the evidence line. One demo at a time; the buttons are off while it runs. On the full profile GR00T is off while it runs, as with the script's default `--groot off` (the link comes back after; `groot: on` in the steps file keeps it) |
+| **Stop** | no further demo lines, then "stop" to the robot once (the keyword path: halt, no model call) |
+| **Record** | the Sim Viewer's recording (`POST :8765/api/record`), start and stop; the recording's folder shows in the panel. Isaac profiles only |
+| **Fresh restart** | Isaac profiles, after a confirm in the page: a detached `m2_down.sh && m2_up.sh --profile <this> --scene <this> --viz low --p5-port <this>`. The page shows the restart (about a minute) and reconnects by itself. Unlike `--fresh` it keeps the house's spatial memory |
+
+On the box a run holds the stack lock as `ui-demo` and gives it back after; a lock held by anyone else stops the run
+before its first line (the restart takes it as `ui-demo-fresh`). Each run leaves `runs/demo/<ts>/stepN.json` (the
+shape of `tools/say.py --json`) and `results.md` (the script's table). The panel also works on the laptop's lite
+profile (`python -m ui.server --profile lite`), without the lock, Record or Fresh restart.
 
 ## Expected output (per step, then the table)
 

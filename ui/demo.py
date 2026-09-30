@@ -16,7 +16,9 @@ rule as scripts/demo.sh (tools.demo_steps.verdict). Progress streams to every op
                     {type: demo_fresh, state: restarting, detail, log}
 
 On the box (/work exists, not the lite profile) a run holds the stack lock /work/locks/stack.d as `ui-demo`
-(docs/bringup.md) and releases it after; a lock held by anyone else stops the run before its first line. Evidence per
+(docs/bringup.md) and releases it after; a lock held by anyone else stops the run before its first line. With the
+steps file's `groot: off` (the default, as scripts/demo.sh --groot off) a run on the box's full profile takes the GR00T
+link down (scripts/groot_link.sh down) and brings it back after (ensure), so the pick uses the labelled SONIC arm script. Evidence per
 run: runs/demo/<ts>/stepN.json (tools/say.py --json's shape) and results.md (scripts/demo.sh's table).
 """
 
@@ -213,6 +215,18 @@ def tmux_session() -> str:
     return "wl-m2"
 
 
+def run_script(args: list[str], timeout: float) -> int:
+    """bash scripts/... in the repo, without tmux's variables (P5 runs in a tmux pane); the exit code (124: timeout)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    try:
+        return subprocess.run(["bash", *args], cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError:
+        return 127
+
+
 def spawn_detached(cmd: str, log: Path) -> subprocess.Popen:
     """bash -c cmd under nohup in a new session (setsid), so it outlives P5 (m2_down.sh stops P5 first). tmux's
     variables are dropped: the helper must not act as if it ran inside P5's pane."""
@@ -227,13 +241,15 @@ def spawn_detached(cmd: str, log: Path) -> subprocess.Popen:
 class DemoRunner:
     def __init__(self, host: Any, *, steps_file: Path | str | None = None, out_dir: Path | None = None,
                  lock: StackLock | None = None, viz_url: str | None = None,
-                 spawn: Callable[[str, Path], Any] = spawn_detached, poll_s: float = 0.3) -> None:
+                 spawn: Callable[[str, Path], Any] = spawn_detached, sh: Callable[[list[str], float], int] = run_script,
+                 poll_s: float = 0.3) -> None:
         self.host = host
         self.steps_file = steps_file
         self._out_dir = out_dir
         self._lock = lock                            # None: StackLock.for_profile at each run
         self._viz_url = viz_url
         self.spawn = spawn
+        self.sh = sh
         self.poll_s = poll_s
         self.demo: Demo | None = None
         self.error: str | None = None
@@ -246,6 +262,7 @@ class DemoRunner:
         self.fresh_sent: dict[str, Any] | None = None
         self.lock: StackLock | None = None
         self._rec_task: asyncio.Task | None = None
+        self._link_back = False                      # the GR00T link was up before the run: ensure it after
         self.reload()
 
     # ------------------------------------------------------------------ state
@@ -397,7 +414,9 @@ class DemoRunner:
                 self._emit_step(sid, "idle", "")
             self._emit_run("fail", why, running=False)
             return
+        self._link_back = False
         try:
+            await self._groot_off(demo)
             ready, why = await self._wait_ready(demo)
             if not ready:
                 for sid in ids:
@@ -424,8 +443,30 @@ class DemoRunner:
             self._abort(ids, rows, f"error: {e}")
             self._finish(run_dir, rows, t0, "fail", f"the demo stopped on an error: {e}")
         finally:
+            if self._link_back:
+                await self._groot_back()
             self.lock.release()
             self.current, self.line = None, None
+
+    def _groot_applies(self, demo: Demo) -> bool:
+        """GR00T off for the run: the steps file says so, the profile is full, and this is the box (the lock is real)."""
+        return (demo.groot == "off" and self.host.profile() == "full" and self.lock is not None
+                and self.lock.path is not None and (ROOT / "scripts" / "groot_link.sh").is_file())
+
+    async def _groot_off(self, demo: Demo) -> None:
+        """scripts/demo.sh --groot off: the link down while the steps run; one that was up comes back after."""
+        if not self._groot_applies(demo):
+            return
+        self._link_back = await asyncio.to_thread(self.sh, ["scripts/groot_link.sh", "check"], 20.0) == 0
+        await asyncio.to_thread(self.sh, ["scripts/groot_link.sh", "down"], 20.0)
+        self._emit_run("running", "GR00T off for the demo: link down, the pick uses the labelled SONIC arm script",
+                       running=True)
+
+    async def _groot_back(self) -> None:
+        rc = await asyncio.to_thread(self.sh, ["scripts/groot_link.sh", "ensure"], 120.0)
+        if rc != 0:
+            self.host.emit({"type": "notice", "text": f"The GR00T link did not come back (groot_link.sh ensure rc {rc}): "
+                                                      "run bash scripts/groot_link.sh ensure on the box."})
 
     @staticmethod
     def _took(t0: float) -> str:
@@ -462,7 +503,8 @@ class DemoRunner:
             if time.monotonic() - t0 > demo.ready_s:
                 return False, f"not ready after {demo.ready_s:g} s: {why}"
             if why != last:
-                self._emit_run("running", f"waiting for {why.replace('System 1 ', 'System 1: ')}", running=True)
+                self._emit_run("running", f"waiting until System 1 is ready and the robot is idle (now: {why})",
+                               running=True)
                 last = why
             await asyncio.sleep(self.poll_s)
 

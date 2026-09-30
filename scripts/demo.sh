@@ -52,30 +52,16 @@ done
 case "$GROOT" in on|off) ;; *) echo "--groot must be on or off" >&2; exit 2;; esac
 
 # ---------------------------------------------------------------- the steps
-# step_def N sets NAME, MAXS (s to wait on one line), LINES (what to say; "@N text" = N s after the previous line)
-# and EXTRA (more tools.say options).
-NSTEPS=9
-step_def() {
-  EXTRA=()
-  case "$1" in
-    1) NAME="memory note";                 MAXS=60;  LINES=("my keys are usually on the kitchen counter");;
-    2) NAME="navigate + question mid-walk"; MAXS=150; LINES=("go to the bedroom dresser" "@6 where are you going?");;
-    3) NAME="stop / resume while walking";  MAXS=180; LINES=("go to the dining table" "@6 stop" "@5 okay, carry on");;
-    4) NAME="recall a note";               MAXS=60;  LINES=("where are my keys?");;
-    5) NAME="spatial memory";              MAXS=60;  LINES=("where is the vase?");;
-    6) NAME="correction mid-walk";         MAXS=150; LINES=("go to the living room" "@5 no, go to the kitchen counter instead");;
-    # "can you reach the bowl?" was answered from belief with no check ("cannot reach it from here"); a request
-    # makes the planner walk there and check_reachability, which answers beyond_reach with the distances
-    7) NAME="honest refusal (reach)";      MAXS=150; LINES=("pick up the bowl");;
-    8) NAME="pick (reach stance + arm)";   MAXS=330; LINES=("pick up the white bottle")
-       EXTRA=(--if-asked "which (one|bottle|of)" "the white one");;
-    9) NAME="question + chitchat";         MAXS=60;  LINES=("what are you holding?" "thanks");;
-    *) return 1;;
-  esac
-}
+# config/demo_steps.yaml: the one list this script and the Worldline UI's Demo panel (ui/demo.py) run. tools/demo_steps.py
+# prints step_def N (sets NAME, MAXS = s to wait on one line, LINES = what to say, "@N text" = N s after the previous
+# line, EXTRA = more tools.say options; returns 1 for no such step), STEP_IDS, NSTEPS, SAY_OPTS, READY_S, BETWEEN_S.
+SRC=$WL; [[ -f "$SRC/tools/demo_steps.py" ]] || SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PY_STEPS=$PY_RT; [[ -x "$PY_STEPS" ]] || PY_STEPS=$SRC/.venv-rt/bin/python; [[ -x "$PY_STEPS" ]] || PY_STEPS=python3
+STEPS_SH=$(cd "$SRC" && "$PY_STEPS" -m tools.demo_steps bash) || { echo "cannot read the steps ($SRC/config/demo_steps.yaml)" >&2; exit 2; }
+eval "$STEPS_SH"
 
 if [[ "$LIST" == 1 ]]; then
-  for n in $(seq 1 $NSTEPS); do
+  for n in "${STEP_IDS[@]}"; do
     step_def "$n"; printf '%d  %-30s' "$n" "$NAME"; printf ' "%s"' "${LINES[@]}"; echo
   done
   exit 0
@@ -85,7 +71,7 @@ if [[ -n "$ONLY" ]]; then
   IFS=, read -ra STEPS <<< "$ONLY"
   for n in "${STEPS[@]}"; do step_def "$n" >/dev/null || { echo "no step $n (--list)" >&2; exit 2; }; done
 else
-  STEPS=($(seq 1 $NSTEPS))
+  STEPS=("${STEP_IDS[@]}")
 fi
 
 T0=$(date +%s)
@@ -160,7 +146,7 @@ fi
 
 # ---------------------------------------------------------------- page + System 1 ready, hands empty
 banner "waiting for the page and System 1"
-(cd "$WL" && "$PY_RT" -m tools.say --wait-ready 240 --json "$RUN/ready.json") 2>&1 | tee -a "$RUN/demo.log"
+(cd "$WL" && "$PY_RT" -m tools.say --wait-ready "$READY_S" --json "$RUN/ready.json") 2>&1 | tee -a "$RUN/demo.log"
 rc=${PIPESTATUS[0]}
 (( rc == 0 )) || { say "the page or System 1 is not ready (tools.say rc $rc)"; exit 5; }
 held=$("$PY_RT" -c 'import json,sys
@@ -182,10 +168,10 @@ for n in "${STEPS[@]}"; do
   step_def "$n"
   banner "step $n: $NAME"
   ts=$(date +%s)
-  (cd "$WL" && "$PY_RT" -m tools.say --idle-ignores-wait --idle-s 5 --max-s "$MAXS" --json "$RUN/step$n.json" \
+  (cd "$WL" && "$PY_RT" -m tools.say "${SAY_OPTS[@]}" --max-s "$MAXS" --json "$RUN/step$n.json" \
       "${EXTRA[@]}" "${LINES[@]}") 2>&1 | tee "$RUN/step$n.log"
   echo "$n ${PIPESTATUS[0]} $(( $(date +%s) - ts ))" >> "$RUN/steps.tsv"
-  sleep 2
+  sleep "$BETWEEN_S"
 done
 
 # ---------------------------------------------------------------- stop the recording
@@ -198,134 +184,8 @@ fi
 
 # ---------------------------------------------------------------- PASS/FAIL from the trace
 banner "results"
-"$PY_RT" - "$RUN" "$(( $(date +%s) - T0 ))" <<'EOF' | tee "$RUN/results.md"
-import json, re, sys
-from pathlib import Path
-
-run = Path(sys.argv[1]); total_s = int(sys.argv[2])
-steps = {}
-for l in (run / "steps.tsv").read_text().split("\n"):
-    if l.strip():
-        n, rc, s = l.split()
-        steps[int(n)] = (int(rc), int(s))
-
-
-def load(n):
-    p = run / f"step{n}.json"
-    return json.loads(p.read_text()) if p.exists() else None
-
-
-def after(d, k=0):
-    """Trace rows from the k-th line sent on."""
-    sent = d.get("sent") or []
-    return d["trace"][sent[k]["trace_at"]:] if len(sent) > k else []
-
-
-def heard_t(d, text):
-    for r in d["trace"]:
-        if r.get("type") == "heard" and r.get("text", "").strip().lower() == text.strip().lower():
-            return r.get("t", 0.0)
-    return None
-
-
-speech = lambda rows: [r for r in rows if r.get("type") == "result" and r.get("kind") == "speech"]
-said = lambda rows: " | ".join(str(r.get("text")) for r in speech(rows))
-res = lambda rows, tool: [r for r in rows if r.get("type") == "result" and r.get("tool") == tool]
-ok = lambda r: str(r.get("status")).lower() == "succeeded"
-since = lambda rows, t: [r for r in rows if t is not None and (r.get("t_start") or r.get("t") or 0) >= t]
-
-
-def j1(d):
-    rows = after(d)
-    notes = [r for r in rows if r.get("type") == "note_saved"]
-    return bool(notes), f"note saved: {notes[0].get('text')!r}" if notes else "no note_saved row"
-
-
-def j2(d):
-    rows = after(d)
-    nav = [r for r in res(rows, "navigate") if ok(r) and "dresser" in str((r.get("data") or {}).get("location"))]
-    tq = heard_t(d, "where are you going?")
-    t_arr = nav[0]["t"] if nav else None
-    ans = [r for r in speech(rows) if tq is not None and (r.get("t_start") or 0) >= tq]
-    while_walking = [r for r in ans if t_arr is None or (r.get("t_start") or 0) <= t_arr]
-    txt = said(ans)[:160]
-    if nav and while_walking:
-        return True, f"{nav[0]['summary'][:70]}; answered while walking: {said(while_walking)[:120]!r}"
-    return False, f"navigate ok={bool(nav)}; answer={txt!r} ({'while walking' if while_walking else 'not while walking'})"
-
-
-def j3(d):
-    rows = after(d)
-    stops = [r for r in rows if r.get("type") == "stop" and not r.get("already_paused")]
-    resumes = [r for r in rows if r.get("type") == "resume" and stops and r["t"] >= stops[0]["t"]]
-    nav = [r for r in res(rows, "navigate") if ok(r) and resumes and r["t"] >= resumes[0]["t"]
-           and "dining_table" in str((r.get("data") or {}).get("location"))]
-    msg = f"stop={len(stops)} (canceled {stops[0].get('canceled') if stops else '-'}), resume={len(resumes)}, " \
-          f"arrived after resume: {nav[0]['summary'][:60] if nav else 'no'}"
-    return bool(stops and resumes and nav), msg
-
-
-def j_said(pattern):
-    def j(d):
-        rows = after(d)
-        sp = speech(rows)
-        hit = [r for r in sp if re.search(pattern, str(r.get("text")), re.I)]
-        return bool(hit), f"said: {said(hit or sp)[:200]!r}"
-    return j
-
-
-def j6(d):
-    rows = after(d)
-    tc = heard_t(d, "no, go to the kitchen counter instead")
-    lab = [r.get("kind") for r in rows if r.get("type") == "classified" and tc is not None and r.get("t", 0) >= tc]
-    nav = [r for r in res(since(rows, tc), "navigate") if ok(r) and "kitchen_counter" in str((r.get("data") or {}).get("location"))]
-    return bool(nav), f"labelled {lab[:1]}; {nav[0]['summary'][:70] if nav else 'kitchen counter not reached'}"
-
-
-def j7(d):
-    rows = after(d)
-    cr = [r for r in res(rows, "check_reachability") if "beyond_reach" in str(r.get("summary"))]
-    sp = [r for r in speech(rows) if cr and (r.get("t_start") or 0) >= cr[0]["t"] - 0.5]
-    return bool(cr and sp), (f"{cr[0]['summary'][:110]}; said {said(sp)[:100]!r}" if cr else
-                             f"no beyond_reach; said {said(rows)[:120]!r}")
-
-
-def j8(d):
-    rows = after(d)
-    picks = [r for r in res(rows, "manipulate") if r.get("action") == "pick"]
-    good = [r for r in picks if ok(r) and (r.get("data") or {}).get("holding")]
-    fb = [r for r in rows if r.get("type") == "manip.fallback"]
-    hands = (d.get("end") or {}).get("hands") or {}
-    held = {a: v.get("holding") for a, v in hands.items() if v.get("holding") not in (None, "nothing", "")}
-    path = " -> ".join(r.get("tool") + (f"({(r.get('args') or {}).get('location')})" if r.get("tool") == "navigate" else "")
-                       for r in rows if r.get("type") == "decision" and r.get("tool") not in ("speak", "wait_and_observe", "recall"))
-    ex = good[0].get("summary", "")[:90] if good else (picks[-1].get("summary", "")[:120] if picks else "no pick")
-    return bool(good), f"{ex}; fallbacks {[f.get('from_executor') + ':' + str(f.get('reason')) for f in fb]}; end hands {held}; path {path}"
-
-
-JUDGE = {1: j1, 2: j2, 3: j3, 4: j_said(r"counter"), 5: j_said(r"dresser|counter"), 6: j6, 7: j7, 8: j8,
-         9: j_said(r"bottle")}
-NAMES = {1: "memory note", 2: "navigate + question mid-walk", 3: "stop / resume while walking", 4: "recall a note",
-         5: "spatial memory", 6: "correction mid-walk", 7: "honest refusal (reach)", 8: "pick (reach stance + arm)",
-         9: "question + chitchat"}
-print(f"| step | behaviour | result | s | evidence |\n|---|---|---|---|---|")
-npass = 0
-for n, (rc, s) in steps.items():
-    d = load(n)
-    if d is None or rc != 0:
-        verdict, why = False, f"tools.say rc {rc}"
-    else:
-        try:
-            verdict, why = JUDGE[n](d)
-        except Exception as e:  # noqa: BLE001
-            verdict, why = False, f"judge error {e!r}"
-        if d.get("status") == "max_s":
-            why += " (a line hit --max-s)"
-    npass += verdict
-    print(f"| {n} | {NAMES[n]} | {'PASS' if verdict else 'FAIL'} | {s} | {why.replace('|', '/')} |")
-print(f"\n{npass}/{len(steps)} steps passed; total {total_s // 60} min {total_s % 60} s")
-sys.exit(0 if npass == len(steps) else 1)
-EOF
+# PASS/FAIL per step: the rules in config/demo_steps.yaml (tools/demo_steps.py RULES, shared with the UI's Demo panel)
+(cd "$SRC" && "$PY_RT" -m tools.demo_steps results "$RUN" "$(( $(date +%s) - T0 ))") | tee "$RUN/results.md"
 rc=${PIPESTATUS[0]}
 say "run dir $RUN${REC_DIR:+ ; recording $REC_DIR}"
 exit "$rc"

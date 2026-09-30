@@ -360,6 +360,51 @@ def test_wait_ready_gives_up(tmp_path):
     assert all(m["state"] == "idle" for m in host.runs() if m["step"] == 1 and m is not host.runs()[0])
 
 
+def test_groot_off_on_the_full_profile_takes_the_link_down_and_back(tmp_path):
+    """scripts/demo.sh --groot off (the steps file's default): link down for the run, ensure after, on full only."""
+    calls: list[str] = []
+
+    def sh(args, timeout):
+        calls.append(args[-1])
+        return 0
+
+    sim = Sim(react)
+    r, host = _runner(tmp_path, sim, host=Host(sim, profile="full"), sh=sh)
+
+    async def go():
+        r.start([1])
+        await r.task
+        assert calls == ["check", "down", "ensure"]
+        assert any("GR00T off for the demo" in m["detail"] for m in host.runs())
+        calls.clear()
+        r.start([3])                                     # stopped mid-step: the link still comes back
+        while not sim.said or sim.said[-1][1] != "go to the dining table":
+            await asyncio.sleep(0.01)
+        await r.handle({"action": "stop"})
+        assert calls == ["check", "down", "ensure"]
+
+    run(go())
+    calls.clear()
+    r2, _ = _runner(tmp_path, Sim(react), host=Host(Sim(react), profile="sonic"), sh=sh)
+    run(_run_one(r2, [1]))
+    assert calls == [], "only the full profile uses GR00T"
+    (tmp_path / "steps.yaml").write_text(STEPS.replace("between_s: 0}", "between_s: 0, groot: on}"))
+    r3 = DemoRunner(Host(Sim(react), profile="full"), steps_file=tmp_path / "steps.yaml", out_dir=tmp_path / "out",
+                    lock=StackLock(tmp_path / "locks" / "stack.d"), poll_s=0.03, sh=sh)
+    run(_run_one(r3, [1]))
+    assert calls == [], "groot: on keeps the link"
+    down_calls: list[str] = []
+    r4, _ = _runner(tmp_path, Sim(react), host=Host(Sim(react), profile="full"), lock=StackLock(None),
+                    sh=lambda a, t: down_calls.append(a[-1]) or 0)
+    run(_run_one(r4, [1]))
+    assert down_calls == [], "not on the box (no lock): the laptop has no link to take down"
+
+
+async def _run_one(r: DemoRunner, ids: list[int]) -> None:
+    r.start(ids)
+    await r.task
+
+
 # ---------------------------------------------------------------------------------------------- recording
 class _Viz(http.server.BaseHTTPRequestHandler):
     calls: list[dict] = []

@@ -1928,7 +1928,7 @@
       const st = D.st[s.id] || D.st[String(s.id)] || { state: "idle", detail: "" };
       const state = DSTATES.includes(st.state) ? st.state : "idle";
       const detail = state === "pass" || state === "fail" ? st.detail : "";
-      return `<li class="dstep st-${state}" title="${esc(demoTip(s))}">
+      return `<li class="dstep st-${state}" data-step="${esc(s.id)}" title="${esc(demoTip(s))}">
         <span class="dchip ${state}">${state === "running" ? `<span class="dot"></span>` : ""}${state}</span>
         <span class="dtitle"><span class="n">${esc(s.id)}</span>${esc(s.title)}</span>
         <button class="mini" type="button" data-run="${esc(s.id)}"${busy ? " disabled" : ""} title="Run step ${esc(s.id)} only">Run</button>
@@ -1936,6 +1936,14 @@
         ${detail ? `<span class="ddetail">${st.s != null ? esc(st.s) + " s · " : ""}${esc(detail)}</span>` : ""}
       </li>`;
     }).join("") || `<li class="empty">No demo steps.</li>`);
+    if (D.running && D.current != null && D.current !== D.shown) {       // keep the running step in view
+      D.shown = D.current;
+      const li = $("demo-steps").querySelector(`[data-step="${D.current}"]`), box = $("demo");
+      if (li && !box.hidden) {
+        const b = box.getBoundingClientRect(), r = li.getBoundingClientRect();
+        if (r.bottom > b.bottom || r.top < b.top) box.scrollTop += r.top - b.top - 60;
+      }
+    } else if (!D.running) D.shown = null;
   }
   $("btn-demo").addEventListener("click", () => demoOpen($("demo").hidden));
   $("demo-all").addEventListener("click", () => wsSend({ type: "demo", action: "run", steps: "all" }));

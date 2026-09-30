@@ -70,6 +70,7 @@ class Demo:
     idle_ignores_wait: bool = True
     ready_s: float = 240.0
     between_s: float = 2.0
+    groot: str = "off"            # the Demo panel's GR00T link while it runs (scripts/demo.sh has --groot, default off)
     source: str = ""
 
     def step(self, sid: int) -> Step:
@@ -130,6 +131,10 @@ def load(path: Path | str | None = None) -> Demo:
     ids = [s.id for s in steps]
     if len(set(ids)) != len(ids):
         raise ValueError(f"{path}: step ids repeat: {ids}")
+    groot = dflt.get("groot", "off")
+    groot = {False: "off", True: "on"}.get(groot, groot)          # YAML 1.1 reads a bare off/on as a boolean
+    if groot not in ("off", "on"):
+        raise ValueError(f"{path.name}: defaults.groot must be off or on, not {groot!r}")
     try:
         source = str(path.resolve().relative_to(ROOT))
     except ValueError:
@@ -137,7 +142,7 @@ def load(path: Path | str | None = None) -> Demo:
     return Demo(steps=steps, idle_s=_num(dflt.get("idle_s", 5), "idle_s"),
                 idle_ignores_wait=bool(dflt.get("idle_ignores_wait", True)),
                 ready_s=_num(dflt.get("ready_s", 240), "ready_s"),
-                between_s=float(dflt.get("between_s", 2)), source=source)
+                between_s=float(dflt.get("between_s", 2)), groot=groot, source=source)
 
 
 # ---------------------------------------------------------------------------------------------- PASS rules

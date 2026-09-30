@@ -8,13 +8,17 @@ and the Worldline UI's Demo panel (docs/demo.md).
   test_rules_*                 each PASS rule on a small trace: pass, and the fail it reports
   test_verdict                 a failed say or missing evidence fails; a judge error fails; max_s only adds a note
   test_results_table           scripts/demo.sh's table and exit code from a run dir
+  test_demo_sh_*               scripts/demo.sh reads the list: --list prints it, a step not in it exits 2, and the script
+                               keeps no step list or judge of its own
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +26,8 @@ import pytest
 from tools import demo_steps as ds
 
 BASH = shutil.which("bash")
+ROOT = Path(__file__).resolve().parents[2]
+DEMO_SH = ROOT / "scripts" / "demo.sh"
 
 
 def _yaml(tmp: Path, text: str) -> Path:
@@ -34,6 +40,7 @@ def test_config_loads():
     demo = ds.load()
     assert demo.ids == list(range(1, 10))
     assert demo.idle_s == 5 and demo.idle_ignores_wait and demo.ready_s == 240 and demo.between_s == 2
+    assert demo.groot == "off", "the Demo panel keeps scripts/demo.sh's default: --groot off"
     assert demo.source == "config/demo_steps.yaml"
     s2 = demo.step(2)
     assert s2.lines == ["go to the bedroom dresser", "@6 where are you going?"] and s2.max_s == 150
@@ -65,7 +72,7 @@ def test_bash_step_def_matches_the_file():
     got = {i + 1: r for i, r in enumerate(rows[:-1])}
     assert got[1] == "memory note|60|my keys are usually on the kitchen counter;|;"
     assert got[3] == "stop / resume while walking|180|go to the dining table;@6 stop;@5 okay, carry on;|;"
-    assert got[8] == "pick (GR00T -> script)|330|pick up the white bottle;|--if-asked;which (one|bottle|of);the white one;"
+    assert got[8] == "pick (reach stance + arm)|330|pick up the white bottle;|--if-asked;which (one|bottle|of);the white one;"
     assert got[9] == "question + chitchat|60|what are you holding?;thanks;|;"
 
 
@@ -99,6 +106,13 @@ def test_load_rejects(tmp_path, body, err):
     p = _yaml(tmp_path, f"steps:\n  - id: 1\n    title: t\n    lines: [a]\n    {body}\n")
     with pytest.raises(Exception, match=err):
         ds.load(p)
+
+
+def test_load_groot_setting(tmp_path):
+    step = "  - id: 1\n    lines: [a]\n    pass: {rule: note_saved}\n"
+    assert ds.load(_yaml(tmp_path, "defaults: {groot: on}\nsteps:\n" + step)).groot == "on"
+    with pytest.raises(ValueError, match="groot must be off or on"):
+        ds.load(_yaml(tmp_path, "defaults: {groot: maybe}\nsteps:\n" + step))
 
 
 def test_load_rejects_repeated_ids_and_no_lines(tmp_path):
@@ -212,3 +226,30 @@ def test_cli(tmp_path, capsys):
     assert ds.main(["list"]) == 0 and capsys.readouterr().out.startswith("1  memory note")
     assert ds.main(["json"]) == 0 and len(json.loads(capsys.readouterr().out)["steps"]) == 9
     assert ds.main(["nope"]) == 2
+
+
+# ---------------------------------------------------------------------------------------------- scripts/demo.sh
+def _demo_sh(*args: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "WL": str(ROOT), "PY_RT": sys.executable}
+    return subprocess.run([BASH, str(DEMO_SH), *args], env=env, capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.skipif(BASH is None, reason="no bash")
+def test_demo_sh_lists_the_shared_steps():
+    subprocess.run([BASH, "-n", str(DEMO_SH)], check=True)
+    out = _demo_sh("--list")
+    assert out.returncode == 0 and out.stdout.rstrip("\n") == ds.listing(ds.load())
+    assert _demo_sh("--help").stdout.startswith("# The Worldline-on-G1 demo")
+
+
+@pytest.mark.skipif(BASH is None, reason="no bash")
+def test_demo_sh_rejects_a_step_not_in_the_list():
+    out = _demo_sh("--only", "3,42", "--no-lock")          # checked before anything runs (no run dir, no lock)
+    assert out.returncode == 2 and "no step 42" in out.stderr
+
+
+def test_demo_sh_keeps_no_step_list_or_judge_of_its_own():
+    text = DEMO_SH.read_text()
+    assert "-m tools.demo_steps bash" in text and "-m tools.demo_steps results" in text
+    for gone in ("NSTEPS=9", "def j8", "JUDGE = ", "NAMES = ", "<<'EOF'", "my keys are usually"):
+        assert gone not in text, gone
