@@ -86,6 +86,8 @@ class StackLock:
             self.path.mkdir()
         except FileExistsError:
             who = self.holder() or "?"
+            if who.split()[0] == FRESH_OWNER:
+                return False, "the stack restart is still finishing (stack lock ui-demo-fresh): try again in a moment"
             if who.split()[0] != self.owner:
                 return False, (f"the stack lock is held by '{who}': someone is using the stack "
                                f"(wait, or if it is stale: rm -rf {self.path})")
@@ -227,10 +229,13 @@ def run_script(args: list[str], timeout: float) -> int:
         return 127
 
 
+P5_ONLY_ENV = ("TMUX", "TMUX_PANE", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+
 def spawn_detached(cmd: str, log: Path) -> subprocess.Popen:
-    """bash -c cmd under nohup in a new session (setsid), so it outlives P5 (m2_down.sh stops P5 first). tmux's
-    variables are dropped: the helper must not act as if it ran inside P5's pane."""
-    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    """bash -c cmd under nohup in a new session (setsid), so it outlives P5 (m2_down.sh stops P5 first). Without P5's
+    own settings: tmux's variables (the helper is not in P5's pane) and m2_p5.sh's thread caps."""
+    env = {k: v for k, v in os.environ.items() if k not in P5_ONLY_ENV}
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as fh:
         return subprocess.Popen(["nohup", "bash", "-c", cmd], cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=fh,
@@ -592,12 +597,15 @@ class DemoRunner:
         if profile == "full" and (self.demo is None or self.demo.groot == "off"):
             up += " --groot off"       # as scripts/demo.sh --fresh: a GR00T link that is down cannot stop the restart
         body = f"bash scripts/m2_down.sh --session {q(session)} && {up}"
+        # P5 runs under m2_p5.sh's taskset (CPUs 4-15): the restart starts from all CPUs, as from an ssh shell
+        body = ("command -v taskset >/dev/null && command -v nproc >/dev/null && "
+                "taskset -cp \"0-$(( $(nproc --all) - 1 ))\" $$ >/dev/null 2>&1; " + body)
         lock = StackLock.for_profile(profile) if self._lock is None else self._lock
         if lock.path is None:
             return f"echo \"[ui-demo] fresh restart $(date)\"; {body}"
         p = q(str(lock.path))
         return (f"echo \"[ui-demo] fresh restart $(date)\"; mkdir -p {q(str(lock.path.parent))}; "
-                f"case \"$(awk '{{print $1}}' {p}/owner 2>/dev/null)\" in {OWNER}*) rm -rf {p};; esac; "
+                f"case \"$(awk '{{print $1}}' {p}/owner 2>/dev/null)\" in {OWNER}) rm -rf {p};; esac; "
                 f"if mkdir {p} 2>/dev/null; then echo \"{FRESH_OWNER} $(date +%s)\" > {p}/owner; trap 'rm -rf {p}' EXIT; "
                 f"else echo \"[ui-demo] the stack lock is held by '$(cat {p}/owner 2>/dev/null)': not restarting\"; "
                 f"exit 4; fi; {body}")
@@ -610,7 +618,9 @@ class DemoRunner:
             raise ValueError("a demo is running: Stop it first")
         lock = StackLock.for_profile(self.host.profile()) if self._lock is None else self._lock
         who = lock.holder()
-        if who and not who.startswith(OWNER):
+        if who and who.split()[0] == FRESH_OWNER:
+            raise ValueError("a stack restart is already running (stack lock ui-demo-fresh)")
+        if who and who.split()[0] != OWNER:
             raise ValueError(f"the stack lock is held by '{who}': someone is using the stack, not restarting it")
         cmd = self.fresh_command()
         log = self.out_dir / f"fresh-{time.strftime('%Y%m%d-%H%M%S')}.log"

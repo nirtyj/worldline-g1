@@ -529,6 +529,11 @@ def test_fresh_refused_while_running_or_locked(tmp_path):
     (lock / "owner").write_text("ops 1\n")
     with pytest.raises(ValueError, match="held by 'ops 1'"):
         r.fresh()
+    (lock / "owner").write_text("ui-demo-fresh 1\n")                 # a restart is still finishing
+    with pytest.raises(ValueError, match="restart is already running"):
+        r.fresh()
+    ok, why = StackLock(lock).acquire()
+    assert not ok and "restart is still finishing" in why and (lock / "owner").read_text().startswith("ui-demo-fresh")
 
 
 @pytest.mark.skipif(not Path("/bin/bash").exists(), reason="no bash")
@@ -546,6 +551,12 @@ def test_fresh_command_runs_the_lock_dance(tmp_path):
     (tmp_path / "locks" / "stack.d" / "owner").write_text("ops 1\n")
     out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     assert out.returncode == 4 and "DOWN" not in out.stdout and "held by 'ops 1'" in out.stdout
+    (tmp_path / "locks" / "stack.d" / "owner").write_text("ui-demo-fresh 1\n")   # never takes over a running restart
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert out.returncode == 4 and "DOWN" not in out.stdout
+    (tmp_path / "locks" / "stack.d" / "owner").write_text("ui-demo 1\n")         # a run's lock left by a dead P5: taken
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert out.returncode == 0 and "DOWN" in out.stdout and not (tmp_path / "locks" / "stack.d").exists()
 
 
 # ---------------------------------------------------------------------------------------------- the websocket protocol
