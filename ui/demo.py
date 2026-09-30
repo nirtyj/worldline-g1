@@ -596,7 +596,12 @@ class DemoRunner:
               f"--session {q(session)}" + (f" --port-offset {offset}" if offset else ""))
         if profile == "full" and (self.demo is None or self.demo.groot == "off"):
             up += " --groot off"       # as scripts/demo.sh --fresh: a GR00T link that is down cannot stop the restart
-        body = f"bash scripts/m2_down.sh --session {q(session)} && {up}"
+        # as scripts/demo.sh --fresh: the house's spatial memory goes to runs/memory_backup/, so the demo starts knowing
+        # nothing (a previous demo leaves 'bottle_1: held' in it, which survives a restart)
+        mem = f"runs/memory/{scene}.json"
+        backup = (f"if [ -f {q(mem)} ]; then mkdir -p runs/memory_backup && "
+                  f"mv {q(mem)} runs/memory_backup/{q(scene)}-$(date +%Y%m%d-%H%M%S).json; fi")
+        body = f"bash scripts/m2_down.sh --session {q(session)} && {backup} && {up}"
         # P5 runs under m2_p5.sh's taskset (CPUs 4-15): the restart starts from all CPUs, as from an ssh shell
         body = ("command -v taskset >/dev/null && command -v nproc >/dev/null && "
                 "taskset -cp \"0-$(( $(nproc --all) - 1 ))\" $$ >/dev/null 2>&1; " + body)

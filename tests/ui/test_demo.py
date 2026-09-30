@@ -499,7 +499,11 @@ def test_fresh_spawns_the_restart_under_the_lock(tmp_path, monkeypatch):
 
     run(go())
     (cmd, log), = spawned
-    assert ("bash scripts/m2_down.sh --session wl-m2 && bash scripts/m2_up.sh --profile sonic "
+    assert "bash scripts/m2_down.sh --session wl-m2 && " in cmd
+    assert ("mv runs/memory/procthor-train-40.json runs/memory_backup/procthor-train-40-" in cmd
+            and cmd.index("m2_down.sh") < cmd.index("memory_backup") < cmd.index("m2_up.sh")), \
+        "the house memory is backed up between the stop and the start, as scripts/demo.sh --fresh"
+    assert ("bash scripts/m2_up.sh --profile sonic "
             "--scene procthor-train-40 --viz low --p5-port 8766 --session wl-m2") in cmd
     assert "ui-demo-fresh" in cmd and "trap" in cmd and str(tmp_path / "locks" / "stack.d") in cmd
     assert "--groot" not in cmd, "sonic has no GR00T"
